@@ -66,15 +66,15 @@ class OverlayService : Service() {
     private fun showTrash(active: Boolean) {
         if (trash != null) return
         val target = TextView(this).apply {
-            text = "✕  Solte aqui para remover"
-            textSize = 16f
+            text = "✕"
+            textSize = 28f
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
             background = tileBackground(Color.rgb(239, 70, 85))
         }
         val screen = screenSize()
         try {
-            manager.addView(target, params((screen.x - dp(32)).coerceAtLeast(dp(100)), dp(76),
+            manager.addView(target, params(dp(76), dp(76),
                 Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
                 y = dp(32)
                 flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
@@ -87,6 +87,17 @@ class OverlayService : Service() {
     private fun hideTrash() {
         trash?.let { try { manager.removeView(it) } catch (_: RuntimeException) {} }
         trash = null
+    }
+
+    private fun isOverTrash(rawX: Float, rawY: Float): Boolean {
+        val target = trash ?: return false
+        val location = IntArray(2)
+        target.getLocationOnScreen(location)
+        val tolerance = dp(28)
+        return rawX >= location[0] - tolerance &&
+            rawX <= location[0] + target.width + tolerance &&
+            rawY >= location[1] - tolerance &&
+            rawY <= location[1] + target.height + tolerance
     }
 
     private fun showBubble() {
@@ -129,14 +140,12 @@ class OverlayService : Service() {
                             layout.x = (startX + dx.toInt()).coerceIn(0, maxX)
                             layout.y = (startY + dy.toInt()).coerceIn(0, maxY)
                             manager.updateViewLayout(view, layout)
-                            trash?.alpha = if (event.rawY >= screen.y - dp(125) &&
-                                event.rawX >= dp(16) && event.rawX <= screen.x - dp(16)) 1f else 0.75f
+                            trash?.alpha = if (isOverTrash(event.rawX, event.rawY)) 1f else 0.75f
                         }
                         true
                     }
                     MotionEvent.ACTION_UP -> {
-                        val remove = dragging && event.rawY >= screen.y - dp(125) &&
-                            event.rawX >= dp(16) && event.rawX <= screen.x - dp(16)
+                        val remove = dragging && isOverTrash(event.rawX, event.rawY)
                         hideTrash()
                         if (remove) {
                             stopSelf()
