@@ -25,6 +25,8 @@ import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.os.Message
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
+import android.content.Context
 
 class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("buttons", MODE_PRIVATE) }
@@ -81,6 +83,7 @@ class MainActivity : Activity() {
                 val popup = WebView(this@MainActivity)
                 popup.settings.javaScriptEnabled = true
                 popup.settings.domStorageEnabled = true
+                CookieManager.getInstance().setAcceptThirdPartyCookies(popup, true)
                 popup.isFocusable = true
                 popup.isFocusableInTouchMode = true
                 popup.webViewClient = WebViewClient()
@@ -93,12 +96,25 @@ class MainActivity : Activity() {
                 val dialog = AlertDialog.Builder(this@MainActivity).setView(popup)
                     .setNegativeButton("Fechar") { _, _ -> verifyLogin() }.create()
                 dialog.setOnDismissListener { verifyLogin() }
-                dialog.show()
                 dialog.window?.setSoftInputMode(
                     WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
                         WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
                 )
-                popup.requestFocus()
+                dialog.show()
+                dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+                dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                popup.requestFocus(View.FOCUS_DOWN)
+                popup.setOnTouchListener { web, event ->
+                    if (event.action == android.view.MotionEvent.ACTION_UP) {
+                        web.requestFocus()
+                        web.postDelayed({
+                            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                            imm.showSoftInput(web, InputMethodManager.SHOW_IMPLICIT)
+                        }, 120)
+                    }
+                    false
+                }
                 val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
                 transport.webView = popup
                 resultMsg.sendToTarget()
