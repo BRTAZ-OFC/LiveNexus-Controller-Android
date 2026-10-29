@@ -13,6 +13,7 @@ import android.widget.*
 class OverlayService : Service() {
     private lateinit var manager: WindowManager
     private var bubble: View? = null
+    private var trash: View? = null
     private var panel: View? = null
     private val channel = "controller_overlay"
     private val prefs by lazy { getSharedPreferences("buttons", MODE_PRIVATE) }
@@ -59,18 +60,45 @@ class OverlayService : Service() {
         return START_NOT_STICKY
     }
 
+    private fun screenSize(): android.graphics.Point =
+        android.graphics.Point().also { manager.defaultDisplay.getRealSize(it) }
+
+    private fun showTrash(active: Boolean) {
+        if (trash != null) return
+        val target = TextView(this).apply {
+            text = "✕  Solte aqui para remover"
+            textSize = 16f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            background = tileBackground(Color.rgb(239, 70, 85))
+        }
+        val screen = screenSize()
+        try {
+            manager.addView(target, params((screen.x - dp(32)).coerceAtLeast(dp(100)), dp(76),
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                y = dp(32)
+                flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            })
+            trash = target
+            target.alpha = if (active) 1f else 0.85f
+        } catch (_: RuntimeException) { trash = null }
+    }
+
+    private fun hideTrash() {
+        trash?.let { try { manager.removeView(it) } catch (_: RuntimeException) {} }
+        trash = null
+    }
+
     private fun showBubble() {
         val size = dp(56)
-        val metrics = resources.displayMetrics
-        val maxX = (metrics.widthPixels - size).coerceAtLeast(0)
-        val maxY = (metrics.heightPixels - size).coerceAtLeast(0)
-        val savedX = prefs.getInt("bubble_x", maxX - dp(12))
-        val savedY = prefs.getInt("bubble_y", maxY / 2)
-        val layout = params(size, size, Gravity.TOP or Gravity.START).apply {
-            x = savedX.coerceIn(0, maxX)
-            y = savedY.coerceIn(0, maxY)
+        val screen = screenSize()
+        val maxX = (screen.x - size).coerceAtLeast(0)
+        val maxY = (screen.y - size).coerceAtLeast(0)
+        val layout = params(size, size, Gravity.TOP or Gravity.LEFT).apply {
+            x = prefs.getInt("bubble_x", maxX - dp(12)).coerceIn(0, maxX)
+            y = prefs.getInt("bubble_y", maxY / 2).coerceIn(0, maxY)
         }
-        val touchSlop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
         var downRawX = 0f
         var downRawY = 0f
         var startX = 0
@@ -82,37 +110,45 @@ class OverlayService : Service() {
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
             background = tileBackground(Color.rgb(43, 205, 239))
-            setOnTouchListener { _, event ->
+            setOnTouchListener { view, event ->
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
-                        downRawX = event.rawX
-                        downRawY = event.rawY
-                        startX = layout.x
-                        startY = layout.y
+                        downRawX = event.rawX; downRawY = event.rawY
+                        startX = layout.x; startY = layout.y
                         dragging = false
                         true
                     }
                     MotionEvent.ACTION_MOVE -> {
                         val dx = event.rawX - downRawX
                         val dy = event.rawY - downRawY
-                        if (!dragging && (kotlin.math.abs(dx) > touchSlop || kotlin.math.abs(dy) > touchSlop)) dragging = true
+                        if (!dragging && (kotlin.math.abs(dx) > touchSlop || kotlin.math.abs(dy) > touchSlop)) {
+                            dragging = true
+                            showTrash(false)
+                        }
                         if (dragging) {
                             layout.x = (startX + dx.toInt()).coerceIn(0, maxX)
                             layout.y = (startY + dy.toInt()).coerceIn(0, maxY)
-                            manager.updateViewLayout(this, layout)
+                            manager.updateViewLayout(view, layout)
+                            trash?.alpha = if (event.rawY >= screen.y - dp(125) &&
+                                event.rawX >= dp(16) && event.rawX <= screen.x - dp(16)) 1f else 0.75f
                         }
                         true
                     }
                     MotionEvent.ACTION_UP -> {
-                        if (dragging) {
+                        val remove = dragging && event.rawY >= screen.y - dp(125) &&
+                            event.rawX >= dp(16) && event.rawX <= screen.x - dp(16)
+                        hideTrash()
+                        if (remove) {
+                            stopSelf()
+                        } else if (dragging) {
                             prefs.edit().putInt("bubble_x", layout.x).putInt("bubble_y", layout.y).apply()
                         } else {
-                            performClick()
+                            view.performClick()
                             showPanel()
                         }
                         true
                     }
-                    MotionEvent.ACTION_CANCEL -> true
+                    MotionEvent.ACTION_CANCEL -> { hideTrash(); true }
                     else -> false
                 }
             }
@@ -120,9 +156,7 @@ class OverlayService : Service() {
         try {
             manager.addView(button, layout)
             bubble = button
-        } catch (_: RuntimeException) {
-            stopSelf()
-        }
+        } catch (_: RuntimeException) { stopSelf() }
     }
 
     private fun showPanel() {
@@ -217,6 +251,7 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        hideTrash()
         panel?.let { manager.removeView(it) }
         panel = null
         bubble?.let { manager.removeView(it) }
