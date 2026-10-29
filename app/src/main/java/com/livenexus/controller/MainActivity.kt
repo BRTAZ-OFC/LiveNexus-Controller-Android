@@ -61,7 +61,7 @@ class MainActivity : Activity() {
         status = text("●", 13f, cyan).apply { gravity = Gravity.CENTER; background = shape(Color.rgb(20, 31, 48)) }
         header.addView(status, LinearLayout.LayoutParams(dp(52), dp(42)))
         root.addView(header)
-        val content = ScrollView(this).apply { fillViewport = true }
+        val content = ScrollView(this).apply { isFillViewport = true }
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(13), dp(10), dp(13), dp(16)) }
         when (page) {
             0 -> {
