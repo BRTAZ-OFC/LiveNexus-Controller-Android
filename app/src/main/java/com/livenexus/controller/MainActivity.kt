@@ -203,6 +203,7 @@ class MainActivity : Activity() {
                         elevation = dp(5).toFloat(); isClickable = true
                         setOnClickListener {
                             if (i == 0) showPlayer()
+                            else if (i < 3) showConnectionMessage("Ação ainda não conectada: ${name(i)}")
                             else showConfiguredControl(i)
                         }
                         setOnLongClickListener { if (i >= 3) configureControl(i) else if (i == 2) showConnectionMessage("Reload RTC: aguardando mapeamento do comando existente."); true }
