@@ -82,6 +82,16 @@ class MainActivity : Activity() {
             }
         }
         browser.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val destination = request?.url ?: return false
+                val root = Uri.parse(LiveNexusApi.baseUrl)
+                if (destination.scheme == root.scheme && destination.host == root.host &&
+                    destination.path == "/" && !authenticated) {
+                    verifyLogin()
+                    return true
+                }
+                return false
+            }
             override fun onPageFinished(view: WebView?, url: String?) {
                 if (url?.startsWith(LiveNexusApi.baseUrl) != true) return
                 view?.evaluateJavascript(
