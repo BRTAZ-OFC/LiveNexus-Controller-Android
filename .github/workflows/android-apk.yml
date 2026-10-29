@@ -22,6 +22,8 @@ jobs:
           java-version: '17'
       - name: Configurar Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: ''
       - name: Instalar Android SDK 35
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - name: Configurar Gradle 8.7
