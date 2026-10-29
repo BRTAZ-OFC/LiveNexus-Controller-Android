@@ -269,7 +269,7 @@ class OverlayService : Service() {
         }
     }
 
-    private fun showAddScenarioMenu() {
+    private fun showAddControlMenu() {
         AlertDialog.Builder(this).setTitle("Adicionar controle")
             .setItems(arrayOf("Cenário", "Overlay")) { _, selected ->
                 val current = prefs.getInt("scenario_count", 0).coerceIn(0, 57)
