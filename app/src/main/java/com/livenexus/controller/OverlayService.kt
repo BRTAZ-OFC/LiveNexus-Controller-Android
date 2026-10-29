@@ -229,7 +229,10 @@ class OverlayService : Service() {
         val count = 3 + prefs.getInt("scenario_count", 0).coerceIn(0, 57)
         val defaults = listOf("Música", "Câmera", "Reload RTC")
         for (i in 0 until count) {
-            val label = if (i < 3) defaults[i] else prefs.getString("scenario_${i - 3}", "Cenário ${i - 2}") ?: "Cenário ${i - 2}"
+            val label = if (i < 3) defaults[i] else {
+                val kind = prefs.getString("control_type_${i - 3}", "Cenário") ?: "Cenário"
+                prefs.getString("scenario_${i - 3}", "$kind ${i - 2}") ?: "$kind ${i - 2}"
+            }
             val tile = TextView(this).apply {
                 text = "◆\\n$label".replace("\\n", "\n")
                 textSize = 12f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
@@ -267,11 +270,12 @@ class OverlayService : Service() {
 
     private fun showAddScenarioMenu() {
         AlertDialog.Builder(this).setTitle("Adicionar controle")
-            .setItems(arrayOf("Cenário")) { _, _ ->
+            .setItems(arrayOf("Cenário", "Overlay")) { _, selected ->
                 val current = prefs.getInt("scenario_count", 0).coerceIn(0, 57)
                 if (current >= 57) Toast.makeText(this, "Limite de 60 controles", Toast.LENGTH_SHORT).show()
                 else {
-                    prefs.edit().putInt("scenario_count", current + 1).apply()
+                    prefs.edit().putString("control_type_$current", if (selected == 0) "Cenário" else "Overlay")
+                        .putInt("scenario_count", current + 1).apply()
                     hidePanel()
                     showPanel()
                 }
