@@ -235,7 +235,14 @@ class OverlayService : Service() {
                 prefs.getString("scenario_${i - 3}", "$kind ${i - 2}") ?: "$kind ${i - 2}"
             }
             val tile = TextView(this).apply {
-                text = "◆\\n$label".replace("\\n", "\n")
+                val icon = if (i < 3) listOf("♫", "▣", "↻")[i] else when (controlType(i - 3)) {
+                    "Contador +1" -> "+"
+                    "Contador -1" -> "−"
+                    "Zerar contador" -> "⟲"
+                    "Chat" -> "💬"
+                    else -> "◆"
+                }
+                text = "$icon\n$label"
                 textSize = 12f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
                 background = tileBackground()
                 setOnClickListener {
