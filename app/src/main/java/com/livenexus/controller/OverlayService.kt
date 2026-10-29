@@ -4,6 +4,7 @@ import android.app.*
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.IBinder
 import android.provider.Settings
 import android.view.*
@@ -14,6 +15,10 @@ class OverlayService : Service() {
     private var bubble: View? = null
     private var panel: View? = null
     private val channel = "controller_overlay"
+    private val prefs by lazy { getSharedPreferences("buttons", MODE_PRIVATE) }
+    private fun tileBackground(accent: Int = Color.rgb(55, 88, 120)) = GradientDrawable().apply {
+        setColor(Color.rgb(19, 29, 45)); cornerRadius = dp(15).toFloat(); setStroke(dp(1), accent)
+    }
 
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
 
@@ -60,7 +65,7 @@ class OverlayService : Service() {
             textSize = 17f
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.rgb(28, 116, 158))
+            background = tileBackground(Color.rgb(43, 205, 239))
             setOnClickListener { showPanel() }
         }
         try {
@@ -93,21 +98,37 @@ class OverlayService : Service() {
             setOnClickListener { hidePanel() }
         })
         root.addView(header)
-        val grid = GridLayout(this).apply { columnCount = 2 }
-        val prefs = getSharedPreferences("buttons", MODE_PRIVATE)
-        for (i in 0 until 8) {
-            grid.addView(Button(this).apply {
-                text = prefs.getString("button_$i", "Botão ${i + 1}")
-                isAllCaps = false
-            }, GridLayout.LayoutParams().apply {
-                width = 0
-                height = dp(66)
-                columnSpec = GridLayout.spec(i % 2, 1f)
-                rowSpec = GridLayout.spec(i / 2)
-                setMargins(dp(2), dp(2), dp(2), dp(2))
+        val grid = GridLayout(this).apply { columnCount = 3 }
+        val count = prefs.getInt("button_count", 8).coerceIn(1, 60)
+        val defaults = listOf("Microfone", "Câmera", "Cena 1", "Cena 2", "Chat", "Música", "Gravar", "Mutar", "Voltar")
+        for (i in 0 until count) {
+            val label = prefs.getString("button_$i", defaults.getOrElse(i) { "Botão ${i + 1}" }) ?: "Botão ${i + 1}"
+            val tile = TextView(this).apply {
+                text = "◆\\n$label".replace("\\n", "\n")
+                textSize = 12f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
+                background = tileBackground()
+                setOnClickListener {
+                    if (label.equals("Música", true)) showMiniPlayer()
+                    else Toast.makeText(this@OverlayService, "Ação ainda não conectada: $label", Toast.LENGTH_SHORT).show()
+                }
+            }
+            grid.addView(tile, GridLayout.LayoutParams().apply {
+                width = 0; height = dp(88); columnSpec = GridLayout.spec(i % 3, 1f)
+                rowSpec = GridLayout.spec(i / 3); setMargins(dp(3), dp(3), dp(3), dp(3))
             })
         }
-        root.addView(grid)
+        grid.addView(TextView(this).apply {
+            text = "＋\\nAdicionar".replace("\\n", "\n"); gravity = Gravity.CENTER; textSize = 12f
+            setTextColor(Color.rgb(43, 205, 239)); background = tileBackground(Color.rgb(43, 205, 239))
+            setOnClickListener {
+                if (count < 60) { prefs.edit().putInt("button_count", count + 1).apply(); hidePanel(); showPanel() }
+                else Toast.makeText(this@OverlayService, "Limite de 60 botões", Toast.LENGTH_SHORT).show()
+            }
+        }, GridLayout.LayoutParams().apply {
+            width = 0; height = dp(88); columnSpec = GridLayout.spec(count % 3, 1f)
+            rowSpec = GridLayout.spec(count / 3); setMargins(dp(3), dp(3), dp(3), dp(3))
+        })
+        root.addView(ScrollView(this).apply { addView(grid) }, LinearLayout.LayoutParams(-1, dp(350)))
         val width = minOf(dp(340), resources.displayMetrics.widthPixels - dp(24))
         try {
             manager.addView(root, params(width, WindowManager.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
@@ -116,6 +137,31 @@ class OverlayService : Service() {
         } catch (_: RuntimeException) {
             panel = null
         }
+    }
+
+    private fun showMiniPlayer() {
+        hidePanel()
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = tileBackground(Color.rgb(43, 205, 239))
+        }
+        root.addView(TextView(this).apply {
+            text = "♫  LiveNexus • Player"; textSize = 18f; setTextColor(Color.WHITE)
+        })
+        root.addView(TextView(this).apply {
+            text = "Nenhuma música conectada\\n\\n◀      ▶      ▶▶      🔊\\n\\nAguardando integração com o LiveNexus"
+                .replace("\\n", "\n")
+            textSize = 14f; setTextColor(Color.LTGRAY); gravity = Gravity.CENTER
+            setPadding(0, dp(16), 0, dp(16))
+        })
+        root.addView(Button(this).apply {
+            text = "Voltar ao painel"; setOnClickListener { hidePanel(); showPanel() }
+        })
+        val width = minOf(dp(340), resources.displayMetrics.widthPixels - dp(24))
+        try {
+            manager.addView(root, params(width, WindowManager.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+            panel = root; bubble?.visibility = View.GONE
+        } catch (_: RuntimeException) { panel = null; bubble?.visibility = View.VISIBLE }
     }
 
     private fun hidePanel() {
