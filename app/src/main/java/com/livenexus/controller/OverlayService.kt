@@ -226,10 +226,10 @@ class OverlayService : Service() {
         })
         root.addView(header)
         val grid = GridLayout(this).apply { columnCount = 3 }
-        val count = prefs.getInt("button_count", 8).coerceIn(1, 60)
-        val defaults = listOf("Microfone", "Câmera", "Cena 1", "Cena 2", "Chat", "Música", "Gravar", "Mutar", "Voltar")
+        val count = 3 + prefs.getInt("scenario_count", 0).coerceIn(0, 57)
+        val defaults = listOf("Música", "Câmera", "Reload RTC")
         for (i in 0 until count) {
-            val label = prefs.getString("button_$i", defaults.getOrElse(i) { "Botão ${i + 1}" }) ?: "Botão ${i + 1}"
+            val label = if (i < 3) defaults[i] else prefs.getString("scenario_${i - 3}", "Cenário ${i - 2}") ?: "Cenário ${i - 2}"
             val tile = TextView(this).apply {
                 text = "◆\\n$label".replace("\\n", "\n")
                 textSize = 12f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
@@ -248,8 +248,7 @@ class OverlayService : Service() {
             text = "＋\\nAdicionar".replace("\\n", "\n"); gravity = Gravity.CENTER; textSize = 12f
             setTextColor(Color.rgb(43, 205, 239)); background = tileBackground(Color.rgb(43, 205, 239))
             setOnClickListener {
-                if (count < 60) { prefs.edit().putInt("button_count", count + 1).apply(); hidePanel(); showPanel() }
-                else Toast.makeText(this@OverlayService, "Limite de 60 botões", Toast.LENGTH_SHORT).show()
+                showAddScenarioMenu()
             }
         }, GridLayout.LayoutParams().apply {
             width = 0; height = dp(88); columnSpec = GridLayout.spec(count % 3, 1f)
@@ -264,6 +263,23 @@ class OverlayService : Service() {
         } catch (_: RuntimeException) {
             panel = null
         }
+    }
+
+    private fun showAddScenarioMenu() {
+        AlertDialog.Builder(this).setTitle("Adicionar controle")
+            .setItems(arrayOf("Cenário")) { _, _ ->
+                val current = prefs.getInt("scenario_count", 0).coerceIn(0, 57)
+                if (current >= 57) Toast.makeText(this, "Limite de 60 controles", Toast.LENGTH_SHORT).show()
+                else {
+                    prefs.edit().putInt("scenario_count", current + 1).apply()
+                    hidePanel()
+                    showPanel()
+                }
+            }.setNegativeButton("Cancelar", null)
+            .create().apply {
+                window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+                show()
+            }
     }
 
     private fun showMiniPlayer() {
