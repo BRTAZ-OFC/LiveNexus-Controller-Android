@@ -24,10 +24,9 @@ class MainActivity : Activity() {
     private fun shape(color: Int, stroke: Int = Color.rgb(47, 67, 89)) = GradientDrawable().apply {
         setColor(color); cornerRadius = dp(17).toFloat(); setStroke(dp(1), stroke)
     }
-    private fun count() = prefs.getInt("button_count", 8).coerceIn(1, 60)
-    private val icons = listOf("🎙", "▣", "▤", "▤", "☏", "♫", "⏺", "◉", "↩")
-    private val names = listOf("Microfone", "Câmera", "Cena 1", "Cena 2", "Chat", "Música", "Gravar", "Mutar", "Voltar")
-    private fun name(i: Int) = prefs.getString("button_$i", names.getOrElse(i) { "Botão ${i + 1}" }) ?: "Botão ${i + 1}"
+    private fun count() = prefs.getInt("scenario_count", 0).coerceIn(0, 57)
+    private fun name(i: Int) = if (i < 3) listOf("Música", "Câmera", "Reload RTC")[i]
+        else prefs.getString("scenario_${i - 3}", "Cenário ${i - 2}") ?: "Cenário ${i - 2}"
     private fun text(value: String, size: Float, color: Int = Color.WHITE) = TextView(this).apply {
         text = value; textSize = size; setTextColor(color); gravity = Gravity.CENTER_VERTICAL
     }
@@ -38,7 +37,7 @@ class MainActivity : Activity() {
     private val purple = Color.rgb(162, 95, 255)
     private val red = Color.rgb(245, 65, 105)
     private var page = 0
-    private fun accent(i: Int) = when (i) { 2, 3, 7 -> purple; 6 -> red; else -> cyan }
+    private fun accent(i: Int) = if (i >= 2) purple else cyan
     private fun tileStyle(accent: Int): android.graphics.drawable.Drawable {
         val outer = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Color.rgb(45, 65, 89), Color.rgb(9, 16, 27))).apply {
             cornerRadius = dp(18).toFloat(); setStroke(dp(1), Color.rgb(58, 83, 112))
@@ -66,7 +65,7 @@ class MainActivity : Activity() {
         when (page) {
             0 -> {
                 val grid = GridLayout(this).apply { columnCount = 3 }
-                val total = count()
+                val total = 3 + count()
                 val w = ((resources.displayMetrics.widthPixels - dp(32)) / 3) - dp(6)
                 for (i in 0 until total) {
                     val color = accent(i)
@@ -74,12 +73,12 @@ class MainActivity : Activity() {
                         orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; background = tileStyle(color)
                         elevation = dp(5).toFloat(); isClickable = true
                         setOnClickListener {
-                            if (name(i).equals("Música", true)) showPlayer()
+                            if (i == 0) showPlayer()
                             else Toast.makeText(this@MainActivity, "Ação ainda não conectada: ${name(i)}", Toast.LENGTH_SHORT).show()
                         }
-                        setOnLongClickListener { editLabel(i); true }
+                        setOnLongClickListener { if (i >= 3) editLabel(i); true }
                     }
-                    val icon = listOf("♩", "▣", "▱", "▱", "☏", "♫", "⏺", "◉", "↶").getOrElse(i) { "◇" }
+                    val icon = listOf("♫", "▣", "↻").getOrElse(i) { "▱" }
                     tile.addView(text(icon, 41f, color).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, dp(65)))
                     tile.addView(text(name(i), 13f).apply { gravity = Gravity.CENTER; setTypeface(null, Typeface.BOLD); maxLines = 2 })
                     grid.addView(tile, GridLayout.LayoutParams().apply {
@@ -90,8 +89,7 @@ class MainActivity : Activity() {
                 val add = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; background = tileStyle(cyan)
                     setOnClickListener {
-                        if (count() >= 60) Toast.makeText(this@MainActivity, "Limite de 60 botões", Toast.LENGTH_SHORT).show()
-                        else { prefs.edit().putInt("button_count", count() + 1).apply(); render() }
+                        showAddMenu()
                     }
                 }
                 add.addView(text("+", 49f, cyan).apply { gravity = Gravity.CENTER })
@@ -144,6 +142,16 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this).setTitle("LiveNexus Controller")
             .setItems(arrayOf("Sobreposição", "Perfis", "Configurações")) { _, which -> page = which; render() }.show()
     }
+    private fun showAddMenu() {
+        AlertDialog.Builder(this).setTitle("Adicionar controle")
+            .setItems(arrayOf("Cenário")) { _, _ ->
+                if (count() >= 57) Toast.makeText(this, "Limite de 60 controles", Toast.LENGTH_SHORT).show()
+                else {
+                    prefs.edit().putInt("scenario_count", count() + 1).apply()
+                    render()
+                }
+            }.setNegativeButton("Cancelar", null).show()
+    }
     private fun editLabel(i: Int) {
         val field = EditText(this).apply { setSingleLine(true); setText(name(i)); selectAll() }
         val holder = FrameLayout(this).apply { setPadding(dp(16), 0, dp(16), 0); addView(field) }
@@ -151,7 +159,7 @@ class MainActivity : Activity() {
             .setNegativeButton("Cancelar", null)
             .setPositiveButton("Salvar") { _, _ ->
                 val value = field.text.toString().trim()
-                if (value.length in 1..30) { prefs.edit().putString("button_$i", value).apply(); render() }
+                if (value.length in 1..30) { prefs.edit().putString("scenario_${i - 3}", value).apply(); render() }
                 else Toast.makeText(this, "Use de 1 a 30 caracteres", Toast.LENGTH_SHORT).show()
             }.show()
     }
