@@ -21,6 +21,7 @@ import android.webkit.WebViewClient
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.os.Message
 
 class MainActivity : Activity() {
@@ -44,10 +45,15 @@ class MainActivity : Activity() {
         showLogin()
     }
 
+    private inner class LoginBridge {
+        @JavascriptInterface fun authenticated() { runOnUiThread { verifyLogin() } }
+    }
+
     private fun showLogin() {
         authenticated = false
         val browser = WebView(this)
         browser.settings.javaScriptEnabled = true
+        browser.addJavascriptInterface(LoginBridge(), "AndroidLogin")
         browser.settings.domStorageEnabled = true
         browser.settings.javaScriptCanOpenWindowsAutomatically = true
         browser.settings.setSupportMultipleWindows(true)
@@ -84,6 +90,15 @@ class MainActivity : Activity() {
                         const css=document.createElement('style');
                         css.textContent='.auth-footer,.auth-back-link{display:none!important}';
                         document.head.appendChild(css);
+                      }
+                      if(!window.__lnAuthCheck){
+                        window.__lnAuthCheck=setInterval(async function(){
+                          try {
+                            const r=await fetch('/api/auth/session',{credentials:'include',cache:'no-store'});
+                            const d=await r.json();
+                            if(d.ok && d.user && d.user.user_id) AndroidLogin.authenticated();
+                          } catch(e) {}
+                        },1500);
                       }
                     })();""", null
                 )
