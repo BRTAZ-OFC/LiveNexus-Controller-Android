@@ -84,7 +84,7 @@ class MainActivity : Activity() {
         browser.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 if (url?.startsWith(LiveNexusApi.baseUrl) != true) return
-                view.evaluateJavascript(
+                view?.evaluateJavascript(
                     """(function(){
                       if(location.pathname.startsWith('/login')){
                         const css=document.createElement('style');
