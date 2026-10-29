@@ -46,7 +46,22 @@ class MainActivity : Activity() {
     }
 
     private inner class LoginBridge {
-        @JavascriptInterface fun authenticated() { runOnUiThread { verifyLogin() } }
+        @JavascriptInterface fun authenticated(token: String) {
+            if (token.isBlank() || authenticated) return
+            Thread {
+                try {
+                    LiveNexusApi.acceptWebToken(token)
+                    runOnUiThread {
+                        if (!authenticated) {
+                            authenticated = true
+                            render()
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Sessao invalida: manter login.
+                }
+            }.start()
+        }
     }
 
     private fun showLogin() {
@@ -87,7 +102,7 @@ class MainActivity : Activity() {
                 val root = Uri.parse(LiveNexusApi.baseUrl)
                 if (destination.scheme == root.scheme && destination.host == root.host &&
                     destination.path == "/" && !authenticated) {
-                    verifyLogin()
+                    view?.evaluateJavascript("window.localStorage.getItem('livenexus_token')", null)
                     return true
                 }
                 return false
@@ -102,17 +117,17 @@ class MainActivity : Activity() {
                         document.head.appendChild(css);
                       }
                       if(!window.__lnAuthCheck){
-                        window.__lnAuthCheck=setInterval(async function(){
+                        window.__lnAuthCheck=setInterval(function(){
                           try {
-                            const r=await fetch('/api/auth/session',{credentials:'include',cache:'no-store'});
-                            const d=await r.json();
-                            if(d.ok && d.user && d.user.user_id) AndroidLogin.authenticated();
+                            const token=localStorage.getItem('livenexus_token') ||
+                              sessionStorage.getItem('livenexus_token');
+                            if(token) AndroidLogin.authenticated(token);
+                            if(location.pathname==='/' && !token) location.replace('/login');
                           } catch(e) {}
-                        },1500);
+                        },250);
                       }
                     })();""", null
                 )
-                verifyLogin()
             }
         }
         setContentView(browser)
