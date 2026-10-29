@@ -6,8 +6,9 @@ android {
         applicationId = "com.livenexus.controller"
         minSdk = 29
         targetSdk = 32
-        versionCode = 1
-        versionName = "0.1"
+        val buildNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+        versionCode = buildNumber
+        versionName = "0.1.$buildNumber"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
