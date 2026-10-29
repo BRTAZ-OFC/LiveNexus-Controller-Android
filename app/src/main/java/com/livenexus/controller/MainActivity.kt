@@ -145,10 +145,10 @@ class MainActivity : Activity() {
     }
     private fun showAddMenu() {
         AlertDialog.Builder(this).setTitle("Adicionar controle")
-            .setItems(arrayOf("Cenário", "Overlay", "LivePix")) { _, selected ->
+            .setItems(arrayOf("Cenário", "Overlay", "LivePix", "Contador +1")) { _, selected ->
                 if (count() >= 57) Toast.makeText(this, "Limite de 60 controles", Toast.LENGTH_SHORT).show()
                 else {
-                    prefs.edit().putString("control_type_${count()}", arrayOf("Cenário", "Overlay", "LivePix")[selected])
+                    prefs.edit().putString("control_type_${count()}", arrayOf("Cenário", "Overlay", "LivePix", "Contador +1")[selected])
                         .putInt("scenario_count", count() + 1).apply()
                     render()
                 }
