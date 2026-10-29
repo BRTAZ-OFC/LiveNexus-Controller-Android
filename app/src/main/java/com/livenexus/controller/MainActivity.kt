@@ -16,9 +16,16 @@ import android.view.Gravity
 import android.view.View
 import android.widget.*
 import org.json.JSONArray
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.CookieManager
+import android.os.Message
 
 class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("buttons", MODE_PRIVATE) }
+    @Volatile private var authenticated = false
     private val cyan = Color.rgb(43, 205, 239)
     private val background = Color.rgb(10, 15, 25)
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
@@ -34,9 +41,74 @@ class MainActivity : Activity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val savedUrl = prefs.getString("livenexus_url", "") ?: ""
-        if (savedUrl.isNotBlank()) try { LiveNexusApi.configure(savedUrl) } catch (_: Exception) {}
-        render()
+        showLogin()
+    }
+
+    private fun showLogin() {
+        authenticated = false
+        val browser = WebView(this)
+        browser.settings.javaScriptEnabled = true
+        browser.settings.domStorageEnabled = true
+        browser.settings.javaScriptCanOpenWindowsAutomatically = true
+        browser.settings.setSupportMultipleWindows(true)
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(browser, true)
+        browser.webChromeClient = object : WebChromeClient() {
+            override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
+                val popup = WebView(this@MainActivity)
+                popup.settings.javaScriptEnabled = true
+                popup.settings.domStorageEnabled = true
+                popup.webViewClient = WebViewClient()
+                popup.webChromeClient = object : WebChromeClient() {
+                    override fun onCloseWindow(window: WebView?) {
+                        popup.destroy()
+                        verifyLogin()
+                    }
+                }
+                val dialog = AlertDialog.Builder(this@MainActivity).setView(popup)
+                    .setNegativeButton("Fechar") { _, _ -> verifyLogin() }.create()
+                dialog.setOnDismissListener { verifyLogin() }
+                dialog.show()
+                val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                transport.webView = popup
+                resultMsg.sendToTarget()
+                return true
+            }
+        }
+        browser.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                if (url?.startsWith(LiveNexusApi.baseUrl) != true) return
+                view.evaluateJavascript(
+                    """(function(){
+                      if(location.pathname.startsWith('/login')){
+                        const css=document.createElement('style');
+                        css.textContent='.auth-footer,.auth-back-link{display:none!important}';
+                        document.head.appendChild(css);
+                      }
+                    })();""", null
+                )
+                verifyLogin()
+            }
+        }
+        setContentView(browser)
+        browser.loadUrl(LiveNexusApi.baseUrl + "/login")
+    }
+
+    private fun verifyLogin() {
+        if (authenticated) return
+        Thread {
+            try {
+                LiveNexusApi.checkSession()
+                runOnUiThread {
+                    if (!authenticated) {
+                        authenticated = true
+                        render()
+                    }
+                }
+            } catch (_: Exception) {
+                // Mantém a tela de login enquanto a sessão não for validada.
+            }
+        }.start()
     }
     override fun onResume() { super.onResume(); if (::status.isInitialized) updateStatus() }
     private lateinit var status: TextView
@@ -55,6 +127,7 @@ class MainActivity : Activity() {
         return LayerDrawable(arrayOf(outer, InsetDrawable(inner, dp(5), dp(5), dp(5), dp(7))))
     }
     private fun render() {
+        if (!authenticated) { showLogin(); return }
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(this@MainActivity.background) }
         val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(17), dp(17), dp(17), dp(17)) }
         header.addView(text("☰", 29f, Color.LTGRAY).apply {
@@ -124,11 +197,11 @@ class MainActivity : Activity() {
                         gravity = Gravity.CENTER; background = tileStyle(cyan); setOnClickListener { onTap() }
                     }, LinearLayout.LayoutParams(-1, dp(62)).apply { bottomMargin = dp(12) })
                 }
-                setting("Conectar conta LiveNexus") { showLiveNexusLogin() }
+                setting("Conta LiveNexus") { showConnectionMessage("Conta conectada ao LiveNexus.") }
                 setting("Consultar cenários e overlays") { showLiveNexusItems() }
                 setting("Desconectar conta") {
                     LiveNexusApi.logout()
-                    Toast.makeText(this, "Sessão encerrada no aplicativo", Toast.LENGTH_SHORT).show()
+                    showLogin()
                 }
                 setting("Autorizar sobreposição") {
                     if (!Settings.canDrawOverlays(this)) startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
@@ -245,7 +318,7 @@ class MainActivity : Activity() {
     }
 
     private fun showLiveNexusItems() {
-        if (!LiveNexusApi.isConnected()) {
+        if (!authenticated) {
             showConnectionMessage("Entre na conta LiveNexus primeiro.")
             return
         }
