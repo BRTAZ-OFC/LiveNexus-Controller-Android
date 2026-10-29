@@ -16,6 +16,7 @@ import android.view.Gravity
 import android.view.View
 import android.widget.*
 import org.json.JSONArray
+import org.json.JSONObject
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebChromeClient
@@ -202,9 +203,9 @@ class MainActivity : Activity() {
                         elevation = dp(5).toFloat(); isClickable = true
                         setOnClickListener {
                             if (i == 0) showPlayer()
-                            else Toast.makeText(this@MainActivity, "Ação ainda não conectada: ${name(i)}", Toast.LENGTH_SHORT).show()
+                            else showConfiguredControl(i)
                         }
-                        setOnLongClickListener { if (i >= 3) editLabel(i); true }
+                        setOnLongClickListener { if (i >= 3) configureControl(i) else if (i == 2) showConnectionMessage("Reload RTC: aguardando mapeamento do comando existente."); true }
                     }
                     val icon = if (i < 3) listOf("♫", "▣", "↻")[i] else when (controlType(i - 3)) {
                         "Contador +1" -> "+"
@@ -293,6 +294,56 @@ class MainActivity : Activity() {
                 }
             }.setNegativeButton("Cancelar", null).show()
     }
+    private fun configureControl(i: Int) {
+        val kind = controlType(i - 3)
+        if (kind != "Cenário" && kind != "Overlay") {
+            editLabel(i)
+            return
+        }
+        Thread {
+            try {
+                val items = if (kind == "Cenário") LiveNexusApi.scenarios() else LiveNexusApi.overlays()
+                val records = (0 until items.length()).mapNotNull { items.optJSONObject(it) }
+                val labels = records.map { item ->
+                    item.optString("nome").ifBlank { item.optString("name").ifBlank { item.optString("id", "Sem nome") } }
+                }.toTypedArray()
+                runOnUiThread {
+                    if (records.isEmpty()) {
+                        showConnectionMessage("Nenhum registro de $kind encontrado para esta conta.")
+                    } else {
+                        AlertDialog.Builder(this).setTitle("Selecionar $kind")
+                            .setItems(labels) { _, position ->
+                                val record = records[position]
+                                val id = record.optString("id").ifBlank { record.optString("nome").ifBlank { record.optString("name") } }
+                                if (id.isBlank()) {
+                                    showConnectionMessage("Registro sem identificador. Nenhuma configuração foi salva.")
+                                } else {
+                                    prefs.edit().putString("control_record_${i - 3}", id)
+                                        .putString("control_user_${i - 3}", record.optString("user_id"))
+                                        .putString("scenario_${i - 3}", labels[position]).apply()
+                                    render()
+                                }
+                            }.setNegativeButton("Cancelar", null).show()
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { showConnectionMessage(e.message ?: "Falha ao consultar registros.") }
+            }
+        }.start()
+    }
+
+    private fun showConfiguredControl(i: Int) {
+        val kind = controlType(i - 3)
+        val recordId = prefs.getString("control_record_${i - 3}", null)
+        if ((kind == "Cenário" || kind == "Overlay") && recordId.isNullOrBlank()) {
+            configureControl(i)
+        } else if (kind == "Cenário" || kind == "Overlay") {
+            showConnectionMessage("$kind selecionado: ${name(i)}. A execução pelo Receiver/RTC depende da confirmação do comando existente.")
+        } else {
+            showConnectionMessage("Ação ainda não conectada: ${name(i)}")
+        }
+    }
+
     private fun editLabel(i: Int) {
         val field = EditText(this).apply { setSingleLine(true); setText(name(i)); selectAll() }
         val holder = FrameLayout(this).apply { setPadding(dp(16), 0, dp(16), 0); addView(field) }
