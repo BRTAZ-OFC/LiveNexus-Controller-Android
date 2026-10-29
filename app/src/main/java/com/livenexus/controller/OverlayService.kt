@@ -10,6 +10,7 @@ import android.os.IBinder
 import android.provider.Settings
 import android.view.*
 import android.widget.*
+import org.json.JSONObject
 
 class OverlayService : Service() {
     private lateinit var manager: WindowManager
@@ -245,6 +246,12 @@ class OverlayService : Service() {
                 text = "$icon\n$label"
                 textSize = 12f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
                 background = tileBackground()
+                if (i >= 3 && (controlType(i - 3) == "Cenário" || controlType(i - 3) == "Overlay")) {
+                    setOnLongClickListener {
+                        selectRealRecord(i - 3, controlType(i - 3))
+                        true
+                    }
+                }
                 setOnClickListener {
                     if (label.equals("Música", true)) showMiniPlayer()
                     else Toast.makeText(this@OverlayService, "Ação ainda não conectada: $label", Toast.LENGTH_SHORT).show()
@@ -274,6 +281,42 @@ class OverlayService : Service() {
         } catch (_: RuntimeException) {
             panel = null
         }
+    }
+
+    private fun selectRealRecord(index: Int, kind: String) {
+        Thread {
+            try {
+                val items = if (kind == "Cenário") LiveNexusApi.scenarios() else LiveNexusApi.overlays()
+                val records = (0 until items.length()).mapNotNull { items.optJSONObject(it) }
+                val labels = records.map { item ->
+                    item.optString("nome").ifBlank { item.optString("name").ifBlank { item.optString("id", "Sem nome") } }
+                }.toTypedArray()
+                android.os.Handler(mainLooper).post {
+                    if (records.isEmpty()) {
+                        Toast.makeText(this, "Nenhum registro de $kind encontrado", Toast.LENGTH_LONG).show()
+                    } else {
+                        val dialog = AlertDialog.Builder(this).setTitle("Selecionar $kind")
+                            .setItems(labels) { _, position ->
+                                val item = records[position]
+                                val id = item.optString("id").ifBlank { item.optString("nome").ifBlank { item.optString("name") } }
+                                if (id.isNotBlank()) {
+                                    prefs.edit().putString("control_record_$index", id)
+                                        .putString("control_user_$index", item.optString("user_id"))
+                                        .putString("scenario_$index", labels[position]).apply()
+                                    hidePanel()
+                                    showPanel()
+                                }
+                            }.setNegativeButton("Cancelar", null).create()
+                        dialog.window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+                        dialog.show()
+                    }
+                }
+            } catch (e: Exception) {
+                android.os.Handler(mainLooper).post {
+                    Toast.makeText(this, e.message ?: "Falha ao consultar registros", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
     private fun showAddControlMenu() {
