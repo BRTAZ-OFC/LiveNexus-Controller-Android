@@ -355,7 +355,19 @@ class MainActivity : Activity() {
         if ((kind == "Cenário" || kind == "Overlay") && recordId.isNullOrBlank()) {
             configureControl(i)
         } else if (kind == "Cenário" || kind == "Overlay") {
-            showConnectionMessage("$kind selecionado: ${name(i)}. A execução pelo Receiver/RTC depende da confirmação do comando existente.")
+            val userId = prefs.getString("control_user_${i - 3}", "").orEmpty()
+            if (userId.isBlank()) {
+                showConnectionMessage("Registro sem user_id. Segure o botão e selecione novamente.")
+            } else {
+                val path = if (kind == "Cenário") "/cenarios/receiver/" else "/overlay/receiver/"
+                val address = Uri.parse(LiveNexusApi.baseUrl + path + Uri.encode(recordId))
+                    .buildUpon().appendQueryParameter("user_id", userId).build()
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, address))
+                } catch (e: Exception) {
+                    showConnectionMessage("Não foi possível abrir o Receiver: " + (e.message ?: "erro"))
+                }
+            }
         } else {
             showConnectionMessage("Ação ainda não conectada: ${name(i)}")
         }
