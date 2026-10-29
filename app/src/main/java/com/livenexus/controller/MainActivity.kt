@@ -25,8 +25,9 @@ class MainActivity : Activity() {
         setColor(color); cornerRadius = dp(17).toFloat(); setStroke(dp(1), stroke)
     }
     private fun count() = prefs.getInt("scenario_count", 0).coerceIn(0, 57)
+    private fun controlType(i: Int) = prefs.getString("control_type_$i", "Cenário") ?: "Cenário"
     private fun name(i: Int) = if (i < 3) listOf("Música", "Câmera", "Reload RTC")[i]
-        else prefs.getString("scenario_${i - 3}", "Cenário ${i - 2}") ?: "Cenário ${i - 2}"
+        else prefs.getString("scenario_${i - 3}", "${controlType(i - 3)} ${i - 2}") ?: "${controlType(i - 3)} ${i - 2}"
     private fun text(value: String, size: Float, color: Int = Color.WHITE) = TextView(this).apply {
         text = value; textSize = size; setTextColor(color); gravity = Gravity.CENTER_VERTICAL
     }
@@ -144,10 +145,11 @@ class MainActivity : Activity() {
     }
     private fun showAddMenu() {
         AlertDialog.Builder(this).setTitle("Adicionar controle")
-            .setItems(arrayOf("Cenário")) { _, _ ->
+            .setItems(arrayOf("Cenário", "Overlay")) { _, selected ->
                 if (count() >= 57) Toast.makeText(this, "Limite de 60 controles", Toast.LENGTH_SHORT).show()
                 else {
-                    prefs.edit().putInt("scenario_count", count() + 1).apply()
+                    prefs.edit().putString("control_type_${count()}", if (selected == 0) "Cenário" else "Overlay")
+                        .putInt("scenario_count", count() + 1).apply()
                     render()
                 }
             }.setNegativeButton("Cancelar", null).show()
