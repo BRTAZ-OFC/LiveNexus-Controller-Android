@@ -34,7 +34,7 @@ class MainActivity : Activity() {
     private fun updateStatus() { status.text = if (Settings.canDrawOverlays(this)) "● Sobreposição autorizada" else "○ Autorize a sobreposição" }
     private fun render() {
         val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(22), dp(16), dp(24)); setBackgroundColor(background)
+            orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(22), dp(16), dp(24)); setBackgroundColor(this@MainActivity.background)
         }
         root.addView(text("☰   LiveNexus Controller", 23f).apply { setTypeface(null, Typeface.BOLD) })
         status = text("", 13f, cyan).apply { setPadding(0, dp(7), 0, dp(18)) }
