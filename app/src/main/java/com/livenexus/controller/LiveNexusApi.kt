@@ -3,6 +3,7 @@ package com.livenexus.controller
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import android.webkit.CookieManager
 
 /**
  * Cliente de leitura da API existente do LiveNexus.
@@ -10,7 +11,7 @@ import java.net.URL
  * O token fica somente na memória do processo durante este teste.
  */
 object LiveNexusApi {
-    @Volatile var baseUrl: String = ""
+    @Volatile var baseUrl: String = "https://livenexus-teste.acq.lat"
         private set
     @Volatile private var token: String? = null
 
@@ -34,6 +35,7 @@ object LiveNexusApi {
             connection.readTimeout = 12000
             connection.setRequestProperty("Accept", "application/json")
             token?.let { connection.setRequestProperty("Authorization", "Bearer $it") }
+            CookieManager.getInstance().getCookie(baseUrl)?.let { connection.setRequestProperty("Cookie", it) }
             if (body != null) {
                 connection.doOutput = true
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
@@ -66,7 +68,8 @@ object LiveNexusApi {
     }
 
     fun isConnected() = !token.isNullOrBlank()
-    fun logout() { token = null }
+    fun checkSession(): JSONObject = request("/api/auth/me").getJSONObject("user")
+    fun logout() { token = null; CookieManager.getInstance().removeAllCookies(null); CookieManager.getInstance().flush() }
     fun scenarios() = request("/api/cenarios").getJSONArray("items")
     fun overlays() = request("/api/overlays").getJSONArray("items")
 }
