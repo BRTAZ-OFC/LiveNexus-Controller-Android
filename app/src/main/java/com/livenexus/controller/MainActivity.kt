@@ -79,7 +79,13 @@ class MainActivity : Activity() {
                         }
                         setOnLongClickListener { if (i >= 3) editLabel(i); true }
                     }
-                    val icon = listOf("♫", "▣", "↻").getOrElse(i) { "▱" }
+                    val icon = if (i < 3) listOf("♫", "▣", "↻")[i] else when (controlType(i - 3)) {
+                        "Contador +1" -> "+"
+                        "Contador -1" -> "−"
+                        "Zerar contador" -> "⟲"
+                        "Chat" -> "▢"
+                        else -> "▱"
+                    }
                     tile.addView(text(icon, 41f, color).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, dp(65)))
                     tile.addView(text(name(i), 13f).apply { gravity = Gravity.CENTER; setTypeface(null, Typeface.BOLD); maxLines = 2 })
                     grid.addView(tile, GridLayout.LayoutParams().apply {
