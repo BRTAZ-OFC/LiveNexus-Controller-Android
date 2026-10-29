@@ -60,19 +60,65 @@ class OverlayService : Service() {
     }
 
     private fun showBubble() {
+        val size = dp(56)
+        val metrics = resources.displayMetrics
+        val maxX = (metrics.widthPixels - size).coerceAtLeast(0)
+        val maxY = (metrics.heightPixels - size).coerceAtLeast(0)
+        val savedX = prefs.getInt("bubble_x", maxX - dp(12))
+        val savedY = prefs.getInt("bubble_y", maxY / 2)
+        val layout = params(size, size, Gravity.TOP or Gravity.START).apply {
+            x = savedX.coerceIn(0, maxX)
+            y = savedY.coerceIn(0, maxY)
+        }
+        val touchSlop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+        var downRawX = 0f
+        var downRawY = 0f
+        var startX = 0
+        var startY = 0
+        var dragging = false
         val button = TextView(this).apply {
             text = "LN"
             textSize = 17f
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
             background = tileBackground(Color.rgb(43, 205, 239))
-            setOnClickListener { showPanel() }
+            setOnTouchListener { _, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downRawX = event.rawX
+                        downRawY = event.rawY
+                        startX = layout.x
+                        startY = layout.y
+                        dragging = false
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = event.rawX - downRawX
+                        val dy = event.rawY - downRawY
+                        if (!dragging && (kotlin.math.abs(dx) > touchSlop || kotlin.math.abs(dy) > touchSlop)) dragging = true
+                        if (dragging) {
+                            layout.x = (startX + dx.toInt()).coerceIn(0, maxX)
+                            layout.y = (startY + dy.toInt()).coerceIn(0, maxY)
+                            manager.updateViewLayout(this, layout)
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        if (dragging) {
+                            prefs.edit().putInt("bubble_x", layout.x).putInt("bubble_y", layout.y).apply()
+                        } else {
+                            performClick()
+                            showPanel()
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_CANCEL -> true
+                    else -> false
+                }
+            }
         }
         try {
-            manager.addView(
-                button,
-                params(dp(56), dp(56), Gravity.END or Gravity.CENTER_VERTICAL).apply { x = dp(12) }
-            )
+            manager.addView(button, layout)
             bubble = button
         } catch (_: RuntimeException) {
             stopSelf()
