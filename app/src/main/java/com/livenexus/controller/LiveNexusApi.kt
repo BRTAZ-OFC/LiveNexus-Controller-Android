@@ -67,6 +67,12 @@ object LiveNexusApi {
         return request("/api/auth/me").getJSONObject("user")
     }
 
+    fun acceptWebToken(candidate: String): JSONObject {
+        require(candidate.isNotBlank()) { "Token de login vazio." }
+        token = candidate
+        return try { checkSession() } catch (error: Exception) { token = null; throw error }
+    }
+
     fun isConnected() = !token.isNullOrBlank()
     fun checkSession(): JSONObject = request("/api/auth/me").getJSONObject("user")
     fun logout() { token = null; CookieManager.getInstance().removeAllCookies(null); CookieManager.getInstance().flush() }
