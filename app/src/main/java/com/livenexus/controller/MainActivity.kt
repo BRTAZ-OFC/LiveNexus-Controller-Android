@@ -5,6 +5,9 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.LayerDrawable
+import android.graphics.drawable.InsetDrawable
+import android.graphics.drawable.StateListDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
@@ -31,65 +34,115 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); render() }
     override fun onResume() { super.onResume(); if (::status.isInitialized) updateStatus() }
     private lateinit var status: TextView
-    private fun updateStatus() { status.text = if (Settings.canDrawOverlays(this)) "● Sobreposição autorizada" else "○ Autorize a sobreposição" }
+    private fun updateStatus() { status.text = if (Settings.canDrawOverlays(this)) "● ON" else "○ OFF" }
+    private val purple = Color.rgb(162, 95, 255)
+    private val red = Color.rgb(245, 65, 105)
+    private var page = 0
+    private fun accent(i: Int) = when (i) { 2, 3, 7 -> purple; 6 -> red; else -> cyan }
+    private fun tileStyle(accent: Int): android.graphics.drawable.Drawable {
+        val outer = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Color.rgb(45, 65, 89), Color.rgb(9, 16, 27))).apply {
+            cornerRadius = dp(18).toFloat(); setStroke(dp(1), Color.rgb(58, 83, 112))
+        }
+        val inner = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Color.rgb(22, 36, 54), Color.rgb(9, 16, 27))).apply {
+            cornerRadius = dp(15).toFloat(); setStroke(dp(1), Color.argb(110, Color.red(accent), Color.green(accent), Color.blue(accent)))
+        }
+        return LayerDrawable(arrayOf(outer, InsetDrawable(inner, dp(5), dp(5), dp(5), dp(7))))
+    }
     private fun render() {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(22), dp(16), dp(24)); setBackgroundColor(this@MainActivity.background)
-        }
-        root.addView(text("☰   LiveNexus Controller", 23f).apply { setTypeface(null, Typeface.BOLD) })
-        status = text("", 13f, cyan).apply { setPadding(0, dp(7), 0, dp(18)) }
-        root.addView(status)
-        val actions = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        fun action(label: String, click: () -> Unit) {
-            actions.addView(TextView(this).apply {
-                text = label; textSize = 15f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
-                background = shape(Color.rgb(24, 39, 59), cyan); setOnClickListener { click() }
-            }, LinearLayout.LayoutParams(-1, dp(47)).apply { bottomMargin = dp(9) })
-        }
-        action("Autorizar sobreposição") {
-            if (!Settings.canDrawOverlays(this)) startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-        }
-        action("Ativar painel flutuante") {
-            if (Settings.canDrawOverlays(this)) startForegroundService(Intent(this, OverlayService::class.java))
-            else Toast.makeText(this, "Autorize a sobreposição primeiro", Toast.LENGTH_SHORT).show()
-        }
-        action("Desativar controlador") { stopService(Intent(this, OverlayService::class.java)) }
-        root.addView(actions)
-        root.addView(text("MEUS CONTROLES", 13f, cyan).apply { setPadding(0, dp(15), 0, dp(12)) })
-        val grid = GridLayout(this).apply { columnCount = 3 }
-        val total = count()
-        for (i in 0 until total) {
-            val tile = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; background = shape(Color.rgb(19, 29, 45))
-                setOnClickListener {
-                    if (name(i).equals("Música", true)) showPlayer()
-                    else Toast.makeText(this@MainActivity, "Configure a ação: ${name(i)}", Toast.LENGTH_SHORT).show()
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(this@MainActivity.background) }
+        val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(17), dp(17), dp(17), dp(17)) }
+        header.addView(text("☰", 29f, Color.LTGRAY).apply {
+            setOnClickListener { showOptions() }
+        }, LinearLayout.LayoutParams(dp(46), dp(55)))
+        val heading = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        heading.addView(text("LiveNexus Controller", 21f).apply { setTypeface(null, Typeface.BOLD) })
+        heading.addView(text("Painel ativo", 13f, Color.rgb(44, 210, 185)))
+        header.addView(heading, LinearLayout.LayoutParams(0, -2, 1f))
+        status = text("●", 13f, cyan).apply { gravity = Gravity.CENTER; background = shape(Color.rgb(20, 31, 48)) }
+        header.addView(status, LinearLayout.LayoutParams(dp(52), dp(42)))
+        root.addView(header)
+        val content = ScrollView(this).apply { fillViewport = true }
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(13), dp(10), dp(13), dp(16)) }
+        when (page) {
+            0 -> {
+                val grid = GridLayout(this).apply { columnCount = 3 }
+                val total = count()
+                val w = ((resources.displayMetrics.widthPixels - dp(32)) / 3) - dp(6)
+                for (i in 0 until total) {
+                    val color = accent(i)
+                    val tile = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; background = tileStyle(color)
+                        elevation = dp(5).toFloat(); isClickable = true
+                        setOnClickListener {
+                            if (name(i).equals("Música", true)) showPlayer()
+                            else Toast.makeText(this@MainActivity, "Ação ainda não conectada: ${name(i)}", Toast.LENGTH_SHORT).show()
+                        }
+                        setOnLongClickListener { editLabel(i); true }
+                    }
+                    val icon = listOf("♩", "▣", "▱", "▱", "☏", "♫", "⏺", "◉", "↶").getOrElse(i) { "◇" }
+                    tile.addView(text(icon, 41f, color).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, dp(65)))
+                    tile.addView(text(name(i), 13f).apply { gravity = Gravity.CENTER; setTypeface(null, Typeface.BOLD); maxLines = 2 })
+                    grid.addView(tile, GridLayout.LayoutParams().apply {
+                        width = w; height = w + dp(12); columnSpec = GridLayout.spec(i % 3)
+                        rowSpec = GridLayout.spec(i / 3); setMargins(dp(3), dp(5), dp(3), dp(5))
+                    })
                 }
-                setOnLongClickListener { editLabel(i); true }
+                val add = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; background = tileStyle(cyan)
+                    setOnClickListener {
+                        if (count() >= 60) Toast.makeText(this@MainActivity, "Limite de 60 botões", Toast.LENGTH_SHORT).show()
+                        else { prefs.edit().putInt("button_count", count() + 1).apply(); render() }
+                    }
+                }
+                add.addView(text("+", 49f, cyan).apply { gravity = Gravity.CENTER })
+                add.addView(text("Adicionar botão", 12f, cyan).apply { gravity = Gravity.CENTER; setTypeface(null, Typeface.BOLD) })
+                grid.addView(add, GridLayout.LayoutParams().apply {
+                    width = w; height = w + dp(12); columnSpec = GridLayout.spec(total % 3)
+                    rowSpec = GridLayout.spec(total / 3); setMargins(dp(3), dp(5), dp(3), dp(5))
+                })
+                body.addView(grid)
             }
-            tile.addView(text(icons.getOrElse(i) { "◆" }, 29f, cyan).apply { gravity = Gravity.CENTER })
-            tile.addView(text(name(i), 12f).apply { gravity = Gravity.CENTER; maxLines = 2 })
-            grid.addView(tile, GridLayout.LayoutParams().apply {
-                width = 0; height = dp(108); columnSpec = GridLayout.spec(i % 3, 1f)
-                rowSpec = GridLayout.spec(i / 3); setMargins(dp(3), dp(3), dp(3), dp(3))
-            })
-        }
-        val add = TextView(this).apply {
-            text = "＋\nAdicionar"; gravity = Gravity.CENTER; textSize = 15f; setTextColor(cyan)
-            background = shape(Color.rgb(16, 30, 48), cyan)
-            setOnClickListener {
-                if (count() >= 60) Toast.makeText(this@MainActivity, "Limite de 60 botões", Toast.LENGTH_SHORT).show()
-                else { prefs.edit().putInt("button_count", count() + 1).apply(); render() }
+            1 -> {
+                body.addView(text("PERFIS", 19f, cyan).apply { setPadding(dp(8), dp(15), 0, dp(20)) })
+                body.addView(text("Os perfis serão vinculados à conta LiveNexus quando a autenticação estiver integrada.", 15f))
+            }
+            else -> {
+                body.addView(text("CONFIGURAÇÕES", 19f, cyan).apply { setPadding(dp(8), dp(15), 0, dp(20)) })
+                fun setting(label: String, onTap: () -> Unit) {
+                    body.addView(text(label, 16f).apply {
+                        gravity = Gravity.CENTER; background = tileStyle(cyan); setOnClickListener { onTap() }
+                    }, LinearLayout.LayoutParams(-1, dp(62)).apply { bottomMargin = dp(12) })
+                }
+                setting("Autorizar sobreposição") {
+                    if (!Settings.canDrawOverlays(this)) startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                    else Toast.makeText(this, "Sobreposição já autorizada", Toast.LENGTH_SHORT).show()
+                }
+                setting("Ativar painel flutuante") {
+                    if (Settings.canDrawOverlays(this)) startForegroundService(Intent(this, OverlayService::class.java))
+                    else Toast.makeText(this, "Autorize a sobreposição primeiro", Toast.LENGTH_SHORT).show()
+                }
+                setting("Desativar controlador") { stopService(Intent(this, OverlayService::class.java)) }
             }
         }
-        grid.addView(add, GridLayout.LayoutParams().apply {
-            width = 0; height = dp(108); columnSpec = GridLayout.spec(total % 3, 1f)
-            rowSpec = GridLayout.spec(total / 3); setMargins(dp(3), dp(3), dp(3), dp(3))
-        })
-        root.addView(grid)
-        root.addView(text("Segure uma tecla para renomear. As ações serão conectadas ao LiveNexus após a autenticação.", 12f, Color.LTGRAY).apply { setPadding(0, dp(18), 0, 0) })
-        setContentView(ScrollView(this).apply { addView(root) })
+        content.addView(body)
+        root.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
+        val nav = LinearLayout(this).apply {
+            gravity = Gravity.CENTER; setPadding(dp(6), dp(10), dp(6), dp(12))
+            setBackgroundColor(Color.rgb(12, 21, 32))
+        }
+        listOf("◇\nSobreposição", "◎\nPerfis", "⚙\nConfigurações").forEachIndexed { index, label ->
+            nav.addView(text(label, 13f, if (page == index) cyan else Color.GRAY).apply {
+                gravity = Gravity.CENTER; setTypeface(null, if (page == index) Typeface.BOLD else Typeface.NORMAL)
+                setOnClickListener { page = index; render() }
+            }, LinearLayout.LayoutParams(0, dp(58), 1f))
+        }
+        root.addView(nav)
+        setContentView(root)
         updateStatus()
+    }
+    private fun showOptions() {
+        AlertDialog.Builder(this).setTitle("LiveNexus Controller")
+            .setItems(arrayOf("Sobreposição", "Perfis", "Configurações")) { _, which -> page = which; render() }.show()
     }
     private fun editLabel(i: Int) {
         val field = EditText(this).apply { setSingleLine(true); setText(name(i)); selectAll() }
