@@ -23,6 +23,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.os.Message
+import android.view.WindowManager
 
 class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("buttons", MODE_PRIVATE) }
@@ -79,6 +80,8 @@ class MainActivity : Activity() {
                 val popup = WebView(this@MainActivity)
                 popup.settings.javaScriptEnabled = true
                 popup.settings.domStorageEnabled = true
+                popup.isFocusable = true
+                popup.isFocusableInTouchMode = true
                 popup.webViewClient = WebViewClient()
                 popup.webChromeClient = object : WebChromeClient() {
                     override fun onCloseWindow(window: WebView?) {
@@ -90,6 +93,11 @@ class MainActivity : Activity() {
                     .setNegativeButton("Fechar") { _, _ -> verifyLogin() }.create()
                 dialog.setOnDismissListener { verifyLogin() }
                 dialog.show()
+                dialog.window?.setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+                        WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+                )
+                popup.requestFocus()
                 val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
                 transport.webView = popup
                 resultMsg.sendToTarget()
