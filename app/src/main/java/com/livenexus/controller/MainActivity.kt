@@ -15,6 +15,7 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.widget.*
+import org.json.JSONArray
 
 class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("buttons", MODE_PRIVATE) }
@@ -31,7 +32,12 @@ class MainActivity : Activity() {
     private fun text(value: String, size: Float, color: Int = Color.WHITE) = TextView(this).apply {
         text = value; textSize = size; setTextColor(color); gravity = Gravity.CENTER_VERTICAL
     }
-    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); render() }
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val savedUrl = prefs.getString("livenexus_url", "") ?: ""
+        if (savedUrl.isNotBlank()) try { LiveNexusApi.configure(savedUrl) } catch (_: Exception) {}
+        render()
+    }
     override fun onResume() { super.onResume(); if (::status.isInitialized) updateStatus() }
     private lateinit var status: TextView
     private fun updateStatus() { status.text = if (Settings.canDrawOverlays(this)) "● ON" else "○ OFF" }
@@ -109,7 +115,7 @@ class MainActivity : Activity() {
             }
             1 -> {
                 body.addView(text("PERFIS", 19f, cyan).apply { setPadding(dp(8), dp(15), 0, dp(20)) })
-                body.addView(text("Os perfis serão vinculados à conta LiveNexus quando a autenticação estiver integrada.", 15f))
+                body.addView(text(if (LiveNexusApi.isConnected()) "Conta LiveNexus conectada nesta sessão." else "Conecte sua conta LiveNexus em Configurações.", 15f))
             }
             else -> {
                 body.addView(text("CONFIGURAÇÕES", 19f, cyan).apply { setPadding(dp(8), dp(15), 0, dp(20)) })
@@ -117,6 +123,12 @@ class MainActivity : Activity() {
                     body.addView(text(label, 16f).apply {
                         gravity = Gravity.CENTER; background = tileStyle(cyan); setOnClickListener { onTap() }
                     }, LinearLayout.LayoutParams(-1, dp(62)).apply { bottomMargin = dp(12) })
+                }
+                setting("Conectar conta LiveNexus") { showLiveNexusLogin() }
+                setting("Consultar cenários e overlays") { showLiveNexusItems() }
+                setting("Desconectar conta") {
+                    LiveNexusApi.logout()
+                    Toast.makeText(this, "Sessão encerrada no aplicativo", Toast.LENGTH_SHORT).show()
                 }
                 setting("Autorizar sobreposição") {
                     if (!Settings.canDrawOverlays(this)) startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
@@ -171,6 +183,96 @@ class MainActivity : Activity() {
                 else Toast.makeText(this, "Use de 1 a 30 caracteres", Toast.LENGTH_SHORT).show()
             }.show()
     }
+
+    private fun showLiveNexusLogin() {
+        val fields = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        val server = EditText(this).apply {
+            hint = "https://seu-livenexus.com"
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+            setText(prefs.getString("livenexus_url", ""))
+        }
+        val user = EditText(this).apply {
+            hint = "Usuário do LiveNexus"
+            setSingleLine(true)
+        }
+        val password = EditText(this).apply {
+            hint = "Senha"
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        fields.addView(server)
+        fields.addView(user)
+        fields.addView(password)
+        AlertDialog.Builder(this).setTitle("Conectar ao LiveNexus")
+            .setView(fields)
+            .setNegativeButton("Cancelar", null)
+            .setPositiveButton("Entrar") { _, _ ->
+                val url = server.text.toString().trim()
+                val username = user.text.toString().trim()
+                val secret = password.text.toString()
+                password.text.clear()
+                if (username.isBlank() || secret.isBlank()) {
+                    showConnectionMessage("Informe usuário e senha.")
+                } else {
+                    try {
+                        LiveNexusApi.configure(url)
+                        prefs.edit().putString("livenexus_url", url.trimEnd('/')).apply()
+                        Thread {
+                            try {
+                                val account = LiveNexusApi.login(username, secret)
+                                runOnUiThread {
+                                    showConnectionMessage("Conectado: " + account.optString("user", "Conta LiveNexus"))
+                                    render()
+                                }
+                            } catch (e: Exception) {
+                                runOnUiThread { showConnectionMessage(e.message ?: "Falha ao conectar.") }
+                            }
+                        }.start()
+                    } catch (e: Exception) {
+                        showConnectionMessage(e.message ?: "Endereço inválido.")
+                    }
+                }
+            }.show()
+    }
+
+    private fun showConnectionMessage(message: String) {
+        AlertDialog.Builder(this).setTitle("LiveNexus").setMessage(message)
+            .setPositiveButton("OK", null).show()
+    }
+
+    private fun showLiveNexusItems() {
+        if (!LiveNexusApi.isConnected()) {
+            showConnectionMessage("Entre na conta LiveNexus primeiro.")
+            return
+        }
+        Thread {
+            try {
+                val scenarios = LiveNexusApi.scenarios()
+                val overlays = LiveNexusApi.overlays()
+                fun describe(items: JSONArray): String {
+                    if (items.length() == 0) return "(nenhum)"
+                    return (0 until items.length()).joinToString("\n") { i ->
+                        val item = items.optJSONObject(i)
+                        val label = item?.optString("nome", "")?.takeIf { it.isNotBlank() }
+                            ?: item?.optString("name", "")?.takeIf { it.isNotBlank() }
+                            ?: item?.optString("id", "Item ${i + 1}")
+                            ?: "Item ${i + 1}"
+                        "• $label"
+                    }
+                }
+                val result = "CENÁRIOS (${scenarios.length()})\n${describe(scenarios)}" +
+                    "\n\nOVERLAYS (${overlays.length()})\n${describe(overlays)}"
+                runOnUiThread { showConnectionMessage(result) }
+            } catch (e: Exception) {
+                runOnUiThread { showConnectionMessage(e.message ?: "Erro ao consultar LiveNexus.") }
+            }
+        }.start()
+    }
+
     private fun showPlayer() {
         val view = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(12), dp(20), dp(12)) }
         view.addView(text("♫  Nenhuma música conectada", 17f))
