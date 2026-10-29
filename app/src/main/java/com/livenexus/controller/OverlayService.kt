@@ -228,6 +228,7 @@ class OverlayService : Service() {
         val grid = GridLayout(this).apply { columnCount = 3 }
         val count = 3 + prefs.getInt("scenario_count", 0).coerceIn(0, 57)
         val defaults = listOf("Música", "Câmera", "Reload RTC")
+        fun controlType(index: Int) = prefs.getString("control_type_$index", "Cenário") ?: "Cenário"
         for (i in 0 until count) {
             val label = if (i < 3) defaults[i] else {
                 val kind = prefs.getString("control_type_${i - 3}", "Cenário") ?: "Cenário"
@@ -251,7 +252,7 @@ class OverlayService : Service() {
             text = "＋\\nAdicionar".replace("\\n", "\n"); gravity = Gravity.CENTER; textSize = 12f
             setTextColor(Color.rgb(43, 205, 239)); background = tileBackground(Color.rgb(43, 205, 239))
             setOnClickListener {
-                showAddScenarioMenu()
+                showAddControlMenu()
             }
         }, GridLayout.LayoutParams().apply {
             width = 0; height = dp(88); columnSpec = GridLayout.spec(count % 3, 1f)
