@@ -83,7 +83,7 @@ class MainActivity : Activity() {
                         "Contador +1" -> "+"
                         "Contador -1" -> "−"
                         "Zerar contador" -> "⟲"
-                        "Chat" -> "▢"
+                        "Chat" -> "💬"
                         else -> "▱"
                     }
                     tile.addView(text(icon, 41f, color).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, dp(65)))
