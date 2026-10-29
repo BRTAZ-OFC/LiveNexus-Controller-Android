@@ -78,4 +78,5 @@ object LiveNexusApi {
     fun logout() { token = null; CookieManager.getInstance().removeAllCookies(null); CookieManager.getInstance().flush() }
     fun scenarios() = request("/api/cenarios").getJSONArray("items")
     fun overlays() = request("/api/overlays").getJSONArray("items")
+    fun incrementLabCounter(): JSONObject = request("/api/laboratorio/contador", "POST", JSONObject().put("action", "increment"))
 }
