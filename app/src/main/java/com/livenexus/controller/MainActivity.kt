@@ -302,10 +302,10 @@ class MainActivity : Activity() {
     }
     private fun showAddMenu() {
         AlertDialog.Builder(this).setTitle("Adicionar controle")
-            .setItems(arrayOf("Cenário", "Overlay", "LivePix", "Contador +1", "Contador -1", "Zerar contador", "Chat")) { _, selected ->
+            .setItems(arrayOf("Cenário", "Overlay", "LivePix", "Contador +1", "Contador -1", "Zerar contador", "Chat", "Teste contador +1")) { _, selected ->
                 if (count() >= 57) Toast.makeText(this, "Limite de 60 controles", Toast.LENGTH_SHORT).show()
                 else {
-                    prefs.edit().putString("control_type_${count()}", arrayOf("Cenário", "Overlay", "LivePix", "Contador +1", "Contador -1", "Zerar contador", "Chat")[selected])
+                    prefs.edit().putString("control_type_${count()}", arrayOf("Cenário", "Overlay", "LivePix", "Contador +1", "Contador -1", "Zerar contador", "Chat", "Teste contador +1")[selected])
                         .putInt("scenario_count", count() + 1).apply()
                     render()
                 }
@@ -368,6 +368,17 @@ class MainActivity : Activity() {
                     showConnectionMessage("Não foi possível abrir o Receiver: " + (e.message ?: "erro"))
                 }
             }
+        } else if (kind == "Teste contador +1") {
+            Thread {
+                try {
+                    val result = LiveNexusApi.incrementLabCounter()
+                    runOnUiThread {
+                        showConnectionMessage("Laboratório: contador = ${result.optInt("value")}. Confira no Painel Admin → Laboratório.")
+                    }
+                } catch (e: Exception) {
+                    runOnUiThread { showConnectionMessage("Falha no laboratório: " + (e.message ?: "erro")) }
+                }
+            }.start()
         } else {
             showConnectionMessage("Ação ainda não conectada: ${name(i)}")
         }
