@@ -78,5 +78,6 @@ object LiveNexusApi {
     fun logout() { token = null; CookieManager.getInstance().removeAllCookies(null); CookieManager.getInstance().flush() }
     fun scenarios() = request("/api/cenarios").getJSONArray("items")
     fun overlays() = request("/api/overlays").getJSONArray("items")
-    fun incrementLabCounter(): JSONObject = request("/api/laboratorio/teste-contador-mortes", "POST", JSONObject().put("action", "increment"))
+    private const val LAB_COUNTER_ENDPOINT = "/api/laboratorio/teste-contador-mortes"
+    fun incrementLabCounter(): JSONObject = request(LAB_COUNTER_ENDPOINT, "POST", JSONObject().put("action", "increment"))
 }
