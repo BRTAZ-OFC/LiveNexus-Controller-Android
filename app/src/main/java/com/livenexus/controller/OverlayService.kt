@@ -2,6 +2,7 @@ package com.livenexus.controller
 
 import android.app.*
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
@@ -13,6 +14,9 @@ import android.widget.*
 class OverlayService : Service() {
     private lateinit var manager: WindowManager
     private var bubble: View? = null
+    private var bubbleLayout: WindowManager.LayoutParams? = null
+    private var previousWidth = 0
+    private var previousHeight = 0
     private var trash: View? = null
     private var panel: View? = null
     private val channel = "controller_overlay"
@@ -63,6 +67,27 @@ class OverlayService : Service() {
     private fun screenSize(): android.graphics.Point =
         android.graphics.Point().also { manager.defaultDisplay.getRealSize(it) }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        repositionBubble()
+    }
+
+    private fun repositionBubble() {
+        val view = bubble ?: return
+        val layout = bubbleLayout ?: return
+        val screen = screenSize()
+        val newWidth = (screen.x - layout.width).coerceAtLeast(0)
+        val newHeight = (screen.y - layout.height).coerceAtLeast(0)
+        if (newWidth == previousWidth && newHeight == previousHeight) return
+        val ratioX = if (previousWidth > 0) layout.x.toFloat() / previousWidth else 0f
+        val ratioY = if (previousHeight > 0) layout.y.toFloat() / previousHeight else 0f
+        layout.x = (ratioX * newWidth).toInt().coerceIn(0, newWidth)
+        layout.y = (ratioY * newHeight).toInt().coerceIn(0, newHeight)
+        previousWidth = newWidth
+        previousHeight = newHeight
+        try { manager.updateViewLayout(view, layout) } catch (_: RuntimeException) {}
+    }
+
     private fun showTrash(active: Boolean) {
         if (trash != null) return
         val target = TextView(this).apply {
@@ -105,9 +130,11 @@ class OverlayService : Service() {
         val screen = screenSize()
         val maxX = (screen.x - size).coerceAtLeast(0)
         val maxY = (screen.y - size).coerceAtLeast(0)
+        previousWidth = maxX
+        previousHeight = maxY
         val layout = params(size, size, Gravity.TOP or Gravity.LEFT).apply {
-            x = prefs.getInt("bubble_x", maxX - dp(12)).coerceIn(0, maxX)
-            y = prefs.getInt("bubble_y", maxY / 2).coerceIn(0, maxY)
+            x = (prefs.getFloat("bubble_ratio_x", 1f).coerceIn(0f, 1f) * maxX).toInt()
+            y = (prefs.getFloat("bubble_ratio_y", 0.5f).coerceIn(0f, 1f) * maxY).toInt()
         }
         val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
         var downRawX = 0f
@@ -125,6 +152,7 @@ class OverlayService : Service() {
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         downRawX = event.rawX; downRawY = event.rawY
+                        repositionBubble()
                         startX = layout.x; startY = layout.y
                         dragging = false
                         true
@@ -137,8 +165,11 @@ class OverlayService : Service() {
                             showTrash(false)
                         }
                         if (dragging) {
-                            layout.x = (startX + dx.toInt()).coerceIn(0, maxX)
-                            layout.y = (startY + dy.toInt()).coerceIn(0, maxY)
+                            val currentScreen = screenSize()
+                            val currentMaxX = (currentScreen.x - size).coerceAtLeast(0)
+                            val currentMaxY = (currentScreen.y - size).coerceAtLeast(0)
+                            layout.x = (startX + dx.toInt()).coerceIn(0, currentMaxX)
+                            layout.y = (startY + dy.toInt()).coerceIn(0, currentMaxY)
                             manager.updateViewLayout(view, layout)
                             trash?.alpha = if (isOverTrash(event.rawX, event.rawY)) 1f else 0.75f
                         }
@@ -150,7 +181,13 @@ class OverlayService : Service() {
                         if (remove) {
                             stopSelf()
                         } else if (dragging) {
-                            prefs.edit().putInt("bubble_x", layout.x).putInt("bubble_y", layout.y).apply()
+                            val bounds = screenSize()
+                            val rangeX = (bounds.x - size).coerceAtLeast(0)
+                            val rangeY = (bounds.y - size).coerceAtLeast(0)
+                            prefs.edit()
+                                .putFloat("bubble_ratio_x", if (rangeX > 0) layout.x.toFloat() / rangeX else 0f)
+                                .putFloat("bubble_ratio_y", if (rangeY > 0) layout.y.toFloat() / rangeY else 0f)
+                                .apply()
                         } else {
                             view.performClick()
                             showPanel()
@@ -165,6 +202,7 @@ class OverlayService : Service() {
         try {
             manager.addView(button, layout)
             bubble = button
+            bubbleLayout = layout
         } catch (_: RuntimeException) { stopSelf() }
     }
 
@@ -265,6 +303,7 @@ class OverlayService : Service() {
         panel = null
         bubble?.let { manager.removeView(it) }
         bubble = null
+        bubbleLayout = null
         super.onDestroy()
     }
 
