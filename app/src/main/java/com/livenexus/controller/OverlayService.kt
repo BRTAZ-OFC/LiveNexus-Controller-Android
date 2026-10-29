@@ -271,11 +271,11 @@ class OverlayService : Service() {
 
     private fun showAddControlMenu() {
         AlertDialog.Builder(this).setTitle("Adicionar controle")
-            .setItems(arrayOf("Cenário", "Overlay", "LivePix", "Contador +1", "Contador -1")) { _, selected ->
+            .setItems(arrayOf("Cenário", "Overlay", "LivePix", "Contador +1", "Contador -1", "Zerar contador")) { _, selected ->
                 val current = prefs.getInt("scenario_count", 0).coerceIn(0, 57)
                 if (current >= 57) Toast.makeText(this, "Limite de 60 controles", Toast.LENGTH_SHORT).show()
                 else {
-                    prefs.edit().putString("control_type_$current", arrayOf("Cenário", "Overlay", "LivePix", "Contador +1", "Contador -1")[selected])
+                    prefs.edit().putString("control_type_$current", arrayOf("Cenário", "Overlay", "LivePix", "Contador +1", "Contador -1", "Zerar contador")[selected])
                         .putInt("scenario_count", current + 1).apply()
                     hidePanel()
                     showPanel()
