@@ -412,9 +412,10 @@ class MainActivity : Activity() {
             Thread {
                 try {
                     LiveNexusApi.sendCommand(action)
-                    runOnUiThread { showConnectionMessage("Comando enviado ao LiveNEXUS: $kind") }
                 } catch (e: Exception) {
-                    runOnUiThread { showConnectionMessage(e.message ?: "Falha ao enviar comando.") }
+                    runOnUiThread {
+                        Toast.makeText(this, e.message ?: "Falha ao enviar comando.", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }.start()
         } else {
