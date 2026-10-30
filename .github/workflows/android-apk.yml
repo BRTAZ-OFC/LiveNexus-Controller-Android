@@ -30,12 +30,33 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
-      - name: Compilar APK debug
-        run: gradle --no-daemon :app:assembleDebug
+      - name: Preparar assinatura permanente
+        env:
+          LIVENEXUS_KEYSTORE_BASE64: ${{ secrets.LIVENEXUS_KEYSTORE_BASE64 }}
+          LIVENEXUS_KEYSTORE_PASSWORD: ${{ secrets.LIVENEXUS_KEYSTORE_PASSWORD }}
+          LIVENEXUS_KEY_ALIAS: ${{ secrets.LIVENEXUS_KEY_ALIAS }}
+          LIVENEXUS_KEY_PASSWORD: ${{ secrets.LIVENEXUS_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in LIVENEXUS_KEYSTORE_BASE64 LIVENEXUS_KEYSTORE_PASSWORD LIVENEXUS_KEY_ALIAS LIVENEXUS_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Configure o GitHub Actions Secret $name antes de compilar."
+              exit 1
+            fi
+          done
+          printf '%s' "$LIVENEXUS_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/livenexus-release.jks"
+          keytool -list -keystore "$RUNNER_TEMP/livenexus-release.jks" -storepass "$LIVENEXUS_KEYSTORE_PASSWORD" -alias "$LIVENEXUS_KEY_ALIAS" >/dev/null
+      - name: Compilar APK release assinado
+        env:
+          LIVENEXUS_KEYSTORE_PATH: ${{ runner.temp }}/livenexus-release.jks
+          LIVENEXUS_KEYSTORE_PASSWORD: ${{ secrets.LIVENEXUS_KEYSTORE_PASSWORD }}
+          LIVENEXUS_KEY_ALIAS: ${{ secrets.LIVENEXUS_KEY_ALIAS }}
+          LIVENEXUS_KEY_PASSWORD: ${{ secrets.LIVENEXUS_KEY_PASSWORD }}
+        run: gradle --no-daemon :app:assembleRelease
       - name: Publicar APK
         uses: actions/upload-artifact@v4
         with:
           name: LiveNexus-Controller-Android-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 14
