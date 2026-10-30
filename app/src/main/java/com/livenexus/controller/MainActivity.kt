@@ -219,6 +219,7 @@ class MainActivity : Activity() {
                         elevation = dp(5).toFloat(); isClickable = true
                         setOnClickListener {
                             if (i == 0) showPlayer()
+                            else if (i == 2) sendRtcReload()
                             else if (i < 3) showConnectionMessage("Ação ainda não conectada: ${name(i)}")
                             else showConfiguredControl(i)
                         }
@@ -370,6 +371,17 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun sendRtcReload() {
+        Thread {
+            try {
+                LiveNexusApi.sendCommand("rtc-reload")
+                runOnUiThread { showConnectionMessage("Comando de atualização RTC enviado.") }
+            } catch (e: Exception) {
+                runOnUiThread { showConnectionMessage(e.message ?: "Falha ao enviar comando RTC.") }
+            }
+        }.start()
+    }
+
     private fun showConfiguredControl(i: Int) {
         val kind = controlType(i - 3)
         val recordId = prefs.getString("control_record_${i - 3}", null)
@@ -391,15 +403,18 @@ class MainActivity : Activity() {
                     showConnectionMessage("Não foi possível abrir o Receiver: " + (e.message ?: "erro"))
                 }
             }
-        } else if (kind == "Teste contador +1") {
+        } else if (kind in setOf("Contador +1", "Contador -1", "Zerar contador", "Teste contador +1")) {
+            val action = when (kind) {
+                "Contador -1" -> "death-decrement"
+                "Zerar contador" -> "death-reset"
+                else -> "death-increment"
+            }
             Thread {
                 try {
-                    val result = LiveNexusApi.incrementLabCounter()
-                    runOnUiThread {
-                        showConnectionMessage("Laboratório: contador = ${result.optInt("value")}. Confira no Painel Admin → Laboratório.")
-                    }
+                    LiveNexusApi.sendCommand(action)
+                    runOnUiThread { showConnectionMessage("Comando enviado ao LiveNEXUS: $kind") }
                 } catch (e: Exception) {
-                    runOnUiThread { showConnectionMessage("Falha no laboratório: " + (e.message ?: "erro")) }
+                    runOnUiThread { showConnectionMessage(e.message ?: "Falha ao enviar comando.") }
                 }
             }.start()
         } else {
