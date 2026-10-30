@@ -19,7 +19,9 @@ jobs:
           distribution: temurin
           java-version: '17'
       - name: Android SDK
-        uses: android-actions/setup-android@v3
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          sdkmanager --licenses < /dev/null || true
       - name: Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
