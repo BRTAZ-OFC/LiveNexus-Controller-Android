@@ -253,7 +253,28 @@ class OverlayService : Service() {
                     }
                 }
                 setOnClickListener {
-                    if (label.equals("Música", true)) showMiniPlayer()
+                    val kind = if (i >= 3) controlType(i - 3) else ""
+                    val action = when {
+                        i == 2 -> "rtc-reload"
+                        kind == "Contador +1" -> "death-increment"
+                        kind == "Contador -1" -> "death-decrement"
+                        kind == "Zerar contador" -> "death-reset"
+                        else -> null
+                    }
+                    if (action != null) {
+                        Thread {
+                            try {
+                                LiveNexusApi.sendCommand(action)
+                                android.os.Handler(mainLooper).post {
+                                    Toast.makeText(this@OverlayService, "Comando enviado: $label", Toast.LENGTH_SHORT).show()
+                                }
+                            } catch (e: Exception) {
+                                android.os.Handler(mainLooper).post {
+                                    Toast.makeText(this@OverlayService, e.message ?: "Falha no comando", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        }.start()
+                    } else if (label.equals("Música", true)) showMiniPlayer()
                     else Toast.makeText(this@OverlayService, "Ação ainda não conectada: $label", Toast.LENGTH_SHORT).show()
                 }
             }
