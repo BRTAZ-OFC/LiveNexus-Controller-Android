@@ -40,7 +40,7 @@ class MainActivity : Activity() {
     private fun count() = prefs.getInt("scenario_count", 0).coerceIn(0, 57)
     private fun controlType(i: Int) = prefs.getString("control_type_$i", "Cenário") ?: "Cenário"
     private fun name(i: Int) = if (i < 3) listOf("Música", "Câmera", "Reload RTC")[i]
-        else prefs.getString("scenario_${i - 3}", "${controlType(i - 3)} ${i - 2}") ?: "${controlType(i - 3)} ${i - 2}"
+        else prefs.getString("scenario_${i - 3}", controlType(i - 3)) ?: controlType(i - 3)
     private fun text(value: String, size: Float, color: Int = Color.WHITE) = TextView(this).apply {
         text = value; textSize = size; setTextColor(color); gravity = Gravity.CENTER_VERTICAL
     }
@@ -331,11 +331,32 @@ class MainActivity : Activity() {
                         AlertDialog.Builder(this).setTitle("Selecionar $kind")
                             .setItems(labels) { _, position ->
                                 val record = records[position]
-                                val id = record.optString("id").ifBlank { record.optString("nome").ifBlank { record.optString("name") } }
+                                val id = record.optString("id")
                                 if (id.isBlank()) {
-                                    showConnectionMessage("Registro sem identificador. Nenhuma configuração foi salva.")
+                                    showConnectionMessage("Cenário sem identificador.")
+                                } else if (kind == "Cenário") {
+                                    val subs = record.optJSONArray("subScenarios")
+                                    val choices = (0 until (subs?.length() ?: 0)).mapNotNull { index ->
+                                        subs?.optJSONObject(index)?.takeIf {
+                                            it.optString("id").isNotBlank() && it.optString("name").isNotBlank()
+                                        }
+                                    }
+                                    if (choices.isEmpty()) {
+                                        showConnectionMessage("Este cenário não possui subcenários salvos.")
+                                    } else {
+                                        AlertDialog.Builder(this).setTitle("Selecionar subcenário")
+                                            .setItems(choices.map { it.optString("name") }.toTypedArray()) { _, subIndex ->
+                                                val sub = choices[subIndex]
+                                                prefs.edit().putString("control_record_${i - 3}", id)
+                                                    .putString("control_subscenario_${i - 3}", sub.optString("id"))
+                                                    .putString("control_user_${i - 3}", record.optString("user_id"))
+                                                    .putString("scenario_${i - 3}", sub.optString("name")).apply()
+                                                render()
+                                            }.setNegativeButton("Cancelar", null).show()
+                                    }
                                 } else {
                                     prefs.edit().putString("control_record_${i - 3}", id)
+                                        .remove("control_subscenario_${i - 3}")
                                         .putString("control_user_${i - 3}", record.optString("user_id"))
                                         .putString("scenario_${i - 3}", labels[position]).apply()
                                     render()
@@ -360,8 +381,10 @@ class MainActivity : Activity() {
                 showConnectionMessage("Registro sem user_id. Segure o botão e selecione novamente.")
             } else {
                 val path = if (kind == "Cenário") "/cenarios/receiver/" else "/overlay/receiver/"
+                val subId = if (kind == "Cenário") prefs.getString("control_subscenario_${i - 3}", "").orEmpty() else ""
                 val address = Uri.parse(LiveNexusApi.baseUrl + path + Uri.encode(recordId))
-                    .buildUpon().appendQueryParameter("user_id", userId).build()
+                    .buildUpon().appendQueryParameter("user_id", userId)
+                    .apply { if (subId.isNotBlank()) appendQueryParameter("subscenario_id", subId) }.build()
                 try {
                     startActivity(Intent(Intent.ACTION_VIEW, address))
                 } catch (e: Exception) {
