@@ -9,6 +9,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
+import android.graphics.Bitmap
+import android.os.Handler
+import android.os.HandlerThread
+import java.nio.ByteBuffer
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
@@ -28,6 +32,11 @@ class ScreenCaptureService : Service() {
         const val ACTION_STOP = "com.livenexus.controller.capture.STOP"
         const val EXTRA_RESULT_CODE = "capture_result_code"
         const val EXTRA_RESULT_DATA = "capture_result_data"
+        const val EXTRA_MAX_DIMENSION = "capture_max_dimension"
+        @Volatile var previewFrame: Bitmap? = null
+            private set
+        @Volatile var lastError: String? = null
+            private set
         private const val CHANNEL_ID = "livenexus_screen_capture"
         private const val NOTIFICATION_ID = 2
 
@@ -38,6 +47,7 @@ class ScreenCaptureService : Service() {
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var reader: ImageReader? = null
+    private var captureThread: HandlerThread? = null
     private var projectionCallback: MediaProjection.Callback? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -70,6 +80,8 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
         try {
+            lastError = null
+            previewFrame = null
             val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
                 action = ACTION_STOP
             }
@@ -110,19 +122,58 @@ class ScreenCaptureService : Service() {
             windowManager.defaultDisplay.getRealMetrics(metrics)
             val sourceWidth = metrics.widthPixels.coerceAtLeast(2)
             val sourceHeight = metrics.heightPixels.coerceAtLeast(2)
-            val scale = minOf(1.0, 1280.0 / maxOf(sourceWidth, sourceHeight))
+            val maxDimension = intent.getIntExtra(EXTRA_MAX_DIMENSION, 1280)
+                .coerceIn(480, 1920)
+            val scale = minOf(1.0, maxDimension.toDouble() / maxOf(sourceWidth, sourceHeight))
             val width = (sourceWidth * scale).toInt().coerceAtLeast(2)
             val height = (sourceHeight * scale).toInt().coerceAtLeast(2)
             val captureReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
             reader = captureReader
-            // Nesta etapa os frames são descartados: nenhum dado é salvo ou enviado.
+            // Prévia local em resolução reduzida; nenhum frame é transmitido ou gravado.
+            val worker = HandlerThread("LiveNexusCapturePreview").also { it.start() }
+            captureThread = worker
+            var lastPreviewAt = 0L
             captureReader.setOnImageAvailableListener({ source ->
-                try {
-                    source.acquireLatestImage()?.close()
-                } catch (_: RuntimeException) {
-                    // A sessão pode ter sido encerrada durante a leitura do frame.
+                val image = try { source.acquireLatestImage() } catch (_: RuntimeException) { null }
+                if (image != null) {
+                    try {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (now - lastPreviewAt >= 750L) {
+                            lastPreviewAt = now
+                            val plane = image.planes.firstOrNull()
+                            if (plane != null && plane.pixelStride == 4) {
+                                val paddedWidth = plane.rowStride / plane.pixelStride
+                                if (paddedWidth >= image.width) {
+                                    val bitmap = Bitmap.createBitmap(
+                                        paddedWidth, image.height, Bitmap.Config.ARGB_8888
+                                    )
+                                    plane.buffer.rewind()
+                                    bitmap.copyPixelsFromBuffer(plane.buffer)
+                                    val trimmed = if (paddedWidth == image.width) bitmap else {
+                                        Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
+                                    }
+                                    val maxPreviewWidth = 480
+                                    val ratio = minOf(
+                                        1f, maxPreviewWidth.toFloat() / trimmed.width.toFloat()
+                                    )
+                                    previewFrame = if (ratio < 1f) {
+                                        Bitmap.createScaledBitmap(
+                                            trimmed,
+                                            (trimmed.width * ratio).toInt().coerceAtLeast(1),
+                                            (trimmed.height * ratio).toInt().coerceAtLeast(1),
+                                            true
+                                        )
+                                    } else trimmed
+                                }
+                            }
+                        }
+                    } catch (error: Exception) {
+                        android.util.Log.w("LiveNexusCapture", "Prévia indisponível", error)
+                    } finally {
+                        image.close()
+                    }
                 }
-            }, null)
+            }, Handler(worker.looper))
             virtualDisplay = activeProjection.createVirtualDisplay(
                 "LiveNEXUS Screen Capture",
                 width,
@@ -136,6 +187,7 @@ class ScreenCaptureService : Service() {
             if (virtualDisplay == null) throw IllegalStateException("Falha ao criar a tela virtual.")
             isCapturing = true
         } catch (error: Exception) {
+            lastError = error.message ?: "Falha ao iniciar a captura."
             android.util.Log.e("LiveNexusCapture", "Falha ao iniciar captura", error)
             stopSelf()
         }
@@ -149,6 +201,9 @@ class ScreenCaptureService : Service() {
         reader?.setOnImageAvailableListener(null, null)
         reader?.close()
         reader = null
+        captureThread?.quitSafely()
+        captureThread = null
+        previewFrame = null
         val currentProjection = projection
         val callback = projectionCallback
         projectionCallback = null
