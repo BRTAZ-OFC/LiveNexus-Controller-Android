@@ -155,7 +155,7 @@ class OverlayService : Service() {
             textSize = 17f
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
-            background = tileBackground(Color.rgb(43, 205, 239))
+            background = NeonTheme.card()
             setOnTouchListener { view, event ->
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
@@ -232,12 +232,10 @@ class OverlayService : Service() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(8), dp(8), dp(8), dp(8))
-            setBackgroundColor(Color.rgb(10, 15, 25))
+            background = NeonTheme.backdrop()
         }
         val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        header.addView(TextView(this).apply {
-            text = "LiveNexus Controller"; textSize = 17f; setTextColor(Color.WHITE)
-        }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        header.addView(NeonHeader(this), LinearLayout.LayoutParams(0, dp(68), 1f))
         header.addView(TextView(this).apply {
             text = "−"; textSize = 28f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
             contentDescription = "Minimizar painel"

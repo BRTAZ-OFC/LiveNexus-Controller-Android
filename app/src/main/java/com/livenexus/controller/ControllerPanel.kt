@@ -28,17 +28,15 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
     private val prefs = context.getSharedPreferences("buttons", Context.MODE_PRIVATE)
     private val main = Handler(Looper.getMainLooper())
     private val dialogs = mutableListOf<AlertDialog>()
-    private val cyan = Color.rgb(43, 205, 239)
+    private val cyan = NeonTheme.cyan
     private var player = false
     private var disposed = false
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
     private fun kind(index: Int) = prefs.getString("control_type_$index", "Cenário").orEmpty()
     private fun count() = prefs.getInt("scenario_count", 0).coerceIn(0, 57)
     private fun error(message: String) { if (!disposed) Toast.makeText(context, message, Toast.LENGTH_LONG).show() }
-    private fun backgroundTile() = GradientDrawable().apply {
-        setColor(Color.rgb(19, 29, 45)); cornerRadius = dp(15).toFloat(); setStroke(dp(1), cyan)
-    }
-    init { orientation = VERTICAL; setPadding(dp(10), dp(10), dp(10), dp(10)); render() }
+    private fun backgroundTile() = NeonTheme.card()
+    init { orientation = VERTICAL; setPadding(dp(2), dp(4), dp(2), dp(4)); render() }
 
     private fun task(work: () -> Unit) {
         ControllerRuntime.commands.execute {
@@ -47,7 +45,7 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
     }
     private fun command(action: String) = task { LiveNexusApi.sendCommand(action) }
     private fun button(label: String, action: () -> Unit): TextView = TextView(context).apply {
-        text = label; textSize = 14f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
+        text = label; textSize = 14f; gravity = Gravity.CENTER; NeonTheme.styleLabel(this)
         setPadding(dp(8), dp(10), dp(8), dp(10)); background = backgroundTile()
         isClickable = true; isFocusable = true
         setOnClickListener { action() }
@@ -65,6 +63,9 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
         dialogs.add(dialog)
         dialog.setOnDismissListener { dialogs.remove(dialog) }
         dialog.show()
+        dialog.window?.setBackgroundDrawable(NeonTheme.card(true))
+        dialog.getButton(AlertDialog.BUTTON_NEGATIVE)?.setTextColor(NeonTheme.cyan)
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(NeonTheme.cyan)
     }
     private fun render() {
         if (disposed) return
@@ -73,11 +74,20 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
         val grid = GridLayout(context).apply { columnCount = 3 }
         fun tile(label: String, configure: (() -> Unit)? = null, action: () -> Unit) {
             val position = grid.childCount
-            grid.addView(button(label, action).apply {
+            val violet = position % 2 == 1
+            grid.addView(button(label.substringAfter('\n'), action).apply {
+                background = NeonTheme.card(violet, label.endsWith("Adicionar"))
+                textSize = 14f
+                maxLines = 3
+                setAutoSizeTextTypeUniformWithConfiguration(10, 14, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
+                setPadding(dp(6), dp(18), dp(6), dp(22))
+                val icon = NeonIcon(label.substringBefore('\n'), violet).apply { setBounds(0, 0, dp(44), dp(44)) }
+                setCompoundDrawables(null, icon, null, null)
+                compoundDrawablePadding = dp(10)
                 if (configure != null) setOnLongClickListener { configure(); true }
             }, GridLayout.LayoutParams().apply {
-                width = 0; height = dp(100); columnSpec = GridLayout.spec(position % 3, 1f)
-                rowSpec = GridLayout.spec(position / 3); setMargins(dp(3), dp(3), dp(3), dp(3))
+                width = 0; height = dp(138); columnSpec = GridLayout.spec(position % 3, 1f)
+                rowSpec = GridLayout.spec(position / 3); setMargins(dp(3), dp(4), dp(3), dp(4))
             })
         }
         tile("♫\nMúsica") { player = true; render() }
@@ -95,8 +105,15 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
     private fun renderPlayer() {
         val controls = listOf("▶ / ❚❚  Play / Pause" to "music-toggle", "◀  Música anterior" to "music-previous",
             "▶▶  Próxima música" to "music-next", "＋  Aumentar volume" to "music-volume-up", "−  Diminuir volume" to "music-volume-down")
-        controls.forEach { (label, action) ->
-            val control = button(label) { command(action) }
+        addView(TextView(context).apply {
+            text = "MÚSICA"; textSize = 17f; setTextColor(NeonTheme.cyan)
+            gravity = Gravity.CENTER; setPadding(0, dp(12), 0, dp(16))
+        })
+        controls.forEachIndexed { index, (label, action) ->
+            val control = button(label) { command(action) }.apply {
+                background = NeonTheme.card(index % 2 == 1)
+                setPadding(dp(12), dp(8), dp(12), dp(16))
+            }
             if (action.startsWith("music-volume-")) {
                 var pressed = false
                 var pending = false
@@ -120,7 +137,7 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
                     }
                 }
             }
-            addView(control, LayoutParams(-1, dp(56)).apply { bottomMargin = dp(8) })
+            addView(control, LayoutParams(-1, dp(70)).apply { bottomMargin = dp(8) })
         }
         addView(button("Voltar ao painel") { player = false; render() }, LayoutParams(-1, dp(52)))
     }

@@ -66,7 +66,7 @@ class MainActivity : Activity() {
         loginDialogs.clear()
         loginBrowsers.toList().forEach { releaseLoginBrowser(it) }
     }
-    private val cyan = Color.rgb(43, 205, 239)
+    private val cyan = NeonTheme.cyan
     private val background = Color.rgb(10, 15, 25)
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
     private fun shape(color: Int, stroke: Int = Color.rgb(47, 67, 89)) = GradientDrawable().apply {
@@ -81,6 +81,8 @@ class MainActivity : Activity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.statusBarColor = NeonTheme.ink
+        window.navigationBarColor = NeonTheme.ink
         if (ControllerRuntime.signedIn) { authenticated = true; render() } else showLogin()
     }
 
@@ -182,7 +184,7 @@ class MainActivity : Activity() {
                     """(function(){
                       if(location.pathname.startsWith('/login')){
                         const css=document.createElement('style');
-                        css.textContent='.auth-footer,.auth-back-link{display:none!important}';
+                        css.textContent='.auth-footer,.auth-back-link{display:none!important} body{background:linear-gradient(135deg,#03051b,#0c0325)!important;color:#fff!important} input{background:#050b26!important;color:#fff!important;border:1px solid #283cab!important;border-radius:12px!important} button{border-radius:14px!important;box-shadow:0 0 12px #7424d966!important}';
                         document.head.appendChild(css);
                       }
                       if(!window.__lnAuthCheck){
@@ -285,14 +287,14 @@ class MainActivity : Activity() {
         panel = null
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(this@MainActivity.background)
+            background = NeonTheme.backdrop()
             setPadding(dp(10), dp(10), dp(10), dp(10))
         }
-        root.addView(text("LiveNexus Controller", 21f, cyan), LinearLayout.LayoutParams(-1, dp(52)))
+        root.addView(NeonHeader(this), LinearLayout.LayoutParams(-1, dp(88)))
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         fun option(label: String, onTap: () -> Unit) {
             body.addView(text(label, 16f).apply {
-                setPadding(dp(16), dp(12), dp(16), dp(12)); background = shape(Color.rgb(19, 29, 45))
+                setPadding(dp(16), dp(12), dp(16), dp(12)); background = NeonTheme.card(true)
                 setOnClickListener { onTap() }
             }, LinearLayout.LayoutParams(-1, dp(64)).apply { bottomMargin = dp(10) })
         }
@@ -320,12 +322,20 @@ class MainActivity : Activity() {
             }
         }
         root.addView(ScrollView(this).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        val nav = LinearLayout(this)
+        val nav = LinearLayout(this).apply {
+            background = NeonTheme.card()
+            setPadding(dp(6), dp(8), dp(6), dp(8))
+        }
         listOf("Sobreposição", "Perfil", "Configuração").forEachIndexed { index, title ->
-            nav.addView(text(title, 13f, if (page == index) cyan else Color.LTGRAY).apply {
+            nav.addView(text(title, 12f, if (page == index) cyan else Color.rgb(142, 143, 169)).apply {
                 gravity = Gravity.CENTER
+                setPadding(dp(2), dp(5), dp(2), dp(12))
+                if (page == index) background = NeonTheme.card(true)
+                val icon = NeonIcon(listOf("▱", "♙", "⚙")[index]).apply { setBounds(0, 0, dp(26), dp(26)) }
+                setCompoundDrawables(null, icon, null, null)
+                compoundDrawablePadding = dp(5)
                 setOnClickListener { page = index; render() }
-            }, LinearLayout.LayoutParams(0, dp(56), 1f))
+            }, LinearLayout.LayoutParams(0, dp(72), 1f))
         }
         root.addView(nav)
         setContentView(root)
