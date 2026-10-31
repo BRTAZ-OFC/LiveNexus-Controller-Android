@@ -191,6 +191,26 @@ class MainActivity : Activity() {
         }
         return LayerDrawable(arrayOf(outer, InsetDrawable(inner, dp(5), dp(5), dp(5), dp(7))))
     }
+    private fun animateButtonPress(view: View) {
+        view.animate().cancel()
+        view.animate().scaleX(0.94f).scaleY(0.94f).alpha(0.78f).setDuration(75L).start()
+    }
+    private fun animateButtonRelease(view: View) {
+        view.animate().cancel()
+        view.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(135L).start()
+    }
+    private fun enableButtonFeedback(view: View) {
+        view.isClickable = true
+        view.isFocusable = true
+        view.setOnTouchListener { target, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> animateButtonPress(target)
+                android.view.MotionEvent.ACTION_UP,
+                android.view.MotionEvent.ACTION_CANCEL -> animateButtonRelease(target)
+            }
+            false
+        }
+    }
     private fun render() {
         if (!authenticated) { showLogin(); return }
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(this@MainActivity.background) }
@@ -216,7 +236,7 @@ class MainActivity : Activity() {
                     val color = accent(i)
                     val tile = LinearLayout(this).apply {
                         orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; background = tileStyle(color)
-                        elevation = dp(5).toFloat(); isClickable = true
+                        elevation = dp(5).toFloat(); enableButtonFeedback(this)
                         setOnClickListener {
                             if (i == 0) showPlayer()
                             else if (i == 2) sendRtcReload()
@@ -241,6 +261,7 @@ class MainActivity : Activity() {
                 }
                 val add = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; background = tileStyle(cyan)
+                    enableButtonFeedback(this)
                     setOnClickListener {
                         showAddMenu()
                     }
