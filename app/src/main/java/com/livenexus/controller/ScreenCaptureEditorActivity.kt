@@ -40,8 +40,11 @@ class ScreenCaptureEditorActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var resolution: Spinner
     private lateinit var scenesList: LinearLayout
+    private lateinit var layersList: LinearLayout
+    private lateinit var canvasEditor: CaptureSceneCanvas
+    private var selectedLayerId: String? = null
     private lateinit var sceneStatus: TextView
-    private data class Scene(val id: String, var name: String, val sources: MutableList<String>)
+    private data class Scene(val id: String, var name: String, val sources: MutableList<CaptureLayer>)
     private val scenes = mutableListOf<Scene>()
     private var selectedSceneId = ""
     private var activeUi = false
@@ -79,38 +82,59 @@ class ScreenCaptureEditorActivity : Activity() {
             setPadding(0, dp(10), 0, dp(8))
         })
         content.addView(label("Prévia local da tela autorizada. Nada é transmitido para a internet.", 12f))
-        preview = ImageView(this).apply {
-            setBackgroundColor(Color.rgb(6, 8, 24))
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            contentDescription = "Prévia da captura de tela"
+        canvasEditor = CaptureSceneCanvas(this).apply {
+            contentDescription = "Canvas visual de cenas. Arraste a fonte ou redimensione pelo canto."
+            onSelection = { id ->
+                selectedLayerId = id
+                showLayers()
+            }
+            onChange = { persistScenes(); showLayers() }
         }
-        content.addView(preview, LinearLayout.LayoutParams(-1, dp(260)).apply {
+        content.addView(canvasEditor, LinearLayout.LayoutParams(-1, dp(270)).apply {
             topMargin = dp(12)
             bottomMargin = dp(10)
         })
+        preview = ImageView(this).apply { visibility = View.GONE }
         status = label("Captura desligada.", 13f)
         content.addView(status, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) })
-        content.addView(label("CENAS E FONTES", 17f).apply {
+        content.addView(label("CENAS", 17f).apply {
             setTypeface(null, Typeface.BOLD)
+            setPadding(0, dp(12), 0, dp(8))
         })
         sceneStatus = label("", 13f)
         content.addView(sceneStatus)
         scenesList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(scenesList)
-        content.addView(control("Adicionar cena") { editSceneName(null) })
-        content.addView(control("Renomear cena") {
-            scenes.find { it.id == selectedSceneId }?.let { editSceneName(it) }
+        val sceneButtons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun sceneAction(name: String, action: () -> Unit) {
+            sceneButtons.addView(control(name, action),
+                LinearLayout.LayoutParams(0, dp(48), 1f))
+        }
+        sceneAction("+ Cena") { editSceneName(null) }
+        sceneAction("Renomear") { activeScene()?.let { editSceneName(it) } }
+        sceneAction("Excluir") { removeScene() }
+        content.addView(sceneButtons)
+        content.addView(label("FONTES / CAMADAS", 17f).apply {
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, dp(15), 0, dp(7))
         })
-        content.addView(control("Adicionar fonte: captura de tela") {
-            scenes.find { it.id == selectedSceneId }?.let {
-                if (!it.sources.contains("screen")) {
-                    it.sources.add("screen")
-                    persistScenes()
-                    showScenes()
-                } else Toast.makeText(this, "Fonte já adicionada.", Toast.LENGTH_SHORT).show()
-            }
+        layersList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(layersList)
+        content.addView(control("+ Adicionar fonte") { chooseSource() },
+            LinearLayout.LayoutParams(-1, dp(48)))
+        val layerActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun layerAction(name: String, action: () -> Unit) {
+            layerActions.addView(control(name, action), LinearLayout.LayoutParams(0, dp(47), 1f))
+        }
+        layerAction("↑") { reorderLayer(1) }
+        layerAction("↓") { reorderLayer(-1) }
+        layerAction("Ocultar") { changeLayer("visible") }
+        layerAction("Bloquear") { changeLayer("locked") }
+        layerAction("Remover") { changeLayer("remove") }
+        content.addView(layerActions)
+        content.addView(label("Toque na fonte para selecionar. Arraste no canvas para mover; use o canto inferior direito para redimensionar.", 12f).apply {
+            setPadding(0, dp(7), 0, dp(14))
         })
-        content.addView(control("Remover cena") { removeScene() })
         loadScenes()
         showScenes()
         content.addView(label("Resolução da captura", 15f).apply {
@@ -143,6 +167,8 @@ class ScreenCaptureEditorActivity : Activity() {
         setContentView(root)
     }
 
+    private fun activeScene(): Scene? = scenes.find { it.id == selectedSceneId }
+
     private fun loadScenes() {
         scenes.clear()
         val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -150,29 +176,66 @@ class ScreenCaptureEditorActivity : Activity() {
             val saved = JSONArray(prefs.getString("capture_scenes", "[]"))
             for (i in 0 until saved.length()) {
                 val item = saved.optJSONObject(i) ?: continue
-                val id = item.optString("id")
-                val name = item.optString("name")
+                val id = item.optString("id").trim()
+                val name = item.optString("name").trim()
                 if (id.isBlank() || name.isBlank() || scenes.any { it.id == id }) continue
-                val sources = mutableListOf<String>()
+                val sources = mutableListOf<CaptureLayer>()
                 val list = item.optJSONArray("sources")
                 for (j in 0 until (list?.length() ?: 0)) {
-                    if (list?.optString(j) == "screen" && !sources.contains("screen")) sources.add("screen")
+                    val raw = list?.opt(j)
+                    if (raw is String && raw == "screen") {
+                        // Compatibilidade com as cenas criadas no PONTO SEGURO 32.
+                        sources.add(CaptureLayer(java.util.UUID.randomUUID().toString(), "screen", "Captura de tela"))
+                    } else if (raw is JSONObject) {
+                        val type = raw.optString("type")
+                        if (type != "screen" && type != "text") continue
+                        val sourceId = raw.optString("id").ifBlank { java.util.UUID.randomUUID().toString() }
+                        if (sources.any { it.id == sourceId }) continue
+                        sources.add(CaptureLayer(
+                            sourceId, type,
+                            raw.optString("name").ifBlank { if (type == "screen") "Captura de tela" else "Texto" },
+                            raw.optDouble("x", 0.1).toFloat().coerceIn(0f, .92f),
+                            raw.optDouble("y", 0.1).toFloat().coerceIn(0f, .92f),
+                            raw.optDouble("width", .8).toFloat().coerceIn(.08f, 1f),
+                            raw.optDouble("height", .65).toFloat().coerceIn(.08f, 1f),
+                            raw.optBoolean("visible", true),
+                            raw.optBoolean("locked", false)
+                        ).also {
+                            it.width = it.width.coerceAtMost(1f - it.x)
+                            it.height = it.height.coerceAtMost(1f - it.y)
+                        })
+                    }
                 }
                 scenes.add(Scene(id, name, sources))
             }
         } catch (_: org.json.JSONException) {
-            Toast.makeText(this, "Não foi possível carregar cenas.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Não foi possível carregar as cenas.", Toast.LENGTH_LONG).show()
         }
-        if (scenes.isEmpty()) scenes.add(Scene("default", "Cena 1", mutableListOf("screen")))
+        if (scenes.isEmpty()) scenes.add(Scene("default", "Cena 1",
+            mutableListOf(CaptureLayer("default-screen", "screen", "Captura de tela"))))
         val savedId = prefs.getString("active_capture_scene", "")
         selectedSceneId = scenes.find { it.id == savedId }?.id ?: scenes.first().id
+        selectedLayerId = activeScene()?.sources?.lastOrNull()?.id
     }
 
     private fun persistScenes() {
         val array = JSONArray()
         scenes.forEach { scene ->
+            val sources = JSONArray()
+            scene.sources.forEach { layer ->
+                sources.put(JSONObject()
+                    .put("id", layer.id)
+                    .put("type", layer.type)
+                    .put("name", layer.name)
+                    .put("x", layer.x)
+                    .put("y", layer.y)
+                    .put("width", layer.width)
+                    .put("height", layer.height)
+                    .put("visible", layer.visible)
+                    .put("locked", layer.locked))
+            }
             array.put(JSONObject().put("id", scene.id).put("name", scene.name)
-                .put("sources", JSONArray(scene.sources)))
+                .put("sources", sources))
         }
         getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString("capture_scenes", array.toString())
@@ -183,18 +246,33 @@ class ScreenCaptureEditorActivity : Activity() {
     private fun showScenes() {
         scenesList.removeAllViews()
         scenes.forEach { scene ->
-            scenesList.addView(control(
-                (if (scene.id == selectedSceneId) "● " else "○ ") + scene.name +
-                    (if ("screen" in scene.sources) "  |  Tela" else "  |  Sem fontes")
-            ) {
+            scenesList.addView(control((if (scene.id == selectedSceneId) "● " else "○ ") +
+                scene.name + "  (${scene.sources.size} fontes)") {
                 selectedSceneId = scene.id
+                selectedLayerId = scene.sources.lastOrNull()?.id
                 persistScenes()
                 showScenes()
-            })
+            }, LinearLayout.LayoutParams(-1, dp(43)))
         }
-        sceneStatus.text = "Cena selecionada: " +
-            (scenes.find { it.id == selectedSceneId }?.name ?: "Nenhuma") +
-            " (configuração local, sem composição de vídeo)"
+        sceneStatus.text = "Cena ativa: " + (activeScene()?.name ?: "Nenhuma")
+        showLayers()
+    }
+
+    private fun showLayers() {
+        if (!::layersList.isInitialized || !::canvasEditor.isInitialized) return
+        layersList.removeAllViews()
+        val sources = activeScene()?.sources ?: emptyList()
+        sources.asReversed().forEach { layer ->
+            val label = (if (selectedLayerId == layer.id) "● " else "○ ") +
+                (if (layer.visible) "◉ " else "⊘ ") +
+                (if (layer.locked) "▣ " else "") + layer.name
+            layersList.addView(control(label) {
+                selectedLayerId = layer.id
+                showLayers()
+            }, LinearLayout.LayoutParams(-1, dp(42)))
+        }
+        canvasEditor.layers = sources
+        canvasEditor.selectedLayerId = selectedLayerId
     }
 
     private fun editSceneName(scene: Scene?) {
@@ -215,6 +293,7 @@ class ScreenCaptureEditorActivity : Activity() {
                         val created = Scene(java.util.UUID.randomUUID().toString(), name, mutableListOf())
                         scenes.add(created)
                         selectedSceneId = created.id
+                        selectedLayerId = null
                     } else scene.name = name
                     persistScenes()
                     showScenes()
@@ -234,11 +313,72 @@ class ScreenCaptureEditorActivity : Activity() {
             .setPositiveButton("Remover") { _, _ ->
                 scenes.removeAll { it.id == selectedSceneId }
                 selectedSceneId = scenes.first().id
+                selectedLayerId = activeScene()?.sources?.lastOrNull()?.id
                 persistScenes()
                 showScenes()
             }
             .setNegativeButton("Cancelar", null)
             .show()
+    }
+
+    private fun chooseSource() {
+        AlertDialog.Builder(this).setTitle("Adicionar fonte")
+            .setItems(arrayOf("Captura de tela", "Texto")) { _, which ->
+                if (which == 0) addSource("screen", "Captura de tela")
+                else {
+                    val field = EditText(this).apply { setSingleLine(true); setText("Texto") }
+                    AlertDialog.Builder(this).setTitle("Conteúdo do texto")
+                        .setView(field)
+                        .setPositiveButton("Adicionar") { _, _ ->
+                            val content = field.text.toString().trim()
+                            if (content.isNotEmpty()) addSource("text", content.take(80))
+                        }
+                        .setNegativeButton("Cancelar", null).show()
+                }
+            }.show()
+    }
+
+    private fun addSource(type: String, name: String) {
+        val scene = activeScene() ?: return
+        if (type == "screen" && scene.sources.any { it.type == "screen" }) {
+            Toast.makeText(this, "A cena já possui captura de tela.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val layer = CaptureLayer(java.util.UUID.randomUUID().toString(), type, name,
+            if (type == "screen") 0f else .15f,
+            if (type == "screen") 0f else .15f,
+            if (type == "screen") 1f else .6f,
+            if (type == "screen") 1f else .25f)
+        scene.sources.add(layer)
+        selectedLayerId = layer.id
+        persistScenes()
+        showLayers()
+    }
+
+    private fun changeLayer(action: String) {
+        val scene = activeScene() ?: return
+        val layer = scene.sources.find { it.id == selectedLayerId } ?: return
+        when (action) {
+            "visible" -> layer.visible = !layer.visible
+            "locked" -> layer.locked = !layer.locked
+            "remove" -> {
+                scene.sources.remove(layer)
+                selectedLayerId = scene.sources.lastOrNull()?.id
+            }
+        }
+        persistScenes()
+        showLayers()
+    }
+
+    private fun reorderLayer(direction: Int) {
+        val sources = activeScene()?.sources ?: return
+        val index = sources.indexOfFirst { it.id == selectedLayerId }
+        val next = index + direction
+        if (index < 0 || next !in sources.indices) return
+        val layer = sources.removeAt(index)
+        sources.add(next, layer)
+        persistScenes()
+        showLayers()
     }
 
     private fun askPermission() {
@@ -289,10 +429,7 @@ class ScreenCaptureEditorActivity : Activity() {
                 ScreenCaptureService.lastError != null -> "Erro: ${ScreenCaptureService.lastError}"
                 else -> "Captura desligada."
             }
-            if (running) {
-                val frame = ScreenCaptureService.previewFrame
-                if (frame != null) preview.setImageBitmap(frame)
-            } else preview.setImageDrawable(null)
+            canvasEditor.frame = if (running) ScreenCaptureService.previewFrame else null
             ui.postDelayed(this, 850L)
         }
     }
