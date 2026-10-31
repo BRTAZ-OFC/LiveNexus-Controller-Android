@@ -26,6 +26,8 @@ import android.widget.ArrayAdapter
 import android.widget.TextView
 import android.widget.Toast
 import android.widget.HorizontalScrollView
+import android.widget.SeekBar
+import android.widget.Switch
 
 /**
  * Editor local de captura. Não inclui transmissão, áudio nem salvamento de vídeo.
@@ -123,6 +125,68 @@ class ScreenCaptureEditorActivity : Activity() {
                     })
             }
         }
+
+    private fun audioPanel(compact: Boolean): LinearLayout {
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val panel = LinearLayout(this).apply {
+            orientation = if (compact) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = shape(violet, true)
+            setPadding(dp(9), dp(4), dp(9), dp(4))
+        }
+        val heading = section("♫  ÁUDIO DA CAPTURA", if (compact) 11f else 13f)
+        panel.addView(heading, if (compact)
+            LinearLayout.LayoutParams(0, -1, 1.15f) else params(-1, dp(27)))
+
+        fun channel(name: String, key: String, symbol: String): LinearLayout {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            row.addView(label("$symbol  $name", if (compact) 10f else 12f).apply {
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }, LinearLayout.LayoutParams(0, -2, if (compact) 1.2f else 1.35f))
+            val enabled = Switch(this).apply {
+                isChecked = prefs.getBoolean("${key}_enabled", true)
+                contentDescription = "Ativar $name"
+                setOnCheckedChangeListener { _, checked ->
+                    prefs.edit().putBoolean("${key}_enabled", checked).apply()
+                }
+            }
+            row.addView(enabled, params(dp(if (compact) 39 else 48), -2))
+            val value = label("", if (compact) 10f else 12f).apply {
+                gravity = Gravity.CENTER
+            }
+            val slider = SeekBar(this).apply {
+                max = 100
+                progress = prefs.getInt("${key}_volume", if (key == "mic") 75 else 85)
+                contentDescription = "Volume de $name"
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                        value.text = "$progress%"
+                        if (fromUser) prefs.edit().putInt("${key}_volume", progress).apply()
+                    }
+                    override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                    override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+                })
+            }
+            value.text = "${slider.progress}%"
+            row.addView(slider, LinearLayout.LayoutParams(0, dp(35), 1.1f))
+            row.addView(value, params(dp(39), -2))
+            return row
+        }
+        val mic = channel("Microfone", "mic", "♩")
+        val internal = channel("Áudio interno", "internal", "♫")
+        if (compact) {
+            panel.addView(mic, LinearLayout.LayoutParams(0, -1, 2f))
+            panel.addView(internal, LinearLayout.LayoutParams(0, -1, 2.15f))
+        } else {
+            panel.addView(mic, params(-1, dp(40)))
+            panel.addView(internal, params(-1, dp(40)))
+        }
+        return panel
+    }
 
     private fun stopCapture() {
         stopService(Intent(this, ScreenCaptureService::class.java))
@@ -313,6 +377,7 @@ class ScreenCaptureEditorActivity : Activity() {
             columns.addView(right, LinearLayout.LayoutParams(0, -1, 2f))
             root.addView(columns, LinearLayout.LayoutParams(-1, 0, 1f))
             root.addView(bottom, params(-1, dp(57), 2))
+            root.addView(audioPanel(true), params(-1, dp(49), 3))
         } else {
             val scroll = ScrollView(this)
             val stack = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -323,6 +388,7 @@ class ScreenCaptureEditorActivity : Activity() {
             stack.addView(scenePanel, params(-1, -2, 0, 9))
             stack.addView(sourcesPanel, params(-1, -2, 0, 9))
             stack.addView(bottom)
+            stack.addView(audioPanel(false), params(-1, -2, 7))
             scroll.addView(stack)
             root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         }
