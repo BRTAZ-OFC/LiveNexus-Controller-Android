@@ -266,7 +266,7 @@ class ScreenCaptureEditorActivity : Activity() {
                 rightMargin = dp(10)
             })
             val rightScroll = ScrollView(this).apply {
-                fillViewport = true
+                isFillViewport = true
                 isVerticalScrollBarEnabled = true
             }
             val right = LinearLayout(this).apply {
