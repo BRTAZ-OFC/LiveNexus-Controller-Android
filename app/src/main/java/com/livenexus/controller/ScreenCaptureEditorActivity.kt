@@ -913,8 +913,8 @@ class ScreenCaptureEditorActivity : Activity() {
             .setNeutralButton("Conectar conta") { _, _ ->
                 AlertDialog.Builder(this)
                     .setTitle("Conectar plataforma")
-                    .setItems(arrayOf("Twitch", "YouTube")) { _, which ->
-                        connectStreamingAccount(if (which == 0) "twitch" else "youtube")
+                    .setItems(arrayOf("Twitch", "YouTube", "Kick")) { _, which ->
+                        connectStreamingAccount(arrayOf("twitch", "youtube", "kick")[which])
                     }.show()
             }
             .setNegativeButton("Cancelar", null)
