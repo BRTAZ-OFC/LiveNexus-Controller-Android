@@ -3,7 +3,7 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-    <application android:allowBackup="false" android:label="LiveNexus Controller" android:theme="@style/LiveNexusTheme" android:supportsRtl="true">
+    <application android:icon="@drawable/livenexus_launcher" android:roundIcon="@drawable/livenexus_launcher" android:allowBackup="false" android:label="LiveNexus Controller" android:theme="@style/LiveNexusTheme" android:supportsRtl="true">
         <activity android:name=".ScreenCaptureEditorActivity" android:exported="false" />
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
