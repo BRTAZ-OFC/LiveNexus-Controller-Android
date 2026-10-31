@@ -68,59 +68,61 @@ class ScreenCaptureEditorActivity : Activity() {
         setOnClickListener { action() }
     }
 
-    private val violet = Color.rgb(198, 22, 244)
+    private val violet = Color.rgb(191, 31, 240)
     private val cyan = NeonTheme.cyan
+    private val textMuted = Color.rgb(165, 169, 193)
+    private val stroke = Color.rgb(52, 61, 110)
+    private var landscapeEditor = false
 
-    private fun panel(stroke: Int = Color.rgb(57, 65, 110)): GradientDrawable =
+    private fun shape(outline: Int = stroke, active: Boolean = false): GradientDrawable =
         GradientDrawable(GradientDrawable.Orientation.TL_BR,
-            intArrayOf(Color.rgb(18, 19, 51), Color.rgb(5, 9, 31))).apply {
-            cornerRadius = dp(15).toFloat()
-            setStroke(dp(1), stroke)
+            intArrayOf(
+                if (active) Color.rgb(65, 13, 95) else Color.rgb(16, 19, 48),
+                Color.rgb(6, 9, 30)
+            )
+        ).apply {
+            cornerRadius = dp(13).toFloat()
+            setStroke(dp(if (active) 2 else 1).coerceAtLeast(1), outline)
         }
 
-    private fun neonButton(text: String, accent: Int = violet, action: () -> Unit): TextView =
-        label(text, 13f).apply {
-            gravity = Gravity.CENTER
+    private fun caption(text: String, size: Float = 12f): TextView = label(text, size).apply {
+        setTextColor(textMuted)
+        gravity = Gravity.CENTER_VERTICAL
+    }
+
+    private fun tap(
+        title: String, active: Boolean = false, accent: Int = violet, action: () -> Unit
+    ): TextView = label(title, if (landscapeEditor) 11f else 13f).apply {
+        gravity = Gravity.CENTER
+        setTypeface(null, if (active) Typeface.BOLD else Typeface.NORMAL)
+        setPadding(dp(5), dp(3), dp(5), dp(3))
+        background = shape(if (active) accent else stroke, active)
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { action() }
+    }
+
+    private fun section(title: String, size: Float = 15f): TextView =
+        label("▏" + title, size).apply {
             setTypeface(null, Typeface.BOLD)
-            background = panel(accent)
-            setPadding(dp(10), dp(7), dp(10), dp(7))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { action() }
+            gravity = Gravity.CENTER_VERTICAL
         }
 
-    private fun section(title: String): TextView = label("▏" + title, 16f).apply {
-        setTypeface(null, Typeface.BOLD)
-        setPadding(dp(4), dp(8), dp(4), dp(8))
-    }
+    private fun params(w: Int = -1, h: Int = -2, top: Int = 0, bottom: Int = 0) =
+        LinearLayout.LayoutParams(w, h).apply {
+            topMargin = dp(top); bottomMargin = dp(bottom)
+        }
 
-    private fun layoutParams(
-        height: Int = -2, width: Int = -1, top: Int = 0, bottom: Int = 0
-    ): LinearLayout.LayoutParams = LinearLayout.LayoutParams(width, height).apply {
-        topMargin = dp(top)
-        bottomMargin = dp(bottom)
-    }
-
-    private fun weightedRow(vararg buttons: Pair<String, () -> Unit>): LinearLayout =
+    private fun row(vararg items: Pair<String, () -> Unit>, height: Int = 43): LinearLayout =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            buttons.forEachIndexed { i, item ->
-                addView(neonButton(item.first, if (i == 0) violet else Color.rgb(65, 78, 146), item.second),
-                    LinearLayout.LayoutParams(0, dp(44), 1f).apply {
-                        if (i > 0) leftMargin = dp(6)
+            items.forEachIndexed { i, item ->
+                addView(tap(item.first, i == 0, if (i == 0) violet else stroke, item.second),
+                    LinearLayout.LayoutParams(0, dp(height), 1f).apply {
+                        if (i > 0) leftMargin = dp(5)
                     })
             }
         }
-
-    private fun openSettings() {
-        AlertDialog.Builder(this)
-            .setTitle("Configurações de captura")
-            .setItems(arrayOf("Sobre a prévia", "Encerrar captura")) { _, index ->
-                if (index == 1) stopCapture()
-                else Toast.makeText(this,
-                    "A prévia é local; a transmissão não está integrada.", Toast.LENGTH_LONG).show()
-            }.show()
-    }
 
     private fun stopCapture() {
         stopService(Intent(this, ScreenCaptureService::class.java))
@@ -128,77 +130,133 @@ class ScreenCaptureEditorActivity : Activity() {
         canvasEditor.frame = null
     }
 
+    private fun openSettings() {
+        AlertDialog.Builder(this).setTitle("Configurações de captura")
+            .setItems(arrayOf("Sobre a prévia", "Encerrar captura")) { _, which ->
+                if (which == 1) stopCapture()
+                else Toast.makeText(this, "A prévia é local, sem envio para plataformas.",
+                    Toast.LENGTH_LONG).show()
+            }.show()
+    }
+
+    private fun navigation(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        background = shape()
+        setPadding(dp(5), dp(3), dp(5), dp(3))
+        val destinations = listOf(
+            Triple("⌂", "Controlador", false),
+            Triple("▣", "Captura", true),
+            Triple("◉", "Transmissão", false),
+            Triple("⚙", "Configurações", false)
+        )
+        destinations.forEachIndexed { index, (icon, name, active) ->
+            val tab = LinearLayout(this@ScreenCaptureEditorActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                if (active) background = shape(violet, true)
+                addView(label(icon, if (landscapeEditor) 19f else 22f).apply {
+                    gravity = Gravity.CENTER
+                    setTextColor(if (active) violet else Color.WHITE)
+                })
+                addView(label(name, if (landscapeEditor) 10f else 11f).apply {
+                    gravity = Gravity.CENTER
+                    setTextColor(if (active) violet else Color.WHITE)
+                    maxLines = 1
+                })
+                setOnClickListener {
+                    when (index) {
+                        0 -> finish()
+                        2 -> Toast.makeText(this@ScreenCaptureEditorActivity,
+                            "Transmissão não integrada.", Toast.LENGTH_SHORT).show()
+                        3 -> openSettings()
+                    }
+                }
+            }
+            addView(tab, LinearLayout.LayoutParams(0, -1, 1f))
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = NeonTheme.ink
         window.navigationBarColor = NeonTheme.ink
-        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        landscapeEditor = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val compact = landscapeEditor
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = NeonTheme.backdrop()
-            setPadding(dp(if (landscape) 12 else 14), dp(6), dp(if (landscape) 12 else 14), dp(8))
+            setPadding(dp(if (compact) 9 else 12), dp(3), dp(if (compact) 9 else 12), dp(5))
         }
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        header.addView(NeonHeader(this), LinearLayout.LayoutParams(
-            if (landscape) dp(210) else 0, dp(if (landscape) 65 else 72),
-            if (landscape) 0f else 1f
-        ))
-        if (landscape) header.addView(label("▏EDITOR DE CAPTURA", 19f).apply {
-            setTypeface(null, Typeface.BOLD)
+        header.addView(NeonHeader(this),
+            LinearLayout.LayoutParams(if (compact) dp(175) else 0,
+                dp(if (compact) 50 else 66), if (compact) 0f else 1f))
+        if (compact) header.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setPadding(dp(12), 0, 0, 0)
+            addView(section("EDITOR DE CAPTURA", 18f))
+            addView(caption("Crie cenas, adicione fontes e capture sua tela.", 10f))
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        header.addView(neonButton("▣", violet) { finish() }, layoutParams(dp(40), dp(46)))
-        header.addView(neonButton("⋮", cyan) { openSettings() },
-            LinearLayout.LayoutParams(dp(46), dp(40)).apply { leftMargin = dp(6) })
-        root.addView(header, layoutParams(dp(if (landscape) 53 else 72)))
+        header.addView(tap("▤", false) { finish() },
+            params(dp(37), dp(36)))
+        header.addView(tap("⋮", false) { openSettings() },
+            LinearLayout.LayoutParams(dp(37), dp(36)).apply { leftMargin = dp(6) })
+        root.addView(header, params(-1, dp(if (compact) 53 else 68)))
 
         canvasEditor = CaptureSceneCanvas(this).apply {
-            contentDescription = "Prévia editável de cenas. Arraste ou redimensione as fontes."
-            onSelection = { selectedLayerId = it; showLayers() }
+            contentDescription = "Prévia do cenário: mover com um dedo; redimensionar com dois."
+            onSelection = { id -> selectedLayerId = id; showLayers() }
             onChange = { persistScenes(); showLayers() }
-            background = panel(violet)
+            background = shape(violet, true)
         }
         preview = ImageView(this).apply { visibility = View.GONE }
-        status = label("Captura desligada.", 12f).apply {
-            setTextColor(Color.rgb(164, 180, 207))
-        }
-        sceneStatus = label("", 12f)
+        status = caption("Captura desligada.", 11f)
+        sceneStatus = caption("", 11f)
         scenesList = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         layersList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         val scenePanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = panel()
-            setPadding(dp(9), dp(8), dp(9), dp(9))
-            addView(section("CENAS"))
-            addView(sceneStatus)
-            val swipe = HorizontalScrollView(this@ScreenCaptureEditorActivity).apply {
+            background = shape()
+            setPadding(dp(8), dp(5), dp(8), dp(7))
+            val top = LinearLayout(this@ScreenCaptureEditorActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(section("CENAS", 14f), LinearLayout.LayoutParams(0, -1, 1f))
+                addView(caption("Gerenciar cenas ›", 10f).apply {
+                    setOnClickListener { editSceneName(null) }
+                })
+            }
+            addView(top, params(-1, dp(27)))
+            addView(sceneStatus, params(-1, dp(19)))
+            addView(HorizontalScrollView(this@ScreenCaptureEditorActivity).apply {
                 isHorizontalScrollBarEnabled = false
                 addView(scenesList)
-            }
-            addView(swipe, layoutParams(dp(48), -1, 6, 5))
-            addView(weightedRow(
+            }, params(-1, dp(43), 2, 4))
+            addView(row(
                 "+ Cena" to { editSceneName(null) },
                 "Renomear" to { activeScene()?.let { editSceneName(it) } },
-                "Excluir" to { removeScene() }
+                "Excluir" to { removeScene() },
+                height = 34
             ))
         }
 
         val sourcesPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = panel()
-            setPadding(dp(9), dp(8), dp(9), dp(9))
-            val sectionHead = LinearLayout(this@ScreenCaptureEditorActivity).apply {
+            background = shape()
+            setPadding(dp(8), dp(7), dp(8), dp(6))
+            addView(LinearLayout(this@ScreenCaptureEditorActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                addView(section("FONTES / CAMADAS").apply { textSize = if (landscape) 13f else 16f }, LinearLayout.LayoutParams(0, -2, 1f))
-                addView(neonButton("+ Adicionar fonte", cyan) { chooseSource() },
-                    LinearLayout.LayoutParams(dp(if (landscape) 144 else 160), dp(39)))
-            }
-            addView(sectionHead)
+                addView(section("FONTES / CAMADAS", if (compact) 12f else 15f),
+                    LinearLayout.LayoutParams(0, -1, 1f))
+                addView(tap("+ Adicionar fonte", false, cyan) { chooseSource() },
+                    params(dp(if (compact) 117 else 155), dp(33)))
+            }, params(-1, dp(37), 0, 3))
             addView(layersList)
         }
 
@@ -210,92 +268,72 @@ class ScreenCaptureEditorActivity : Activity() {
             val saved = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getInt(KEY_RESOLUTION, 1280)
             setSelection(sizes.indexOf(saved).takeIf { it >= 0 } ?: 1)
-            background = panel(violet)
+            background = shape(violet)
         }
-        val bottomControls = LinearLayout(this).apply {
-            orientation = if (landscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        val bottom = LinearLayout(this).apply {
+            orientation = if (compact) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
-            background = panel()
-            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setPadding(dp(8), dp(5), dp(8), dp(5))
+            background = shape()
         }
         val resolutionRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(label("▣  RESOLUÇÃO", 13f).apply {
+            addView(label(if (compact) "▣ RESOLUÇÃO" else "RESOLUÇÃO DA CAPTURA", 11f).apply {
                 setTypeface(null, Typeface.BOLD)
-            }, LinearLayout.LayoutParams(0, -2, 1f))
+                maxLines = 1
+                gravity = Gravity.CENTER_VERTICAL
+            }, LinearLayout.LayoutParams(0, -1, if (compact) 0.8f else 1f))
             addView(resolution, LinearLayout.LayoutParams(
-                dp(if (landscape) 185 else 200), dp(47)))
+                0, dp(36), if (compact) 1.2f else 1f))
         }
-        bottomControls.addView(resolutionRow, if (landscape)
-            LinearLayout.LayoutParams(0, dp(50), 1f) else layoutParams(dp(50)))
-        val actions = weightedRow(
-            "◉  Iniciar captura" to { askPermission() },
-            "■  Parar captura" to { stopCapture() },
-            "◉  Transmitir" to {
-                Toast.makeText(this,
-                    "Transmissão ainda não integrada. Somente prévia local.",
-                    Toast.LENGTH_LONG).show()
-            }
-        )
-        bottomControls.addView(actions, if (landscape)
-            LinearLayout.LayoutParams(0, -2, 2f).apply { leftMargin = dp(10) }
-            else layoutParams(dp(49), -1, 7))
-
-        val navigation = weightedRow(
-            "⌂ Controlador" to { finish() },
-            "▣ Captura" to { },
-            "◉ Transmissão" to {
-                Toast.makeText(this, "Transmissão ainda não integrada.", Toast.LENGTH_SHORT).show()
+        bottom.addView(resolutionRow,
+            if (compact) LinearLayout.LayoutParams(0, dp(42), 2f) else params(-1, dp(42)))
+        val actions = row(
+            "◉ Iniciar captura" to { askPermission() },
+            "■ Parar captura" to { stopCapture() },
+            "◉ Transmitir" to {
+                Toast.makeText(this, "Transmissão não integrada.", Toast.LENGTH_LONG).show()
             },
-            "⚙ Configurações" to { openSettings() }
+            height = 41
         )
-        if (landscape) {
-            // All important editor panels remain visible in landscape, with
-            // scrolling confined to the right-hand source/scene column.
+        bottom.addView(actions,
+            if (compact) LinearLayout.LayoutParams(0, -2, 3f).apply { leftMargin = dp(9) }
+            else params(-1, -2, 6))
+
+        if (compact) {
             val columns = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
-                setPadding(0, dp(5), 0, dp(4))
+                setPadding(0, dp(4), 0, dp(4))
             }
-            val left = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-            }
+            val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             left.addView(canvasEditor, LinearLayout.LayoutParams(-1, 0, 1f))
-            left.addView(status, layoutParams(dp(23), -1, 4))
+            left.addView(status, params(-1, dp(19), 3))
             columns.addView(left, LinearLayout.LayoutParams(0, -1, 3f).apply {
-                rightMargin = dp(10)
+                rightMargin = dp(8)
             })
-            val rightScroll = ScrollView(this).apply {
-                isFillViewport = true
-                isVerticalScrollBarEnabled = true
-            }
-            val right = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-            }
-            right.addView(scenePanel, layoutParams(-2, -1, 0, 7))
-            right.addView(sourcesPanel)
-            rightScroll.addView(right)
-            columns.addView(rightScroll, LinearLayout.LayoutParams(0, -1, 2f))
+            val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            right.addView(scenePanel, params(-1, -2, 0, 6))
+            val sourceScroll = ScrollView(this).apply { isFillViewport = false }
+            sourceScroll.addView(sourcesPanel)
+            right.addView(sourceScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+            columns.addView(right, LinearLayout.LayoutParams(0, -1, 2f))
             root.addView(columns, LinearLayout.LayoutParams(-1, 0, 1f))
-            root.addView(bottomControls, layoutParams(dp(65), -1, 2))
-            root.addView(navigation, layoutParams(dp(47), -1, 5))
+            root.addView(bottom, params(-1, dp(57), 2))
         } else {
-            val editorScroll = ScrollView(this)
-            val work = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(0, dp(4), 0, dp(7))
-            }
-            work.addView(section("EDITOR DE CAPTURA"))
-            work.addView(label("Crie cenas, adicione fontes e capture sua tela.", 12f))
-            work.addView(canvasEditor, layoutParams(dp(245), -1, 12, 5))
-            work.addView(status, layoutParams(-2, -1, 0, 9))
-            work.addView(scenePanel, layoutParams(-2, -1, 4, 9))
-            work.addView(sourcesPanel, layoutParams(-2, -1, 0, 9))
-            work.addView(bottomControls)
-            editorScroll.addView(work)
-            root.addView(editorScroll, LinearLayout.LayoutParams(-1, 0, 1f))
-            root.addView(navigation, layoutParams(dp(52), -1, 5))
+            val scroll = ScrollView(this)
+            val stack = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            stack.addView(section("EDITOR DE CAPTURA", 19f))
+            stack.addView(caption("Crie cenas, adicione fontes e capture sua tela.", 12f))
+            stack.addView(canvasEditor, params(-1, dp(238), 8, 5))
+            stack.addView(status, params(-1, -2, 0, 8))
+            stack.addView(scenePanel, params(-1, -2, 0, 9))
+            stack.addView(sourcesPanel, params(-1, -2, 0, 9))
+            stack.addView(bottom)
+            scroll.addView(stack)
+            root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         }
+        root.addView(navigation(), params(-1, dp(if (compact) 53 else 62), 5))
         setContentView(root)
         loadScenes()
         showScenes()
