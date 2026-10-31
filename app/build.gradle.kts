@@ -5,7 +5,7 @@ android {
     defaultConfig {
         applicationId = "com.livenexus.controller"
         minSdk = 29
-        targetSdk = 32
+        targetSdk = 33
         val buildNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
         versionCode = 100000 + buildNumber
         versionName = "1.0.$buildNumber"
