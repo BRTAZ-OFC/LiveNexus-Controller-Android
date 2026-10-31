@@ -80,10 +80,10 @@ object LiveNexusApi {
     fun overlays() = request("/api/overlays").getJSONArray("items")
     fun selectSubscenario(scenarioId: String, subcenarioId: String): JSONObject {
         require(scenarioId.isNotBlank() && subcenarioId.isNotBlank()) { "Cenário e subcenário obrigatórios." }
-        return request("/api/controller/commands", "POST", JSONObject()
-            .put("action", "scenario-select")
+        val result = request("/api/cenarios/select-subscenario", "POST", JSONObject()
             .put("scenarioId", scenarioId)
             .put("subcenarioId", subcenarioId))
+        return result
     }
 
     fun sendCommand(action: String): JSONObject {
