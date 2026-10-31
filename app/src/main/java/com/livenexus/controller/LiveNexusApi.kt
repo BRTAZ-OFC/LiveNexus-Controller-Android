@@ -58,16 +58,20 @@ object LiveNexusApi {
     }
 
     fun streamingConnected(platform: String): Boolean {
-        require(platform == "twitch" || platform == "youtube") { "Plataforma não permitida." }
+        require(platform in setOf("twitch", "youtube", "kick")) { "Plataforma não permitida." }
         return request("/api/auth/$platform/status").getBoolean("connected")
     }
 
     fun streamingAuthorizationUrl(platform: String): String {
-        require(platform == "twitch" || platform == "youtube") { "Plataforma não permitida." }
+        require(platform in setOf("twitch", "youtube", "kick")) { "Plataforma não permitida." }
         val response = request("/api/auth/$platform/url")
         val url = response.optString("url")
         val parsed = URL(url)
-        val allowed = if (platform == "twitch") "id.twitch.tv" else "accounts.google.com"
+        val allowed = when (platform) {
+            "twitch" -> "id.twitch.tv"
+            "youtube" -> "accounts.google.com"
+            else -> "id.kick.com"
+        }
         require(parsed.protocol == "https" && parsed.host == allowed) {
             "O servidor retornou uma URL de autorização inválida."
         }
