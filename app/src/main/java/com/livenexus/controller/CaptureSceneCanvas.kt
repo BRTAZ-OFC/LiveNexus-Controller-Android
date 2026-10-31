@@ -88,6 +88,13 @@ class CaptureSceneCanvas(context: Context) : View(context) {
         return android.graphics.Rect(left, 0, right + 1, bitmap.height)
     }
 
+    // Canvas Full HD logico (1920 x 1080), escalado sem distorcer.
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val measuredWidth = View.MeasureSpec.getSize(widthMeasureSpec)
+        val measuredHeight = (measuredWidth * 9f / 16f).toInt().coerceAtLeast(1)
+        setMeasuredDimension(measuredWidth, measuredHeight)
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         canvas.drawColor(Color.rgb(4, 8, 28))
