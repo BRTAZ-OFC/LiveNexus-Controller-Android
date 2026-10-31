@@ -78,6 +78,14 @@ object LiveNexusApi {
     fun logout() { token = null; CookieManager.getInstance().removeAllCookies(null); CookieManager.getInstance().flush() }
     fun scenarios() = request("/api/cenarios").getJSONArray("items")
     fun overlays() = request("/api/overlays").getJSONArray("items")
+    fun selectSubscenario(scenarioId: String, subcenarioId: String): JSONObject {
+        require(scenarioId.isNotBlank() && subcenarioId.isNotBlank()) { "Cenário e subcenário obrigatórios." }
+        return request("/api/controller/commands", "POST", JSONObject()
+            .put("action", "scenario-select")
+            .put("scenarioId", scenarioId)
+            .put("subcenarioId", subcenarioId))
+    }
+
     fun sendCommand(action: String): JSONObject {
         require(action in setOf("death-increment", "death-decrement", "death-reset", "rtc-reload", "music-toggle", "music-next", "music-previous", "music-volume-up", "music-volume-down")) {
             "Comando não permitido."
