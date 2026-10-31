@@ -21,6 +21,7 @@ class OverlayService : Service() {
     private var trash: View? = null
     private var panel: View? = null
     private val channel = "controller_overlay"
+    private val scenarioCommands = java.util.concurrent.Executors.newSingleThreadExecutor()
     private val prefs by lazy { getSharedPreferences("buttons", MODE_PRIVATE) }
     private fun tileBackground(accent: Int = Color.rgb(55, 88, 120)) = GradientDrawable().apply {
         setColor(Color.rgb(19, 29, 45)); cornerRadius = dp(15).toFloat(); setStroke(dp(1), accent)
@@ -261,7 +262,24 @@ class OverlayService : Service() {
                         kind == "Zerar contador" -> "death-reset"
                         else -> null
                     }
-                    if (action != null) {
+                    if (kind == "Cenário") {
+                        val index = i - 3
+                        val scenarioId = prefs.getString("control_record_$index", "").orEmpty()
+                        val subscenarioId = prefs.getString("control_subscenario_$index", "").orEmpty()
+                        if (scenarioId.isBlank() || subscenarioId.isBlank()) {
+                            selectRealRecord(index, kind)
+                        } else {
+                            scenarioCommands.execute {
+                                try {
+                                    LiveNexusApi.selectSubscenario(scenarioId, subscenarioId)
+                                } catch (e: Exception) {
+                                    android.os.Handler(mainLooper).post {
+                                        Toast.makeText(this@OverlayService, e.message ?: "Falha ao trocar subcenário.", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }
+                        }
+                    } else if (action != null) {
                         Thread {
                             try {
                                 LiveNexusApi.sendCommand(action)
@@ -319,9 +337,35 @@ class OverlayService : Service() {
                         val dialog = AlertDialog.Builder(this).setTitle("Selecionar $kind")
                             .setItems(labels) { _, position ->
                                 val item = records[position]
-                                val id = item.optString("id").ifBlank { item.optString("nome").ifBlank { item.optString("name") } }
-                                if (id.isNotBlank()) {
+                                val id = item.optString("id")
+                                if (id.isBlank()) {
+                                    Toast.makeText(this, "Registro sem identificador.", Toast.LENGTH_LONG).show()
+                                } else if (kind == "Cenário") {
+                                    val subs = item.optJSONArray("subScenarios")
+                                    val choices = (0 until (subs?.length() ?: 0)).mapNotNull { subIndex ->
+                                        subs?.optJSONObject(subIndex)?.takeIf {
+                                            it.optString("id").isNotBlank() && it.optString("name").isNotBlank()
+                                        }
+                                    }
+                                    if (choices.isEmpty()) {
+                                        Toast.makeText(this, "Este cenário não possui subcenários salvos.", Toast.LENGTH_LONG).show()
+                                    } else {
+                                        val subDialog = AlertDialog.Builder(this).setTitle("Selecionar subcenário")
+                                            .setItems(choices.map { it.optString("name") }.toTypedArray()) { _, subIndex ->
+                                                val sub = choices[subIndex]
+                                                prefs.edit().putString("control_record_$index", id)
+                                                    .putString("control_subscenario_$index", sub.optString("id"))
+                                                    .putString("control_user_$index", item.optString("user_id"))
+                                                    .putString("scenario_$index", sub.optString("name")).apply()
+                                                hidePanel()
+                                                showPanel()
+                                            }.setNegativeButton("Cancelar", null).create()
+                                        subDialog.window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+                                        subDialog.show()
+                                    }
+                                } else {
                                     prefs.edit().putString("control_record_$index", id)
+                                        .remove("control_subscenario_$index")
                                         .putString("control_user_$index", item.optString("user_id"))
                                         .putString("scenario_$index", labels[position]).apply()
                                     hidePanel()
@@ -390,6 +434,7 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        scenarioCommands.shutdown()
         hideTrash()
         panel?.let { manager.removeView(it) }
         panel = null
