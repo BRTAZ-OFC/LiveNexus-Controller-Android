@@ -38,6 +38,7 @@ class ScreenCaptureEditorActivity : Activity() {
         private const val CAPTURE_REQUEST = 7820
         private const val PREFS = "livenexus_capture_settings"
         private const val KEY_RESOLUTION = "max_dimension"
+        private const val KEY_FPS = "capture_fps"
     }
 
     private val ui = Handler(Looper.getMainLooper())
@@ -344,6 +345,29 @@ class ScreenCaptureEditorActivity : Activity() {
             addView(resolution, LinearLayout.LayoutParams(
                 0, dp(36), if (compact) 1.2f else 1f))
         }
+        val fps = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@ScreenCaptureEditorActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                arrayOf("30 FPS", "60 FPS")
+            )
+            val savedFps = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getInt(KEY_FPS, 30)
+            setSelection(if (savedFps == 60) 1 else 0)
+            background = shape(violet)
+            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(
+                    parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long
+                ) {
+                    getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                        .putInt(KEY_FPS, if (position == 1) 60 else 30).apply()
+                }
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            }
+        }
+        resolutionRow.addView(fps, LinearLayout.LayoutParams(
+            dp(if (compact) 85 else 100), dp(36)
+        ).apply { leftMargin = dp(6) })
         bottom.addView(resolutionRow,
             if (compact) LinearLayout.LayoutParams(0, dp(42), 2f) else params(-1, dp(42)))
         val actions = row(
