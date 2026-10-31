@@ -1,6 +1,10 @@
 package com.livenexus.controller
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.widget.EditText
+import org.json.JSONArray
+import org.json.JSONObject
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -35,6 +39,11 @@ class ScreenCaptureEditorActivity : Activity() {
     private lateinit var preview: ImageView
     private lateinit var status: TextView
     private lateinit var resolution: Spinner
+    private lateinit var scenesList: LinearLayout
+    private lateinit var sceneStatus: TextView
+    private data class Scene(val id: String, var name: String, val sources: MutableList<String>)
+    private val scenes = mutableListOf<Scene>()
+    private var selectedSceneId = ""
     private var activeUi = false
     private val options = arrayOf("480p (econômico)", "720p (padrão)", "1080p (alta resolução)")
     private val sizes = intArrayOf(854, 1280, 1920)
@@ -81,6 +90,29 @@ class ScreenCaptureEditorActivity : Activity() {
         })
         status = label("Captura desligada.", 13f)
         content.addView(status, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) })
+        content.addView(label("CENAS E FONTES", 17f).apply {
+            setTypeface(null, Typeface.BOLD)
+        })
+        sceneStatus = label("", 13f)
+        content.addView(sceneStatus)
+        scenesList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(scenesList)
+        content.addView(control("Adicionar cena") { editSceneName(null) })
+        content.addView(control("Renomear cena") {
+            scenes.find { it.id == selectedSceneId }?.let { editSceneName(it) }
+        })
+        content.addView(control("Adicionar fonte: captura de tela") {
+            scenes.find { it.id == selectedSceneId }?.let {
+                if (!it.sources.contains("screen")) {
+                    it.sources.add("screen")
+                    persistScenes()
+                    showScenes()
+                } else Toast.makeText(this, "Fonte já adicionada.", Toast.LENGTH_SHORT).show()
+            }
+        })
+        content.addView(control("Remover cena") { removeScene() })
+        loadScenes()
+        showScenes()
         content.addView(label("Resolução da captura", 15f).apply {
             setTypeface(null, Typeface.BOLD)
         })
@@ -109,6 +141,104 @@ class ScreenCaptureEditorActivity : Activity() {
         scroll.addView(content)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
+    }
+
+    private fun loadScenes() {
+        scenes.clear()
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        try {
+            val saved = JSONArray(prefs.getString("capture_scenes", "[]"))
+            for (i in 0 until saved.length()) {
+                val item = saved.optJSONObject(i) ?: continue
+                val id = item.optString("id")
+                val name = item.optString("name")
+                if (id.isBlank() || name.isBlank() || scenes.any { it.id == id }) continue
+                val sources = mutableListOf<String>()
+                val list = item.optJSONArray("sources")
+                for (j in 0 until (list?.length() ?: 0)) {
+                    if (list?.optString(j) == "screen" && !sources.contains("screen")) sources.add("screen")
+                }
+                scenes.add(Scene(id, name, sources))
+            }
+        } catch (_: org.json.JSONException) {
+            Toast.makeText(this, "Não foi possível carregar cenas.", Toast.LENGTH_LONG).show()
+        }
+        if (scenes.isEmpty()) scenes.add(Scene("default", "Cena 1", mutableListOf("screen")))
+        val savedId = prefs.getString("active_capture_scene", "")
+        selectedSceneId = scenes.find { it.id == savedId }?.id ?: scenes.first().id
+    }
+
+    private fun persistScenes() {
+        val array = JSONArray()
+        scenes.forEach { scene ->
+            array.put(JSONObject().put("id", scene.id).put("name", scene.name)
+                .put("sources", JSONArray(scene.sources)))
+        }
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("capture_scenes", array.toString())
+            .putString("active_capture_scene", selectedSceneId)
+            .apply()
+    }
+
+    private fun showScenes() {
+        scenesList.removeAllViews()
+        scenes.forEach { scene ->
+            scenesList.addView(control(
+                (if (scene.id == selectedSceneId) "● " else "○ ") + scene.name +
+                    (if ("screen" in scene.sources) "  |  Tela" else "  |  Sem fontes")
+            ) {
+                selectedSceneId = scene.id
+                persistScenes()
+                showScenes()
+            })
+        }
+        sceneStatus.text = "Cena selecionada: " +
+            (scenes.find { it.id == selectedSceneId }?.name ?: "Nenhuma") +
+            " (configuração local, sem composição de vídeo)"
+    }
+
+    private fun editSceneName(scene: Scene?) {
+        val field = EditText(this).apply {
+            setSingleLine(true)
+            setText(scene?.name ?: "Nova cena")
+            selectAll()
+        }
+        AlertDialog.Builder(this)
+            .setTitle(if (scene == null) "Criar cena" else "Renomear cena")
+            .setView(field)
+            .setPositiveButton("Salvar") { _, _ ->
+                val name = field.text.toString().trim()
+                if (name.length !in 1..50) {
+                    Toast.makeText(this, "Nome entre 1 e 50 caracteres.", Toast.LENGTH_LONG).show()
+                } else {
+                    if (scene == null) {
+                        val created = Scene(java.util.UUID.randomUUID().toString(), name, mutableListOf())
+                        scenes.add(created)
+                        selectedSceneId = created.id
+                    } else scene.name = name
+                    persistScenes()
+                    showScenes()
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun removeScene() {
+        if (scenes.size <= 1) {
+            Toast.makeText(this, "Mantenha ao menos uma cena.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Remover cena selecionada?")
+            .setPositiveButton("Remover") { _, _ ->
+                scenes.removeAll { it.id == selectedSceneId }
+                selectedSceneId = scenes.first().id
+                persistScenes()
+                showScenes()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
     }
 
     private fun askPermission() {
