@@ -318,6 +318,13 @@ class MainActivity : Activity() {
                 option("Editor de captura de tela") {
                     startActivity(Intent(this, ScreenCaptureEditorActivity::class.java))
                 }
+                option("Desconectar conta") {
+                    ControllerRuntime.signedIn = false
+                    stopService(Intent(this, OverlayService::class.java))
+                    LiveNexusApi.logout()
+                    panel?.dispose()
+                    showLogin()
+                }
                 option("Permissão de sobreposição") { permission() }
                 body.addView(text("Minimize para mostrar o botão flutuante.\nAo voltar ao aplicativo, a sobreposição desaparece.", 15f).apply {
                     setPadding(dp(12), dp(12), dp(12), dp(12))
@@ -325,22 +332,45 @@ class MainActivity : Activity() {
             }
         }
         root.addView(ScrollView(this).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        // Navegação leve, com somente a aba ativa destacada, como no template.
         val nav = LinearLayout(this).apply {
-            background = NeonTheme.card()
-            setPadding(dp(6), dp(8), dp(6), dp(8))
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = shape(Color.rgb(7, 11, 33))
+            setPadding(dp(5), dp(4), dp(5), dp(4))
         }
-        listOf("Sobreposição", "Captura", "Configuração").forEachIndexed { index, title ->
-            nav.addView(text(title, 12f, if (page == index) cyan else Color.rgb(142, 143, 169)).apply {
+        val titles = listOf("Controlador", "Captura", "Transmissão", "Configurações")
+        val symbols = listOf("⌂", "▣", "◉", "⚙")
+        titles.forEachIndexed { index, title ->
+            val active = (index == 0 && page == 0) || (index == 3 && page == 2)
+            val tab = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
-                setPadding(dp(2), dp(5), dp(2), dp(12))
-                if (page == index) background = NeonTheme.card(true)
-                val icon = NeonIcon(listOf("▱", "▣", "⚙")[index]).apply { setBounds(0, 0, dp(26), dp(26)) }
-                setCompoundDrawables(null, icon, null, null)
-                compoundDrawablePadding = dp(5)
-                setOnClickListener { if (index == 1) startActivity(Intent(this@MainActivity, ScreenCaptureEditorActivity::class.java)) else { page = index; render() } }
-            }, LinearLayout.LayoutParams(0, dp(72), 1f))
+                if (active) background = shape(Color.rgb(38, 10, 79), NeonTheme.purple)
+                addView(text(symbols[index], 21f,
+                    if (active) NeonTheme.purple else Color.WHITE).apply {
+                    gravity = Gravity.CENTER
+                })
+                addView(text(title, 10f,
+                    if (active) NeonTheme.purple else Color.WHITE).apply {
+                    gravity = Gravity.CENTER
+                    maxLines = 1
+                })
+                setOnClickListener {
+                    when (index) {
+                        0 -> { page = 0; render() }
+                        1 -> startActivity(
+                            Intent(this@MainActivity, ScreenCaptureEditorActivity::class.java)
+                        )
+                        2 -> Toast.makeText(this@MainActivity,
+                            "Transmissão ainda não integrada.", Toast.LENGTH_SHORT).show()
+                        3 -> { page = 2; render() }
+                    }
+                }
+            }
+            nav.addView(tab, LinearLayout.LayoutParams(0, -1, 1f))
         }
-        root.addView(nav)
+        root.addView(nav, LinearLayout.LayoutParams(-1, dp(60)))
         setContentView(root)
         prepareOverlay()
     }
