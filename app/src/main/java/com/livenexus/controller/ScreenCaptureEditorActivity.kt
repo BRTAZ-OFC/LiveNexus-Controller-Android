@@ -153,7 +153,7 @@ class ScreenCaptureEditorActivity : Activity() {
         header.addView(neonButton("▣", violet) { finish() }, layoutParams(dp(40), dp(46)))
         header.addView(neonButton("⋮", cyan) { openSettings() },
             LinearLayout.LayoutParams(dp(46), dp(40)).apply { leftMargin = dp(6) })
-        root.addView(header)
+        root.addView(header, layoutParams(dp(if (landscape) 53 else 72)))
 
         canvasEditor = CaptureSceneCanvas(this).apply {
             contentDescription = "Prévia editável de cenas. Arraste ou redimensione as fontes."
@@ -194,7 +194,7 @@ class ScreenCaptureEditorActivity : Activity() {
             val sectionHead = LinearLayout(this@ScreenCaptureEditorActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                addView(section("FONTES / CAMADAS"), LinearLayout.LayoutParams(0, -2, 1f))
+                addView(section("FONTES / CAMADAS").apply { textSize = if (landscape) 13f else 16f }, LinearLayout.LayoutParams(0, -2, 1f))
                 addView(neonButton("+ Adicionar fonte", cyan) { chooseSource() },
                     LinearLayout.LayoutParams(dp(if (landscape) 144 else 160), dp(39)))
             }
@@ -242,15 +242,49 @@ class ScreenCaptureEditorActivity : Activity() {
             LinearLayout.LayoutParams(0, -2, 2f).apply { leftMargin = dp(10) }
             else layoutParams(dp(49), -1, 7))
 
-        val editorScroll = ScrollView(this).apply {
-            isFillViewport = false
-            clipToPadding = false
-        }
-        val work = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(4), 0, dp(5))
-        }
-        if (!landscape) {
+        val navigation = weightedRow(
+            "⌂ Controlador" to { finish() },
+            "▣ Captura" to { },
+            "◉ Transmissão" to {
+                Toast.makeText(this, "Transmissão ainda não integrada.", Toast.LENGTH_SHORT).show()
+            },
+            "⚙ Configurações" to { openSettings() }
+        )
+        if (landscape) {
+            // All important editor panels remain visible in landscape, with
+            // scrolling confined to the right-hand source/scene column.
+            val columns = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(5), 0, dp(4))
+            }
+            val left = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            left.addView(canvasEditor, LinearLayout.LayoutParams(-1, 0, 1f))
+            left.addView(status, layoutParams(dp(23), -1, 4))
+            columns.addView(left, LinearLayout.LayoutParams(0, -1, 3f).apply {
+                rightMargin = dp(10)
+            })
+            val rightScroll = ScrollView(this).apply {
+                fillViewport = true
+                isVerticalScrollBarEnabled = true
+            }
+            val right = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            right.addView(scenePanel, layoutParams(-2, -1, 0, 7))
+            right.addView(sourcesPanel)
+            rightScroll.addView(right)
+            columns.addView(rightScroll, LinearLayout.LayoutParams(0, -1, 2f))
+            root.addView(columns, LinearLayout.LayoutParams(-1, 0, 1f))
+            root.addView(bottomControls, layoutParams(dp(65), -1, 2))
+            root.addView(navigation, layoutParams(dp(47), -1, 5))
+        } else {
+            val editorScroll = ScrollView(this)
+            val work = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(4), 0, dp(7))
+            }
             work.addView(section("EDITOR DE CAPTURA"))
             work.addView(label("Crie cenas, adicione fontes e capture sua tela.", 12f))
             work.addView(canvasEditor, layoutParams(dp(245), -1, 12, 5))
@@ -258,30 +292,10 @@ class ScreenCaptureEditorActivity : Activity() {
             work.addView(scenePanel, layoutParams(-2, -1, 4, 9))
             work.addView(sourcesPanel, layoutParams(-2, -1, 0, 9))
             work.addView(bottomControls)
-        } else {
-            val cols = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            left.addView(canvasEditor, layoutParams(dp(280), -1, 0, 5))
-            left.addView(status)
-            cols.addView(left, LinearLayout.LayoutParams(0, -2, 3f).apply { rightMargin = dp(9) })
-            val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            right.addView(scenePanel, layoutParams(-2, -1, 0, 8))
-            right.addView(sourcesPanel)
-            cols.addView(right, LinearLayout.LayoutParams(0, -2, 2f))
-            work.addView(cols)
-            work.addView(bottomControls, layoutParams(-2, -1, 8))
+            editorScroll.addView(work)
+            root.addView(editorScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+            root.addView(navigation, layoutParams(dp(52), -1, 5))
         }
-        editorScroll.addView(work)
-        root.addView(editorScroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        val navigation = weightedRow(
-            "⌂  Controlador" to { finish() },
-            "▣  Captura" to { },
-            "◉  Transmissão" to {
-                Toast.makeText(this, "Transmissão ainda não integrada.", Toast.LENGTH_SHORT).show()
-            },
-            "⚙  Configurações" to { openSettings() }
-        )
-        root.addView(navigation, layoutParams(dp(49), -1, 6))
         setContentView(root)
         loadScenes()
         showScenes()
