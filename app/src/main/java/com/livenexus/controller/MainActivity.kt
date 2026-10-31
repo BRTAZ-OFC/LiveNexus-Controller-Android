@@ -81,7 +81,7 @@ class MainActivity : Activity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        showLogin()
+        if (ControllerRuntime.signedIn) { authenticated = true; render() } else showLogin()
     }
 
     private inner class LoginBridge {
@@ -105,6 +105,8 @@ class MainActivity : Activity() {
 
     private fun showLogin() {
         authenticated = false
+        ControllerRuntime.signedIn = false
+        stopService(Intent(this, OverlayService::class.java))
         val browser = WebView(this)
         loginBrowsers.add(browser)
         browser.settings.javaScriptEnabled = true
@@ -217,491 +219,117 @@ class MainActivity : Activity() {
             }
         }.start()
     }
-    override fun onResume() { super.onResume(); if (::status.isInitialized) updateStatus() }
-    private lateinit var status: TextView
-    private fun updateStatus() { status.text = if (Settings.canDrawOverlays(this)) "● ON" else "○ OFF" }
-    private val purple = Color.rgb(162, 95, 255)
-    private val red = Color.rgb(245, 65, 105)
+
+    private var panel: ControllerPanel? = null
     private var page = 0
-    private fun accent(i: Int) = if (i >= 2) purple else cyan
-    private fun tileStyle(accent: Int): android.graphics.drawable.Drawable {
-        val outer = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Color.rgb(45, 65, 89), Color.rgb(9, 16, 27))).apply {
-            cornerRadius = dp(18).toFloat(); setStroke(dp(1), Color.rgb(58, 83, 112))
-        }
-        val inner = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Color.rgb(22, 36, 54), Color.rgb(9, 16, 27))).apply {
-            cornerRadius = dp(15).toFloat(); setStroke(dp(1), Color.argb(110, Color.red(accent), Color.green(accent), Color.blue(accent)))
-        }
-        return LayerDrawable(arrayOf(outer, InsetDrawable(inner, dp(5), dp(5), dp(5), dp(7))))
+    private var resumed = false
+
+    override fun onStart() {
+        super.onStart()
+        ControllerRuntime.foreground = true
+        OverlayService.refreshVisibility()
     }
-    private fun animateButtonPress(view: View) {
-        view.animate().cancel()
-        view.scaleX = 0.94f
-        view.scaleY = 0.94f
-        view.alpha = 0.78f
+
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+        if (authenticated) prepareOverlay()
     }
-    private fun animateButtonRelease(view: View) {
-        view.animate().cancel()
-        view.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(135L).start()
+
+    override fun onPause() {
+        resumed = false
+        super.onPause()
     }
-    private val commandQueue = java.util.concurrent.Executors.newSingleThreadExecutor()
-    private fun enableButtonFeedback(view: View) {
-        view.isClickable = true
-        view.isFocusable = true
-        view.setOnTouchListener { target, event ->
-            when (event.actionMasked) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    target.parent?.requestDisallowInterceptTouchEvent(true)
-                    animateButtonPress(target)
-                }
-                android.view.MotionEvent.ACTION_UP,
-                android.view.MotionEvent.ACTION_CANCEL -> {
-                    animateButtonRelease(target)
-                    target.parent?.requestDisallowInterceptTouchEvent(false)
-                }
-            }
-            false
+
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) {
+            ControllerRuntime.foreground = false
+            OverlayService.refreshVisibility()
         }
     }
-    private fun render() {
-        if (!authenticated) { showLogin(); return }
+
+    override fun onBackPressed() {
+        if (authenticated) moveTaskToBack(true) else super.onBackPressed()
+    }
+
+    override fun onDestroy() {
+        panel?.dispose()
+        loginDialogs.forEach { it.setOnDismissListener(null) }
         closeLoginBrowsers()
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(this@MainActivity.background) }
-        val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(17), dp(17), dp(17), dp(17)) }
-        header.addView(text("☰", 29f, Color.LTGRAY).apply {
-            enableButtonFeedback(this)
-            setOnClickListener { showOptions() }
-        }, LinearLayout.LayoutParams(dp(46), dp(55)))
-        val heading = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        heading.addView(text("LiveNexus Controller", 21f).apply { setTypeface(null, Typeface.BOLD) })
-        heading.addView(text("Painel ativo", 13f, Color.rgb(44, 210, 185)))
-        header.addView(heading, LinearLayout.LayoutParams(0, -2, 1f))
-        status = text("●", 13f, cyan).apply { gravity = Gravity.CENTER; background = shape(Color.rgb(20, 31, 48)) }
-        header.addView(status, LinearLayout.LayoutParams(dp(52), dp(42)))
-        root.addView(header)
-        val content = object : ScrollView(this) {
-            override fun shouldDelayChildPressedState() = false
-        }.apply { isFillViewport = true }
-        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(13), dp(10), dp(13), dp(16)) }
+        super.onDestroy()
+    }
+
+    private fun prepareOverlay() {
+        if (!resumed || !authenticated || !Settings.canDrawOverlays(this)) return
+        try { startForegroundService(Intent(this, OverlayService::class.java)) }
+        catch (e: RuntimeException) {
+            Toast.makeText(this, "Não foi possível preparar a sobreposição: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun permission() {
+        if (Settings.canDrawOverlays(this)) {
+            prepareOverlay()
+            Toast.makeText(this, "Ao minimizar, o painel flutuante aparece automaticamente.", Toast.LENGTH_LONG).show()
+        } else {
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+        }
+    }
+
+    private fun render() {
+        if (!authenticated || isDestroyed) return
+        ControllerRuntime.signedIn = true
+        closeLoginBrowsers()
+        panel?.dispose()
+        panel = null
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(this@MainActivity.background)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+        }
+        root.addView(text("LiveNexus Controller", 21f, cyan), LinearLayout.LayoutParams(-1, dp(52)))
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun option(label: String, onTap: () -> Unit) {
+            body.addView(text(label, 16f).apply {
+                setPadding(dp(16), dp(12), dp(16), dp(12)); background = shape(Color.rgb(19, 29, 45))
+                setOnClickListener { onTap() }
+            }, LinearLayout.LayoutParams(-1, dp(64)).apply { bottomMargin = dp(10) })
+        }
         when (page) {
             0 -> {
-                val grid = GridLayout(this).apply { columnCount = 3 }
-                val total = 3 + count()
-                val w = ((resources.displayMetrics.widthPixels - dp(32)) / 3) - dp(6)
-                for (i in 0 until total) {
-                    val color = accent(i)
-                    val tile = LinearLayout(this).apply {
-                        orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; background = tileStyle(color)
-                        elevation = dp(5).toFloat(); enableButtonFeedback(this)
-                        setOnClickListener {
-                            if (i == 0) showPlayer()
-                            else if (i == 2) sendRtcReload()
-                            else if (i < 3) showConnectionMessage("Ação ainda não conectada: ${name(i)}")
-                            else showConfiguredControl(i)
-                        }
-                        setOnLongClickListener { if (i >= 3) configureControl(i) else if (i == 2) showConnectionMessage("Reload RTC: aguardando mapeamento do comando existente."); true }
-                    }
-                    val icon = if (i < 3) listOf("♫", "▣", "↻")[i] else when (controlType(i - 3)) {
-                        "Contador +1" -> "+"
-                        "Contador -1" -> "−"
-                        "Zerar contador" -> "⟲"
-                        "Chat" -> "💬"
-                        else -> "▱"
-                    }
-                    tile.addView(text(icon, 41f, color).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, dp(65)))
-                    tile.addView(text(name(i), 13f).apply { gravity = Gravity.CENTER; setTypeface(null, Typeface.BOLD); maxLines = 2 })
-                    grid.addView(tile, GridLayout.LayoutParams().apply {
-                        width = w; height = w + dp(12); columnSpec = GridLayout.spec(i % 3)
-                        rowSpec = GridLayout.spec(i / 3); setMargins(dp(3), dp(5), dp(3), dp(5))
-                    })
-                }
-                val add = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; background = tileStyle(cyan)
-                    enableButtonFeedback(this)
-                    setOnClickListener {
-                        showAddMenu()
-                    }
-                }
-                add.addView(text("+", 49f, cyan).apply { gravity = Gravity.CENTER })
-                add.addView(text("Adicionar botão", 12f, cyan).apply { gravity = Gravity.CENTER; setTypeface(null, Typeface.BOLD) })
-                grid.addView(add, GridLayout.LayoutParams().apply {
-                    width = w; height = w + dp(12); columnSpec = GridLayout.spec(total % 3)
-                    rowSpec = GridLayout.spec(total / 3); setMargins(dp(3), dp(5), dp(3), dp(5))
-                })
-                body.addView(grid)
+                if (!Settings.canDrawOverlays(this)) option("Autorizar sobreposição automática") { permission() }
+                panel = ControllerPanel(this, false)
+                body.addView(panel)
             }
             1 -> {
-                body.addView(text("PERFIS", 19f, cyan).apply { setPadding(dp(8), dp(15), 0, dp(20)) })
-                body.addView(text(if (LiveNexusApi.isConnected()) "Conta LiveNexus conectada nesta sessão." else "Conecte sua conta LiveNexus em Configurações.", 15f))
-            }
-            else -> {
-                body.addView(text("CONFIGURAÇÕES", 19f, cyan).apply { setPadding(dp(8), dp(15), 0, dp(20)) })
-                fun setting(label: String, onTap: () -> Unit) {
-                    body.addView(text(label, 16f).apply {
-                        gravity = Gravity.CENTER; background = tileStyle(cyan); enableButtonFeedback(this); setOnClickListener { onTap() }
-                    }, LinearLayout.LayoutParams(-1, dp(62)).apply { bottomMargin = dp(12) })
-                }
-                setting("Conta LiveNexus") { showConnectionMessage("Conta conectada ao LiveNexus.") }
-                setting("Consultar cenários e overlays") { showLiveNexusItems() }
-                setting("Desconectar conta") {
+                body.addView(text("Conta LiveNexus conectada.", 16f))
+                option("Desconectar conta") {
+                    ControllerRuntime.signedIn = false
+                    stopService(Intent(this, OverlayService::class.java))
                     LiveNexusApi.logout()
+                    panel?.dispose()
                     showLogin()
                 }
-                setting("Autorizar sobreposição") {
-                    if (!Settings.canDrawOverlays(this)) startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-                    else Toast.makeText(this, "Sobreposição já autorizada", Toast.LENGTH_SHORT).show()
-                }
-                setting("Ativar painel flutuante") {
-                    if (Settings.canDrawOverlays(this)) startForegroundService(Intent(this, OverlayService::class.java))
-                    else Toast.makeText(this, "Autorize a sobreposição primeiro", Toast.LENGTH_SHORT).show()
-                }
-                setting("Desativar controlador") { stopService(Intent(this, OverlayService::class.java)) }
+            }
+            else -> {
+                option("Permissão de sobreposição") { permission() }
+                body.addView(text("Minimize para mostrar o botão flutuante.\nAo voltar ao aplicativo, a sobreposição desaparece.", 15f).apply {
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                })
             }
         }
-        content.addView(body)
-        root.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
-        val nav = LinearLayout(this).apply {
-            gravity = Gravity.CENTER; setPadding(dp(6), dp(10), dp(6), dp(12))
-            setBackgroundColor(Color.rgb(12, 21, 32))
-        }
-        listOf("◇\nSobreposição", "◎\nPerfis", "⚙\nConfigurações").forEachIndexed { index, label ->
-            nav.addView(text(label, 13f, if (page == index) cyan else Color.GRAY).apply {
-                gravity = Gravity.CENTER; setTypeface(null, if (page == index) Typeface.BOLD else Typeface.NORMAL)
-                enableButtonFeedback(this)
+        root.addView(ScrollView(this).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        val nav = LinearLayout(this)
+        listOf("Sobreposição", "Perfil", "Configuração").forEachIndexed { index, title ->
+            nav.addView(text(title, 13f, if (page == index) cyan else Color.LTGRAY).apply {
+                gravity = Gravity.CENTER
                 setOnClickListener { page = index; render() }
-            }, LinearLayout.LayoutParams(0, dp(58), 1f))
+            }, LinearLayout.LayoutParams(0, dp(56), 1f))
         }
         root.addView(nav)
         setContentView(root)
-        updateStatus()
-    }
-    private fun showOptions() {
-        AlertDialog.Builder(this).setTitle("LiveNexus Controller")
-            .setItems(arrayOf("Sobreposição", "Perfis", "Configurações")) { _, which -> page = which; render() }.show()
-    }
-    private fun showAddMenu() {
-        AlertDialog.Builder(this).setTitle("Adicionar controle")
-            .setItems(arrayOf("Cenário", "Overlay", "LivePix", "Contador +1", "Contador -1", "Zerar contador", "Chat", "Teste contador +1")) { _, selected ->
-                if (count() >= 57) Toast.makeText(this, "Limite de 60 controles", Toast.LENGTH_SHORT).show()
-                else {
-                    prefs.edit().putString("control_type_${count()}", arrayOf("Cenário", "Overlay", "LivePix", "Contador +1", "Contador -1", "Zerar contador", "Chat", "Teste contador +1")[selected])
-                        .putInt("scenario_count", count() + 1).apply()
-                    render()
-                }
-            }.setNegativeButton("Cancelar", null).show()
-    }
-    private fun configureControl(i: Int) {
-        val kind = controlType(i - 3)
-        if (kind != "Cenário" && kind != "Overlay") {
-            editLabel(i)
-            return
-        }
-        Thread {
-            try {
-                val items = if (kind == "Cenário") LiveNexusApi.scenarios() else LiveNexusApi.overlays()
-                val records = (0 until items.length()).mapNotNull { items.optJSONObject(it) }
-                val labels = records.map { item ->
-                    item.optString("nome").ifBlank { item.optString("name").ifBlank { item.optString("id", "Sem nome") } }
-                }.toTypedArray()
-                runOnUiThread {
-                    if (records.isEmpty()) {
-                        showConnectionMessage("Nenhum registro de $kind encontrado para esta conta.")
-                    } else {
-                        AlertDialog.Builder(this).setTitle("Selecionar $kind")
-                            .setItems(labels) { _, position ->
-                                val record = records[position]
-                                val id = record.optString("id")
-                                if (id.isBlank()) {
-                                    showConnectionMessage("Cenário sem identificador.")
-                                } else if (kind == "Cenário") {
-                                    val subs = record.optJSONArray("subScenarios")
-                                    val choices = (0 until (subs?.length() ?: 0)).mapNotNull { index ->
-                                        subs?.optJSONObject(index)?.takeIf {
-                                            it.optString("id").isNotBlank() && it.optString("name").isNotBlank()
-                                        }
-                                    }
-                                    if (choices.isEmpty()) {
-                                        showConnectionMessage("Este cenário não possui subcenários salvos.")
-                                    } else {
-                                        AlertDialog.Builder(this).setTitle("Selecionar subcenário")
-                                            .setItems(choices.map { it.optString("name") }.toTypedArray()) { _, subIndex ->
-                                                val sub = choices[subIndex]
-                                                prefs.edit().putString("control_record_${i - 3}", id)
-                                                    .putString("control_subscenario_${i - 3}", sub.optString("id"))
-                                                    .putString("control_user_${i - 3}", record.optString("user_id"))
-                                                    .putString("scenario_${i - 3}", sub.optString("name")).apply()
-                                                render()
-                                            }.setNegativeButton("Cancelar", null).show()
-                                    }
-                                } else {
-                                    prefs.edit().putString("control_record_${i - 3}", id)
-                                        .remove("control_subscenario_${i - 3}")
-                                        .putString("control_user_${i - 3}", record.optString("user_id"))
-                                        .putString("scenario_${i - 3}", labels[position]).apply()
-                                    render()
-                                }
-                            }.setNegativeButton("Cancelar", null).show()
-                    }
-                }
-            } catch (e: Exception) {
-                runOnUiThread { showConnectionMessage(e.message ?: "Falha ao consultar registros.") }
-            }
-        }.start()
-    }
-
-    private fun sendRtcReload() {
-        Thread {
-            try {
-                LiveNexusApi.sendCommand("rtc-reload")
-                runOnUiThread { showConnectionMessage("Comando de atualização RTC enviado.") }
-            } catch (e: Exception) {
-                runOnUiThread { showConnectionMessage(e.message ?: "Falha ao enviar comando RTC.") }
-            }
-        }.start()
-    }
-
-    private fun showConfiguredControl(i: Int) {
-        val kind = controlType(i - 3)
-        val recordId = prefs.getString("control_record_${i - 3}", null)
-        if ((kind == "Cenário" || kind == "Overlay") && recordId.isNullOrBlank()) {
-            configureControl(i)
-        } else if (kind == "Cenário") {
-            val subId = prefs.getString("control_subscenario_${i - 3}", "").orEmpty()
-            if (subId.isBlank()) {
-                configureControl(i)
-            } else {
-                commandQueue.execute {
-                    try {
-                        LiveNexusApi.selectSubscenario(recordId!!, subId)
-                    } catch (e: Exception) {
-                        runOnUiThread {
-                            Toast.makeText(this, e.message ?: "Falha ao trocar subcenário.", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-            }
-        } else if (kind == "Overlay") {
-            val userId = prefs.getString("control_user_${i - 3}", "").orEmpty()
-            if (userId.isBlank()) {
-                showConnectionMessage("Registro sem user_id. Segure o botão e selecione novamente.")
-            } else {
-                val path = if (kind == "Cenário") "/cenarios/receiver/" else "/overlay/receiver/"
-                val subId = if (kind == "Cenário") prefs.getString("control_subscenario_${i - 3}", "").orEmpty() else ""
-                val address = Uri.parse(LiveNexusApi.baseUrl + path + Uri.encode(recordId))
-                    .buildUpon().appendQueryParameter("user_id", userId)
-                    .apply { if (subId.isNotBlank()) appendQueryParameter("subscenario_id", subId) }.build()
-                try {
-                    startActivity(Intent(Intent.ACTION_VIEW, address))
-                } catch (e: Exception) {
-                    showConnectionMessage("Não foi possível abrir o Receiver: " + (e.message ?: "erro"))
-                }
-            }
-        } else if (kind in setOf("Contador +1", "Contador -1", "Zerar contador", "Teste contador +1")) {
-            val action = when (kind) {
-                "Contador -1" -> "death-decrement"
-                "Zerar contador" -> "death-reset"
-                else -> "death-increment"
-            }
-            commandQueue.execute {
-                try {
-                    LiveNexusApi.sendCommand(action)
-                } catch (e: Exception) {
-                    runOnUiThread {
-                        Toast.makeText(this, e.message ?: "Falha ao enviar comando.", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        } else {
-            showConnectionMessage("Ação ainda não conectada: ${name(i)}")
-        }
-    }
-
-    private fun editLabel(i: Int) {
-        val field = EditText(this).apply { setSingleLine(true); setText(name(i)); selectAll() }
-        val holder = FrameLayout(this).apply { setPadding(dp(16), 0, dp(16), 0); addView(field) }
-        AlertDialog.Builder(this).setTitle("Editar botão").setView(holder)
-            .setNegativeButton("Cancelar", null)
-            .setPositiveButton("Salvar") { _, _ ->
-                val value = field.text.toString().trim()
-                if (value.length in 1..30) { prefs.edit().putString("scenario_${i - 3}", value).apply(); render() }
-                else Toast.makeText(this, "Use de 1 a 30 caracteres", Toast.LENGTH_SHORT).show()
-            }.show()
-    }
-
-    private fun showLiveNexusLogin() {
-        val fields = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(8), dp(20), dp(8))
-        }
-        val server = EditText(this).apply {
-            hint = "https://seu-livenexus.com"
-            setSingleLine(true)
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
-            setText(prefs.getString("livenexus_url", ""))
-        }
-        val user = EditText(this).apply {
-            hint = "Usuário do LiveNexus"
-            setSingleLine(true)
-        }
-        val password = EditText(this).apply {
-            hint = "Senha"
-            setSingleLine(true)
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
-        fields.addView(server)
-        fields.addView(user)
-        fields.addView(password)
-        AlertDialog.Builder(this).setTitle("Conectar ao LiveNexus")
-            .setView(fields)
-            .setNegativeButton("Cancelar", null)
-            .setPositiveButton("Entrar") { _, _ ->
-                val url = server.text.toString().trim()
-                val username = user.text.toString().trim()
-                val secret = password.text.toString()
-                password.text.clear()
-                if (username.isBlank() || secret.isBlank()) {
-                    showConnectionMessage("Informe usuário e senha.")
-                } else {
-                    try {
-                        LiveNexusApi.configure(url)
-                        prefs.edit().putString("livenexus_url", url.trimEnd('/')).apply()
-                        Thread {
-                            try {
-                                val account = LiveNexusApi.login(username, secret)
-                                runOnUiThread {
-                                    showConnectionMessage("Conectado: " + account.optString("user", "Conta LiveNexus"))
-                                    render()
-                                }
-                            } catch (e: Exception) {
-                                runOnUiThread { showConnectionMessage(e.message ?: "Falha ao conectar.") }
-                            }
-                        }.start()
-                    } catch (e: Exception) {
-                        showConnectionMessage(e.message ?: "Endereço inválido.")
-                    }
-                }
-            }.show()
-    }
-
-    private fun showConnectionMessage(message: String) {
-        AlertDialog.Builder(this).setTitle("LiveNexus").setMessage(message)
-            .setPositiveButton("OK", null).show()
-    }
-
-    private fun showLiveNexusItems() {
-        if (!authenticated) {
-            showConnectionMessage("Entre na conta LiveNexus primeiro.")
-            return
-        }
-        Thread {
-            try {
-                val scenarios = LiveNexusApi.scenarios()
-                val overlays = LiveNexusApi.overlays()
-                fun describe(items: JSONArray): String {
-                    if (items.length() == 0) return "(nenhum)"
-                    return (0 until items.length()).joinToString("\n") { i ->
-                        val item = items.optJSONObject(i)
-                        val label = item?.optString("nome", "")?.takeIf { it.isNotBlank() }
-                            ?: item?.optString("name", "")?.takeIf { it.isNotBlank() }
-                            ?: item?.optString("id", "Item ${i + 1}")
-                            ?: "Item ${i + 1}"
-                        "• $label"
-                    }
-                }
-                val result = "CENÁRIOS (${scenarios.length()})\n${describe(scenarios)}" +
-                    "\n\nOVERLAYS (${overlays.length()})\n${describe(overlays)}"
-                runOnUiThread { showConnectionMessage(result) }
-            } catch (e: Exception) {
-                runOnUiThread { showConnectionMessage(e.message ?: "Erro ao consultar LiveNexus.") }
-            }
-        }.start()
-    }
-
-    private fun sendMusicCommand(action: String) {
-        commandQueue.execute {
-            try {
-                LiveNexusApi.sendCommand(action)
-            } catch (e: Exception) {
-                runOnUiThread {
-                    Toast.makeText(this, e.message ?: "Falha ao enviar comando.", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
-
-    private fun enableVolumeHold(view: View, action: String) {
-        val handler = android.os.Handler(android.os.Looper.getMainLooper())
-        val pending = java.util.concurrent.atomic.AtomicInteger(0)
-        var holding = false
-        fun dispatch() {
-            if (pending.incrementAndGet() > 2) {
-                pending.decrementAndGet()
-                return
-            }
-            commandQueue.execute {
-                try {
-                    LiveNexusApi.sendCommand(action)
-                } catch (e: Exception) {
-                    runOnUiThread {
-                        Toast.makeText(this, e.message ?: "Falha ao enviar comando.", Toast.LENGTH_SHORT).show()
-                    }
-                } finally {
-                    pending.decrementAndGet()
-                }
-            }
-        }
-        val repeat = object : Runnable {
-            override fun run() {
-                if (!holding) return
-                dispatch()
-                handler.postDelayed(this, 220L)
-            }
-        }
-        view.setOnTouchListener { target, event ->
-            when (event.actionMasked) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    holding = true
-                    target.parent?.requestDisallowInterceptTouchEvent(true)
-                    animateButtonPress(target)
-                    dispatch()
-                    handler.postDelayed(repeat, 350L)
-                    true
-                }
-                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
-                    holding = false
-                    handler.removeCallbacks(repeat)
-                    animateButtonRelease(target)
-                    target.parent?.requestDisallowInterceptTouchEvent(false)
-                    true
-                }
-                else -> true
-            }
-        }
-    }
-
-    private fun showPlayer() {
-        val view = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(12), dp(20), dp(12))
-        }
-        view.addView(text("LiveNexus • Controle de música", 17f))
-        fun playerButton(label: String, action: String) {
-            view.addView(text(label, 18f, cyan).apply {
-                gravity = Gravity.CENTER
-                setPadding(dp(12), dp(14), dp(12), dp(14))
-                background = tileStyle(cyan)
-                enableButtonFeedback(this)
-                setOnClickListener { sendMusicCommand(action) }
-                if (action == "music-volume-up" || action == "music-volume-down") {
-                    enableVolumeHold(this, action)
-                }
-            }, LinearLayout.LayoutParams(-1, dp(54)).apply { bottomMargin = dp(8) })
-        }
-        playerButton("▶ / ❚❚  Play / Pause", "music-toggle")
-        playerButton("◀  Música anterior", "music-previous")
-        playerButton("▶▶  Próxima música", "music-next")
-        playerButton("＋  Aumentar volume", "music-volume-up")
-        playerButton("－  Diminuir volume", "music-volume-down")
-        AlertDialog.Builder(this).setTitle("LiveNexus • Player").setView(view)
-            .setPositiveButton("Fechar", null).show()
+        prepareOverlay()
     }
 }
+

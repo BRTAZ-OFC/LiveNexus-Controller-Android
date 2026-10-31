@@ -21,7 +21,11 @@ class OverlayService : Service() {
     private var trash: View? = null
     private var panel: View? = null
     private val channel = "controller_overlay"
-    private val scenarioCommands = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private var controls: ControllerPanel? = null
+    companion object {
+        private var active: OverlayService? = null
+        fun refreshVisibility() { active?.syncVisibility() }
+    }
     private val prefs by lazy { getSharedPreferences("buttons", MODE_PRIVATE) }
     private fun tileBackground(accent: Int = Color.rgb(55, 88, 120)) = GradientDrawable().apply {
         setColor(Color.rgb(19, 29, 45)); cornerRadius = dp(15).toFloat(); setStroke(dp(1), accent)
@@ -38,6 +42,7 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        active = this
         manager = getSystemService(WINDOW_SERVICE) as WindowManager
         val notifications = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         notifications.createNotificationChannel(
@@ -62,7 +67,7 @@ class OverlayService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (bubble == null) showBubble()
+        syncVisibility()
         return START_NOT_STICKY
     }
 
@@ -72,6 +77,7 @@ class OverlayService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         repositionBubble()
+        if (panel != null) { hidePanel(); showPanel() }
     }
 
     private fun repositionBubble() {
@@ -208,237 +214,65 @@ class OverlayService : Service() {
         } catch (_: RuntimeException) { stopSelf() }
     }
 
+
+    private fun syncVisibility() {
+        if (ControllerRuntime.foreground || !ControllerRuntime.signedIn) {
+            hidePanel()
+            hideTrash()
+            bubble?.let { try { manager.removeView(it) } catch (_: RuntimeException) {} }
+            bubble = null
+            bubbleLayout = null
+        } else if (Settings.canDrawOverlays(this) && bubble == null) {
+            showBubble()
+        }
+    }
+
     private fun showPanel() {
-        if (panel != null) return
+        if (panel != null || ControllerRuntime.foreground || !ControllerRuntime.signedIn) return
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            setBackgroundColor(Color.rgb(19, 28, 43))
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setBackgroundColor(Color.rgb(10, 15, 25))
         }
         val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         header.addView(TextView(this).apply {
-            text = "LiveNexus Controller"
-            textSize = 16f
-            setTextColor(Color.WHITE)
+            text = "LiveNexus Controller"; textSize = 17f; setTextColor(Color.WHITE)
         }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        header.addView(Button(this).apply {
-            text = "−"
+        header.addView(TextView(this).apply {
+            text = "−"; textSize = 28f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
             contentDescription = "Minimizar painel"
             setOnClickListener { hidePanel() }
-        })
+        }, LinearLayout.LayoutParams(dp(48), dp(48)))
         root.addView(header)
-        val grid = GridLayout(this).apply { columnCount = 3 }
-        val count = 3 + prefs.getInt("scenario_count", 0).coerceIn(0, 57)
-        val defaults = listOf("Música", "Câmera", "Reload RTC")
-        fun controlType(index: Int) = prefs.getString("control_type_$index", "Cenário") ?: "Cenário"
-        for (i in 0 until count) {
-            val label = if (i < 3) defaults[i] else {
-                val kind = prefs.getString("control_type_${i - 3}", "Cenário") ?: "Cenário"
-                prefs.getString("scenario_${i - 3}", "$kind ${i - 2}") ?: "$kind ${i - 2}"
-            }
-            val tile = TextView(this).apply {
-                val icon = if (i < 3) listOf("♫", "▣", "↻")[i] else when (controlType(i - 3)) {
-                    "Contador +1" -> "+"
-                    "Contador -1" -> "−"
-                    "Zerar contador" -> "⟲"
-                    "Chat" -> "💬"
-                    else -> "◆"
-                }
-                text = "$icon\n$label"
-                textSize = 12f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
-                background = tileBackground()
-                if (i >= 3 && (controlType(i - 3) == "Cenário" || controlType(i - 3) == "Overlay")) {
-                    setOnLongClickListener {
-                        selectRealRecord(i - 3, controlType(i - 3))
-                        true
-                    }
-                }
-                setOnClickListener {
-                    val kind = if (i >= 3) controlType(i - 3) else ""
-                    val action = when {
-                        i == 2 -> "rtc-reload"
-                        kind == "Contador +1" -> "death-increment"
-                        kind == "Contador -1" -> "death-decrement"
-                        kind == "Zerar contador" -> "death-reset"
-                        else -> null
-                    }
-                    if (kind == "Cenário") {
-                        val index = i - 3
-                        val scenarioId = prefs.getString("control_record_$index", "").orEmpty()
-                        val subscenarioId = prefs.getString("control_subscenario_$index", "").orEmpty()
-                        if (scenarioId.isBlank() || subscenarioId.isBlank()) {
-                            selectRealRecord(index, kind)
-                        } else {
-                            scenarioCommands.execute {
-                                try {
-                                    LiveNexusApi.selectSubscenario(scenarioId, subscenarioId)
-                                } catch (e: Exception) {
-                                    android.os.Handler(mainLooper).post {
-                                        Toast.makeText(this@OverlayService, e.message ?: "Falha ao trocar subcenário.", Toast.LENGTH_LONG).show()
-                                    }
-                                }
-                            }
-                        }
-                    } else if (action != null) {
-                        Thread {
-                            try {
-                                LiveNexusApi.sendCommand(action)
-                                android.os.Handler(mainLooper).post {
-                                    Toast.makeText(this@OverlayService, "Comando enviado: $label", Toast.LENGTH_SHORT).show()
-                                }
-                            } catch (e: Exception) {
-                                android.os.Handler(mainLooper).post {
-                                    Toast.makeText(this@OverlayService, e.message ?: "Falha no comando", Toast.LENGTH_LONG).show()
-                                }
-                            }
-                        }.start()
-                    } else if (label.equals("Música", true)) showMiniPlayer()
-                    else Toast.makeText(this@OverlayService, "Ação ainda não conectada: $label", Toast.LENGTH_SHORT).show()
-                }
-            }
-            grid.addView(tile, GridLayout.LayoutParams().apply {
-                width = 0; height = dp(88); columnSpec = GridLayout.spec(i % 3, 1f)
-                rowSpec = GridLayout.spec(i / 3); setMargins(dp(3), dp(3), dp(3), dp(3))
-            })
-        }
-        grid.addView(TextView(this).apply {
-            text = "＋\\nAdicionar".replace("\\n", "\n"); gravity = Gravity.CENTER; textSize = 12f
-            setTextColor(Color.rgb(43, 205, 239)); background = tileBackground(Color.rgb(43, 205, 239))
-            setOnClickListener {
-                showAddControlMenu()
-            }
-        }, GridLayout.LayoutParams().apply {
-            width = 0; height = dp(88); columnSpec = GridLayout.spec(count % 3, 1f)
-            rowSpec = GridLayout.spec(count / 3); setMargins(dp(3), dp(3), dp(3), dp(3))
-        })
-        root.addView(ScrollView(this).apply { addView(grid) }, LinearLayout.LayoutParams(-1, dp(350)))
-        val width = minOf(dp(340), resources.displayMetrics.widthPixels - dp(24))
+        val view = ControllerPanel(this, true)
+        controls = view
+        val screen = screenSize()
+        val height = minOf(dp(440), (screen.y - dp(100)).coerceAtLeast(dp(100)))
+        root.addView(ScrollView(this).apply { addView(view) }, LinearLayout.LayoutParams(-1, height))
+        val width = minOf(dp(380), screen.x - dp(24))
         try {
             manager.addView(root, params(width, WindowManager.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
             panel = root
             bubble?.visibility = View.GONE
-        } catch (_: RuntimeException) {
-            panel = null
+        } catch (e: RuntimeException) {
+            view.dispose(); controls = null
+            Toast.makeText(this, "Falha ao abrir painel: ${e.message}", Toast.LENGTH_LONG).show()
         }
-    }
-
-    private fun selectRealRecord(index: Int, kind: String) {
-        Thread {
-            try {
-                val items = if (kind == "Cenário") LiveNexusApi.scenarios() else LiveNexusApi.overlays()
-                val records = (0 until items.length()).mapNotNull { items.optJSONObject(it) }
-                val labels = records.map { item ->
-                    item.optString("nome").ifBlank { item.optString("name").ifBlank { item.optString("id", "Sem nome") } }
-                }.toTypedArray()
-                android.os.Handler(mainLooper).post {
-                    if (records.isEmpty()) {
-                        Toast.makeText(this, "Nenhum registro de $kind encontrado", Toast.LENGTH_LONG).show()
-                    } else {
-                        val dialog = AlertDialog.Builder(this).setTitle("Selecionar $kind")
-                            .setItems(labels) { _, position ->
-                                val item = records[position]
-                                val id = item.optString("id")
-                                if (id.isBlank()) {
-                                    Toast.makeText(this, "Registro sem identificador.", Toast.LENGTH_LONG).show()
-                                } else if (kind == "Cenário") {
-                                    val subs = item.optJSONArray("subScenarios")
-                                    val choices = (0 until (subs?.length() ?: 0)).mapNotNull { subIndex ->
-                                        subs?.optJSONObject(subIndex)?.takeIf {
-                                            it.optString("id").isNotBlank() && it.optString("name").isNotBlank()
-                                        }
-                                    }
-                                    if (choices.isEmpty()) {
-                                        Toast.makeText(this, "Este cenário não possui subcenários salvos.", Toast.LENGTH_LONG).show()
-                                    } else {
-                                        val subDialog = AlertDialog.Builder(this).setTitle("Selecionar subcenário")
-                                            .setItems(choices.map { it.optString("name") }.toTypedArray()) { _, subIndex ->
-                                                val sub = choices[subIndex]
-                                                prefs.edit().putString("control_record_$index", id)
-                                                    .putString("control_subscenario_$index", sub.optString("id"))
-                                                    .putString("control_user_$index", item.optString("user_id"))
-                                                    .putString("scenario_$index", sub.optString("name")).apply()
-                                                hidePanel()
-                                                showPanel()
-                                            }.setNegativeButton("Cancelar", null).create()
-                                        subDialog.window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
-                                        subDialog.show()
-                                    }
-                                } else {
-                                    prefs.edit().putString("control_record_$index", id)
-                                        .remove("control_subscenario_$index")
-                                        .putString("control_user_$index", item.optString("user_id"))
-                                        .putString("scenario_$index", labels[position]).apply()
-                                    hidePanel()
-                                    showPanel()
-                                }
-                            }.setNegativeButton("Cancelar", null).create()
-                        dialog.window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
-                        dialog.show()
-                    }
-                }
-            } catch (e: Exception) {
-                android.os.Handler(mainLooper).post {
-                    Toast.makeText(this, e.message ?: "Falha ao consultar registros", Toast.LENGTH_LONG).show()
-                }
-            }
-        }.start()
-    }
-
-    private fun showAddControlMenu() {
-        AlertDialog.Builder(this).setTitle("Adicionar controle")
-            .setItems(arrayOf("Cenário", "Overlay", "LivePix", "Contador +1", "Contador -1", "Zerar contador", "Chat")) { _, selected ->
-                val current = prefs.getInt("scenario_count", 0).coerceIn(0, 57)
-                if (current >= 57) Toast.makeText(this, "Limite de 60 controles", Toast.LENGTH_SHORT).show()
-                else {
-                    prefs.edit().putString("control_type_$current", arrayOf("Cenário", "Overlay", "LivePix", "Contador +1", "Contador -1", "Zerar contador", "Chat")[selected])
-                        .putInt("scenario_count", current + 1).apply()
-                    hidePanel()
-                    showPanel()
-                }
-            }.setNegativeButton("Cancelar", null)
-            .create().apply {
-                window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
-                show()
-            }
-    }
-
-    private fun showMiniPlayer() {
-        hidePanel()
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(14), dp(16), dp(14))
-            background = tileBackground(Color.rgb(43, 205, 239))
-        }
-        root.addView(TextView(this).apply {
-            text = "♫  LiveNexus • Player"; textSize = 18f; setTextColor(Color.WHITE)
-        })
-        root.addView(TextView(this).apply {
-            text = "Nenhuma música conectada\\n\\n◀      ▶      ▶▶      🔊\\n\\nAguardando integração com o LiveNexus"
-                .replace("\\n", "\n")
-            textSize = 14f; setTextColor(Color.LTGRAY); gravity = Gravity.CENTER
-            setPadding(0, dp(16), 0, dp(16))
-        })
-        root.addView(Button(this).apply {
-            text = "Voltar ao painel"; setOnClickListener { hidePanel(); showPanel() }
-        })
-        val width = minOf(dp(340), resources.displayMetrics.widthPixels - dp(24))
-        try {
-            manager.addView(root, params(width, WindowManager.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
-            panel = root; bubble?.visibility = View.GONE
-        } catch (_: RuntimeException) { panel = null; bubble?.visibility = View.VISIBLE }
     }
 
     private fun hidePanel() {
-        panel?.let { manager.removeView(it) }
+        controls?.dispose()
+        controls = null
+        panel?.let { try { manager.removeView(it) } catch (_: RuntimeException) {} }
         panel = null
         bubble?.visibility = View.VISIBLE
     }
 
     override fun onDestroy() {
-        scenarioCommands.shutdown()
+        if (active === this) active = null
+        hidePanel()
         hideTrash()
-        panel?.let { manager.removeView(it) }
-        panel = null
-        bubble?.let { manager.removeView(it) }
+        bubble?.let { try { manager.removeView(it) } catch (_: RuntimeException) {} }
         bubble = null
         bubbleLayout = null
         super.onDestroy()
@@ -446,3 +280,4 @@ class OverlayService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 }
+
