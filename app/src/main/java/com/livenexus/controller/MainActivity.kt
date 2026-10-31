@@ -80,25 +80,42 @@ class MainActivity : Activity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(browser, true)
         browser.webChromeClient = object : WebChromeClient() {
             override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
-                val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
                 val popup = WebView(this@MainActivity)
                 popup.settings.javaScriptEnabled = true
                 popup.settings.domStorageEnabled = true
-                popup.webViewClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                        val destination = request?.url ?: return false
-                        if (destination.scheme == "https" || destination.scheme == "http") {
-                            try {
-                                startActivity(Intent(Intent.ACTION_VIEW, destination).addCategory(Intent.CATEGORY_BROWSABLE))
-                            } catch (_: Exception) {
-                                Toast.makeText(this@MainActivity, "Nenhum navegador disponível para autenticação.", Toast.LENGTH_LONG).show()
-                            }
-                            view?.post { view.destroy() }
-                            return true
-                        }
-                        return false
+                CookieManager.getInstance().setAcceptThirdPartyCookies(popup, true)
+                popup.isFocusable = true
+                popup.isFocusableInTouchMode = true
+                popup.webViewClient = WebViewClient()
+                popup.webChromeClient = object : WebChromeClient() {
+                    override fun onCloseWindow(window: WebView?) {
+                        popup.destroy()
+                        verifyLogin()
                     }
                 }
+                val dialog = AlertDialog.Builder(this@MainActivity).setView(popup)
+                    .setNegativeButton("Fechar") { _, _ -> verifyLogin() }.create()
+                dialog.setOnDismissListener { verifyLogin() }
+                dialog.window?.setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+                        WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+                )
+                dialog.show()
+                dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+                dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                popup.requestFocus(View.FOCUS_DOWN)
+                popup.setOnTouchListener { web, event ->
+                    if (event.action == android.view.MotionEvent.ACTION_UP) {
+                        web.requestFocus()
+                        web.postDelayed({
+                            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                            imm.showSoftInput(web, InputMethodManager.SHOW_IMPLICIT)
+                        }, 120)
+                    }
+                    false
+                }
+                val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
                 transport.webView = popup
                 resultMsg.sendToTarget()
                 return true
@@ -108,16 +125,6 @@ class MainActivity : Activity() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val destination = request?.url ?: return false
                 val root = Uri.parse(LiveNexusApi.baseUrl)
-                if (destination.scheme == root.scheme && destination.host == root.host &&
-                    (destination.path?.startsWith("/api/auth/google") == true ||
-                     destination.path?.startsWith("/api/auth/steam") == true)) {
-                    try {
-                        startActivity(Intent(Intent.ACTION_VIEW, destination).addCategory(Intent.CATEGORY_BROWSABLE))
-                    } catch (_: Exception) {
-                        Toast.makeText(this@MainActivity, "Nenhum navegador disponível para autenticação.", Toast.LENGTH_LONG).show()
-                    }
-                    return true
-                }
                 if (destination.scheme == root.scheme && destination.host == root.host &&
                     destination.path == "/" && !authenticated) {
                     view?.evaluateJavascript("window.localStorage.getItem('livenexus_token')", null)
