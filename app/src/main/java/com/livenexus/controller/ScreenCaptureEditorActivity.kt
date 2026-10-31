@@ -830,10 +830,15 @@ class ScreenCaptureEditorActivity : Activity() {
     private fun connectStreamingAccount(platform: String) {
         Thread {
             try {
-                val url = LiveNexusApi.streamingAuthorizationUrl(platform)
+                val connected = LiveNexusApi.streamingConnected(platform)
+                val url = if (connected) null else LiveNexusApi.streamingAuthorizationUrl(platform)
                 runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
-                    if (platform == "twitch") openTwitchAuthorization(url)
+                    if (connected) {
+                        AlertDialog.Builder(this).setTitle("Conta conectada")
+                            .setMessage("${if (platform == "twitch") "Twitch" else "YouTube"} já possui token salvo no LiveNexus.")
+                            .setPositiveButton("Fechar", null).show()
+                    } else if (platform == "twitch") openTwitchAuthorization(url!!)
                     else {
                         try {
                             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
