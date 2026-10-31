@@ -29,6 +29,7 @@ import android.os.Message
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.content.Context
+import android.media.projection.MediaProjectionManager
 
 class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("buttons", MODE_PRIVATE) }
@@ -222,6 +223,41 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private val screenCaptureRequest = 7819
+
+    private fun startScreenCapture() {
+        if (ScreenCaptureService.isCapturing) {
+            Toast.makeText(this, "A captura de tela já está ativa.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            val projectionManager =
+                getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            startActivityForResult(projectionManager.createScreenCaptureIntent(), screenCaptureRequest)
+        } catch (error: Exception) {
+            Toast.makeText(this, "Falha ao solicitar captura: ${error.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != screenCaptureRequest) return
+        if (resultCode != Activity.RESULT_OK || data == null) {
+            Toast.makeText(this, "Captura de tela não autorizada.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            val service = Intent(this, ScreenCaptureService::class.java).apply {
+                action = ScreenCaptureService.ACTION_START
+                putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
+                putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
+            }
+            startForegroundService(service)
+        } catch (error: Exception) {
+            Toast.makeText(this, "Não foi possível iniciar a captura: ${error.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private var panel: ControllerPanel? = null
     private var page = 0
     private var resumed = false
@@ -315,6 +351,11 @@ class MainActivity : Activity() {
                 }
             }
             else -> {
+                option("Iniciar captura de tela") { startScreenCapture() }
+                option("Parar captura de tela") {
+                    stopService(Intent(this, ScreenCaptureService::class.java))
+                    Toast.makeText(this, "Captura de tela encerrada.", Toast.LENGTH_SHORT).show()
+                }
                 option("Permissão de sobreposição") { permission() }
                 body.addView(text("Minimize para mostrar o botão flutuante.\nAo voltar ao aplicativo, a sobreposição desaparece.", 15f).apply {
                     setPadding(dp(12), dp(12), dp(12), dp(12))
