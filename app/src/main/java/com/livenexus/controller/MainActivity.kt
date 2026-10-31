@@ -552,11 +552,38 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun sendMusicCommand(action: String) {
+        commandQueue.execute {
+            try {
+                LiveNexusApi.sendCommand(action)
+            } catch (e: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this, e.message ?: "Falha ao enviar comando.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
     private fun showPlayer() {
-        val view = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(12), dp(20), dp(12)) }
-        view.addView(text("♫  Nenhuma música conectada", 17f))
-        view.addView(text("◀       ▶       ▶▶       🔊", 22f, cyan).apply { gravity = Gravity.CENTER; setPadding(0, dp(20), 0, dp(20)) })
-        view.addView(text("Prévia do mini player. Os comandos serão habilitados após a integração autenticada com o LiveNexus.", 13f))
-        AlertDialog.Builder(this).setTitle("LiveNexus • Player").setView(view).setPositiveButton("Fechar", null).show()
+        val view = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+        }
+        view.addView(text("LiveNexus • Controle de música", 17f))
+        fun playerButton(label: String, action: String) {
+            view.addView(text(label, 18f, cyan).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(12), dp(14), dp(12), dp(14))
+                background = tileStyle(cyan)
+                setOnClickListener { sendMusicCommand(action) }
+            }, LinearLayout.LayoutParams(-1, dp(54)).apply { bottomMargin = dp(8) })
+        }
+        playerButton("▶ / ❚❚  Play / Pause", "music-toggle")
+        playerButton("◀  Música anterior", "music-previous")
+        playerButton("▶▶  Próxima música", "music-next")
+        playerButton("＋  Aumentar volume", "music-volume-up")
+        playerButton("－  Diminuir volume", "music-volume-down")
+        AlertDialog.Builder(this).setTitle("LiveNexus • Player").setView(view)
+            .setPositiveButton("Fechar", null).show()
     }
 }
