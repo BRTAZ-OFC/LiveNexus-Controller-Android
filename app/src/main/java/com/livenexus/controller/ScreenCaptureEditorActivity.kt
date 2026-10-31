@@ -43,6 +43,7 @@ class ScreenCaptureEditorActivity : Activity() {
         private const val PREFS = "livenexus_capture_settings"
         private const val KEY_RESOLUTION = "max_dimension"
         private const val KEY_FPS = "capture_fps"
+        private const val KEY_BITRATE = "capture_bitrate_kbps"
     }
 
     private val ui = Handler(Looper.getMainLooper())
@@ -400,6 +401,29 @@ class ScreenCaptureEditorActivity : Activity() {
         }
         resolutionRow.addView(fps, LinearLayout.LayoutParams(
             dp(if (compact) 85 else 100), dp(36)
+        ).apply { leftMargin = dp(6) })
+        val bitrateOptions = (2000..10000 step 500).toList()
+        val bitrateSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@ScreenCaptureEditorActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                bitrateOptions.map { "$it Kbps" }
+            )
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val saved = prefs.getInt(KEY_BITRATE, 4500)
+            setSelection(bitrateOptions.indexOf(saved).coerceAtLeast(0))
+            background = shape(violet)
+            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(
+                    parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long
+                ) {
+                    prefs.edit().putInt(KEY_BITRATE, bitrateOptions[position]).apply()
+                }
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            }
+        }
+        resolutionRow.addView(bitrateSpinner, LinearLayout.LayoutParams(
+            dp(if (compact) 108 else 124), dp(36)
         ).apply { leftMargin = dp(6) })
         bottom.addView(resolutionRow,
             if (compact) LinearLayout.LayoutParams(0, dp(42), 2f) else params(-1, dp(42)))
@@ -836,6 +860,8 @@ class ScreenCaptureEditorActivity : Activity() {
                 putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
                 putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
                 putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
+                putExtra(ScreenCaptureService.EXTRA_FPS, getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_FPS, 30))
+                putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_BITRATE, 4500))
             }
             startForegroundService(intent)
             status.text = "Iniciando captura..."
