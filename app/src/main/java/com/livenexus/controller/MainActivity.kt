@@ -422,7 +422,22 @@ class MainActivity : Activity() {
         val recordId = prefs.getString("control_record_${i - 3}", null)
         if ((kind == "Cenário" || kind == "Overlay") && recordId.isNullOrBlank()) {
             configureControl(i)
-        } else if (kind == "Cenário" || kind == "Overlay") {
+        } else if (kind == "Cenário") {
+            val subId = prefs.getString("control_subscenario_${i - 3}", "").orEmpty()
+            if (subId.isBlank()) {
+                configureControl(i)
+            } else {
+                commandQueue.execute {
+                    try {
+                        LiveNexusApi.selectSubscenario(recordId, subId)
+                    } catch (e: Exception) {
+                        runOnUiThread {
+                            Toast.makeText(this, e.message ?: "Falha ao trocar subcenário.", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+        } else if (kind == "Overlay") {
             val userId = prefs.getString("control_user_${i - 3}", "").orEmpty()
             if (userId.isBlank()) {
                 showConnectionMessage("Registro sem user_id. Segure o botão e selecione novamente.")
