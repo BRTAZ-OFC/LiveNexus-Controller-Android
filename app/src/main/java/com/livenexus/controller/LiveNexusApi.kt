@@ -57,6 +57,26 @@ object LiveNexusApi {
         }
     }
 
+    fun streamingAuthorizationUrl(platform: String): String {
+        require(platform == "twitch" || platform == "youtube") { "Plataforma não permitida." }
+        val response = request("/api/auth/$platform/url")
+        val url = response.optString("url")
+        val parsed = URL(url)
+        val allowed = if (platform == "twitch") "id.twitch.tv" else "accounts.google.com"
+        require(parsed.protocol == "https" && parsed.host == allowed) {
+            "O servidor retornou uma URL de autorização inválida."
+        }
+        return url
+    }
+
+    fun saveTwitchAuthorization(accessToken: String, state: String): JSONObject {
+        require(accessToken.isNotBlank() && state.matches(Regex("[a-fA-F0-9]{16,128}"))) {
+            "Retorno OAuth da Twitch inválido."
+        }
+        return request("/api/auth/twitch/token", "POST",
+            JSONObject().put("access_token", accessToken).put("state", state))
+    }
+
     fun login(user: String, password: String): JSONObject {
         token = null
         val result = request("/api/auth/login", "POST",
