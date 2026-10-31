@@ -28,6 +28,10 @@ import android.widget.Toast
 import android.widget.HorizontalScrollView
 import android.widget.SeekBar
 import android.widget.Switch
+import android.widget.FrameLayout
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.net.Uri
 
 /**
  * Editor local de captura. Não inclui transmissão, áudio nem salvamento de vídeo.
@@ -48,6 +52,9 @@ class ScreenCaptureEditorActivity : Activity() {
     private lateinit var scenesList: LinearLayout
     private lateinit var layersList: LinearLayout
     private lateinit var canvasEditor: CaptureSceneCanvas
+    private lateinit var canvasHost: FrameLayout
+    private var browserView: WebView? = null
+    private var browserUrl: String? = null
     private var selectedLayerId: String? = null
     private lateinit var sceneStatus: TextView
     private data class Scene(val id: String, var name: String, val sources: MutableList<CaptureLayer>)
@@ -278,6 +285,10 @@ class ScreenCaptureEditorActivity : Activity() {
             onChange = { persistScenes(); showLayers() }
             background = shape(violet, true)
         }
+        canvasHost = FrameLayout(this).apply {
+            addView(canvasEditor, FrameLayout.LayoutParams(-1, -1))
+        }
+        canvasHost.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateBrowserSource() }
         preview = ImageView(this).apply { visibility = View.GONE }
         status = caption("Captura desligada.", 11f)
         sceneStatus = caption("", 11f)
@@ -397,7 +408,7 @@ class ScreenCaptureEditorActivity : Activity() {
                 gravity = Gravity.TOP
             }
             val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            left.addView(canvasEditor, params(-1, -2))
+            left.addView(canvasHost, params(-1, -2))
             left.addView(status, params(-1, dp(19), 3))
             columns.addView(left, LinearLayout.LayoutParams(0, -2, 3f).apply {
                 rightMargin = dp(8)
@@ -416,7 +427,7 @@ class ScreenCaptureEditorActivity : Activity() {
             val stack = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             stack.addView(section("EDITOR DE CAPTURA", 19f))
             stack.addView(caption("Crie cenas, adicione fontes e capture sua tela.", 12f))
-            stack.addView(canvasEditor, params(-1, -2, 8, 5))
+            stack.addView(canvasHost, params(-1, -2, 8, 5))
             stack.addView(status, params(-1, -2, 0, 8))
             stack.addView(scenePanel, params(-1, -2, 0, 9))
             stack.addView(sourcesPanel, params(-1, -2, 0, 9))
@@ -452,7 +463,7 @@ class ScreenCaptureEditorActivity : Activity() {
                         sources.add(CaptureLayer(java.util.UUID.randomUUID().toString(), "screen", "Captura de tela"))
                     } else if (raw is JSONObject) {
                         val type = raw.optString("type")
-                        if (type != "screen" && type != "text") continue
+                        if (type != "screen" && type != "text" && type != "browser") continue
                         val sourceId = raw.optString("id").ifBlank { java.util.UUID.randomUUID().toString() }
                         if (sources.any { it.id == sourceId }) continue
                         sources.add(CaptureLayer(
@@ -463,7 +474,8 @@ class ScreenCaptureEditorActivity : Activity() {
                             raw.optDouble("width", .8).toFloat().coerceIn(.08f, 3f),
                             raw.optDouble("height", .65).toFloat().coerceIn(.08f, 3f),
                             raw.optBoolean("visible", true),
-                            raw.optBoolean("locked", false)
+                            raw.optBoolean("locked", false),
+                            raw.optString("url", "")
                         ))
                     }
                 }
@@ -505,7 +517,8 @@ class ScreenCaptureEditorActivity : Activity() {
                     .put("width", layer.width)
                     .put("height", layer.height)
                     .put("visible", layer.visible)
-                    .put("locked", layer.locked))
+                    .put("locked", layer.locked)
+                    .put("url", layer.url))
             }
             array.put(JSONObject().put("id", scene.id).put("name", scene.name)
                 .put("sources", sources))
@@ -564,6 +577,7 @@ class ScreenCaptureEditorActivity : Activity() {
             val icon = when (layer.type) {
                 "screen" -> "▣"
                 "text" -> "T"
+                "browser" -> "▤"
                 else -> "▤"
             }
             item.addView(label(icon + "  " + layer.name, if (landscapeEditor) 11f else 12f).apply {
@@ -589,6 +603,7 @@ class ScreenCaptureEditorActivity : Activity() {
         if (sources.isEmpty()) layersList.addView(caption("Adicione uma fonte à cena.", 12f))
         canvasEditor.layers = sources
         canvasEditor.selectedLayerId = selectedLayerId
+        updateBrowserSource()
     }
 
     private fun editSceneName(scene: Scene?) {
@@ -639,8 +654,9 @@ class ScreenCaptureEditorActivity : Activity() {
 
     private fun chooseSource() {
         AlertDialog.Builder(this).setTitle("Adicionar fonte")
-            .setItems(arrayOf("Captura de tela", "Texto")) { _, which ->
+            .setItems(arrayOf("Captura de tela", "Texto", "Browser Source")) { _, which ->
                 if (which == 0) addSource("screen", "Captura de tela")
+                else if (which == 2) addBrowserSource()
                 else {
                     val field = EditText(this).apply { setSingleLine(true); setText("Texto") }
                     AlertDialog.Builder(this).setTitle("Conteúdo do texto")
@@ -652,6 +668,76 @@ class ScreenCaptureEditorActivity : Activity() {
                         .setNegativeButton("Cancelar", null).show()
                 }
             }.show()
+    }
+
+    private fun addBrowserSource() {
+        val input = EditText(this).apply {
+            hint = "https://.../cenarios/receiver/..."
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(true)
+        }
+        AlertDialog.Builder(this).setTitle("Browser Source - URL")
+            .setView(input)
+            .setPositiveButton("Adicionar") { _, _ ->
+                val url = input.text.toString().trim()
+                val uri = Uri.parse(url)
+                if (uri.scheme != "https" || uri.host.isNullOrBlank()) {
+                    Toast.makeText(this, "Informe uma URL HTTPS valida.", Toast.LENGTH_LONG).show()
+                } else {
+                    val scene = activeScene() ?: return@setPositiveButton
+                    val layer = CaptureLayer(
+                        java.util.UUID.randomUUID().toString(), "browser", "Browser Source",
+                        0f, 0f, 1f, 1f, url = url
+                    )
+                    scene.sources.add(layer)
+                    selectedLayerId = layer.id
+                    persistScenes()
+                    showLayers()
+                }
+            }.setNegativeButton("Cancelar", null).show()
+    }
+
+    private fun updateBrowserSource() {
+        if (!::canvasHost.isInitialized) return
+        // Uma unica WebView ativa na previa; demais fontes continuam no modelo de camadas.
+        val layer = activeScene()?.sources?.lastOrNull {
+            it.type == "browser" && it.visible && it.url.startsWith("https://")
+        }
+        if (layer == null) {
+            browserView?.let { canvasHost.removeView(it); it.destroy() }
+            browserView = null
+            browserUrl = null
+            return
+        }
+        val web = browserView ?: WebView(this).also { view ->
+            view.setBackgroundColor(Color.TRANSPARENT)
+            view.settings.javaScriptEnabled = true
+            view.settings.domStorageEnabled = true
+            view.webViewClient = WebViewClient()
+            view.isVerticalScrollBarEnabled = false
+            view.isHorizontalScrollBarEnabled = false
+            view.setOnTouchListener { _, event ->
+                canvasEditor.dispatchTouchEvent(event)
+                true
+            }
+            canvasHost.addView(view)
+            browserView = view
+        }
+        val width = canvasHost.width
+        val height = canvasHost.height
+        if (width > 0 && height > 0) {
+            val w = (width * layer.width).toInt().coerceAtLeast(1)
+            val h = (height * layer.height).toInt().coerceAtLeast(1)
+            web.layoutParams = FrameLayout.LayoutParams(w, h).apply {
+                leftMargin = (width * layer.x).toInt()
+                topMargin = (height * layer.y).toInt()
+            }
+        }
+        if (browserUrl != layer.url) {
+            browserUrl = layer.url
+            web.loadUrl(layer.url)
+        }
     }
 
     private fun addSource(type: String, name: String) {
@@ -754,6 +840,12 @@ class ScreenCaptureEditorActivity : Activity() {
         super.onResume()
         activeUi = true
         ui.post(refresh)
+    }
+
+    override fun onDestroy() {
+        browserView?.let { canvasHost.removeView(it); it.destroy() }
+        browserView = null
+        super.onDestroy()
     }
 
     override fun onPause() {
