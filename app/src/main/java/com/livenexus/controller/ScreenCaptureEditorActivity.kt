@@ -827,6 +827,35 @@ class ScreenCaptureEditorActivity : Activity() {
         showLayers()
     }
 
+    private var pendingStreamingPlatform: String? = null
+
+    override fun onResume() {
+        super.onResume()
+        val platform = pendingStreamingPlatform ?: return
+        pendingStreamingPlatform = null
+        Thread {
+            try {
+                val connected = LiveNexusApi.streamingConnected(platform)
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) {
+                        AlertDialog.Builder(this)
+                            .setTitle(if (connected) "Conta conectada" else "Conexão não confirmada")
+                            .setMessage(if (connected) "${platform.uppercase()} conectada ao LiveNexus."
+                                else "O LiveNexus ainda não confirmou a conexão. Conclua a autorização no navegador e tente novamente.")
+                            .setPositiveButton("Fechar", null).show()
+                    }
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed)
+                        AlertDialog.Builder(this).setTitle("Falha ao consultar conexão")
+                            .setMessage(error.message ?: "Não foi possível consultar o LiveNexus.")
+                            .setPositiveButton("Fechar", null).show()
+                }
+            }
+        }.start()
+    }
+
     private fun connectStreamingAccount(platform: String) {
         Thread {
             try {
@@ -836,15 +865,17 @@ class ScreenCaptureEditorActivity : Activity() {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     if (connected) {
                         AlertDialog.Builder(this).setTitle("Conta conectada")
-                            .setMessage("${if (platform == "twitch") "Twitch" else "YouTube"} já possui token salvo no LiveNexus.")
+                            .setMessage("${platform.uppercase()} já possui token salvo no LiveNexus.")
                             .setPositiveButton("Fechar", null).show()
-                    } else if (platform == "twitch") openTwitchAuthorization(url!!)
-                    else {
+                    } else {
                         try {
+                            pendingStreamingPlatform = platform
                             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                            Toast.makeText(this, "Finalize a autorização do YouTube no navegador.", Toast.LENGTH_LONG).show()
                         } catch (error: Exception) {
-                            Toast.makeText(this, "Não foi possível abrir o navegador: ${error.message}", Toast.LENGTH_LONG).show()
+                            pendingStreamingPlatform = null
+                            AlertDialog.Builder(this).setTitle("Falha ao abrir autorização")
+                                .setMessage(error.message ?: "Navegador indisponível.")
+                                .setPositiveButton("Fechar", null).show()
                         }
                     }
                 }
@@ -852,72 +883,11 @@ class ScreenCaptureEditorActivity : Activity() {
                 runOnUiThread {
                     if (!isFinishing && !isDestroyed)
                         AlertDialog.Builder(this).setTitle("Falha ao conectar")
-                            .setMessage(error.message ?: "Não foi possível iniciar a autorização.")
+                            .setMessage(error.message ?: "Não foi possível consultar a integração.")
                             .setPositiveButton("Fechar", null).show()
                 }
             }
         }.start()
-    }
-
-    private fun openTwitchAuthorization(url: String) {
-        val web = WebView(this)
-        var processing = false
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("Conectar Twitch")
-            .setView(web)
-            .setNegativeButton("Cancelar", null)
-            .create()
-        fun handleCallback(value: String): Boolean {
-            val uri = Uri.parse(value)
-            if (uri.scheme != "https" || uri.host != Uri.parse(LiveNexusApi.baseUrl).host ||
-                uri.path != "/api/auth/twitch/callback") return false
-            if (processing) return true
-            processing = true
-            val hash = uri.fragment.orEmpty()
-            val params = Uri.parse("https://callback.invalid/?$hash")
-            val accessToken = params.getQueryParameter("access_token").orEmpty()
-            val state = params.getQueryParameter("state").orEmpty()
-            val error = params.getQueryParameter("error")
-            if (!error.isNullOrBlank() || accessToken.isBlank() || state.isBlank()) {
-                dialog.dismiss()
-                AlertDialog.Builder(this@ScreenCaptureEditorActivity)
-                    .setTitle("Twitch não conectada")
-                    .setMessage(error ?: "A Twitch não retornou uma autorização válida.")
-                    .setPositiveButton("Fechar", null).show()
-                return true
-            }
-            web.stopLoading()
-            Thread {
-                val result = try {
-                    LiveNexusApi.saveTwitchAuthorization(accessToken, state)
-                    null
-                } catch (failure: Exception) { failure.message ?: "Erro ao salvar autorização." }
-                runOnUiThread {
-                    dialog.dismiss()
-                    if (!isFinishing && !isDestroyed)
-                        AlertDialog.Builder(this).setTitle(
-                            if (result == null) "Twitch conectada" else "Falha ao conectar Twitch")
-                            .setMessage(result ?: "Token validado e salvo no LiveNexus.")
-                            .setPositiveButton("Fechar", null).show()
-                }
-            }.start()
-            return true
-        }
-        web.settings.javaScriptEnabled = true
-        web.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView?, request: android.webkit.WebResourceRequest?): Boolean {
-                return request?.url?.toString()?.let { handleCallback(it) } ?: false
-            }
-            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                if (url != null) handleCallback(url)
-            }
-        }
-        dialog.setOnDismissListener {
-            web.stopLoading()
-            web.destroy()
-        }
-        dialog.show()
-        web.loadUrl(url)
     }
 
     private fun selectStreamingPlatforms() {
