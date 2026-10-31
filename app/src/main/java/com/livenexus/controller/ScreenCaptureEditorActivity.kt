@@ -427,6 +427,7 @@ class ScreenCaptureEditorActivity : Activity() {
         ).apply { leftMargin = dp(6) })
         bottom.addView(resolutionRow,
             if (compact) LinearLayout.LayoutParams(0, dp(42), 2f) else params(-1, dp(42)))
+        resolutionRow.visibility = View.GONE
         val actions = row(
             "◉ Iniciar captura" to { askPermission() },
             "■ Parar captura" to { stopCapture() },
@@ -436,6 +437,17 @@ class ScreenCaptureEditorActivity : Activity() {
         bottom.addView(actions,
             if (compact) LinearLayout.LayoutParams(0, -2, 3f).apply { leftMargin = dp(9) }
             else params(-1, -2, 6))
+
+        val audioSettings = audioPanel(false).apply { visibility = View.GONE }
+        scenePanel.visibility = View.GONE
+        sourcesPanel.visibility = View.GONE
+        val menus = row(
+            "Cenas" to { scenePanel.visibility = if (scenePanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE },
+            "Fontes" to { sourcesPanel.visibility = if (sourcesPanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE },
+            "Vídeo" to { resolutionRow.visibility = if (resolutionRow.visibility == View.VISIBLE) View.GONE else View.VISIBLE },
+            "Áudio" to { audioSettings.visibility = if (audioSettings.visibility == View.VISIBLE) View.GONE else View.VISIBLE },
+            height = 42
+        )
 
         if (compact) {
             // Conteudo rolavel: o canvas mantem 16:9 sem ser achatado pela altura da tela.
@@ -458,12 +470,14 @@ class ScreenCaptureEditorActivity : Activity() {
                 rightMargin = dp(8)
             })
             val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            right.addView(menus, params(-1, dp(44), 0, 5))
             right.addView(scenePanel, params(-1, -2, 0, 6))
             right.addView(sourcesPanel, params(-1, -2))
+            right.addView(audioSettings, params(-1, -2, 4))
             columns.addView(right, LinearLayout.LayoutParams(0, -2, 2f))
             stack.addView(columns, params(-1, -2))
             stack.addView(bottom, params(-1, dp(57), 2))
-            stack.addView(audioPanel(true), params(-1, dp(49), 3))
+ 
             scroll.addView(stack)
             root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         } else {
@@ -473,10 +487,11 @@ class ScreenCaptureEditorActivity : Activity() {
             stack.addView(caption("Crie cenas, adicione fontes e capture sua tela.", 12f))
             stack.addView(canvasHost, params(-1, -2, 8, 5))
             stack.addView(status, params(-1, -2, 0, 8))
+            stack.addView(menus, params(-1, dp(44), 0, 9))
             stack.addView(scenePanel, params(-1, -2, 0, 9))
             stack.addView(sourcesPanel, params(-1, -2, 0, 9))
             stack.addView(bottom)
-            stack.addView(audioPanel(false), params(-1, -2, 7))
+            stack.addView(audioSettings, params(-1, -2, 7))
             scroll.addView(stack)
             root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         }
