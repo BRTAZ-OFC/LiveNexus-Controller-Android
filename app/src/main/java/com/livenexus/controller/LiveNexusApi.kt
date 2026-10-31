@@ -83,12 +83,12 @@ object LiveNexusApi {
         val payload = JSONObject()
             .put("scenarioId", scenarioId)
             .put("subcenarioId", subcenarioId)
-        val result = request("/api/cenarios/select-subscenario", "POST", payload)
-        request("/api/controller/commands", "POST", JSONObject()
+        // A fila HTTPS entrega o comando ao fluxo de hotkeys já existente no LiveNEXUS.
+        // O navegador executa publishScenarioSelection e seu Reload automaticamente.
+        return request("/api/controller/commands", "POST", JSONObject()
             .put("action", "scenario-select")
             .put("scenarioId", scenarioId)
             .put("subcenarioId", subcenarioId))
-        return result
     }
 
     fun sendCommand(action: String): JSONObject {
