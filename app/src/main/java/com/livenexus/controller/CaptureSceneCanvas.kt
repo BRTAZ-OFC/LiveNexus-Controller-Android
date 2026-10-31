@@ -22,7 +22,8 @@ data class CaptureLayer(
     var width: Float = 0.8f,
     var height: Float = 0.65f,
     var visible: Boolean = true,
-    var locked: Boolean = false
+    var locked: Boolean = false,
+    var url: String = ""
 )
 
 /** Canvas visual de cenas: arrastar para mover e usar o canto inferior direito para redimensionar. */
@@ -143,6 +144,8 @@ class CaptureSceneCanvas(context: Context) : View(context) {
                     android.graphics.Rect(sourceLeft, sourceTop, sourceLeft + sourceWidth, sourceTop + sourceHeight),
                     box, paint
                 )
+            } else if (layer.type == "browser") {
+                // A pagina WebView e desenhada em uma camada Android acima deste canvas.
             } else {
                 paint.style = Paint.Style.FILL
                 paint.color = if (layer.type == "text") Color.rgb(32, 16, 63) else Color.rgb(17, 52, 75)
