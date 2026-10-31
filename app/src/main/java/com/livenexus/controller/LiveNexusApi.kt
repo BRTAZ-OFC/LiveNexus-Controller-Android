@@ -78,17 +78,46 @@ object LiveNexusApi {
     fun logout() { token = null; CookieManager.getInstance().removeAllCookies(null); CookieManager.getInstance().flush() }
     fun scenarios() = request("/api/cenarios").getJSONArray("items")
     fun overlays() = request("/api/overlays").getJSONArray("items")
+    @Synchronized
     fun selectSubscenario(scenarioId: String, subcenarioId: String): JSONObject {
-        require(scenarioId.isNotBlank() && subcenarioId.isNotBlank()) { "Cenário e subcenário obrigatórios." }
-        val payload = JSONObject()
-            .put("scenarioId", scenarioId)
-            .put("subcenarioId", subcenarioId)
-        // A fila HTTPS entrega o comando ao fluxo de hotkeys já existente no LiveNEXUS.
-        // O navegador executa publishScenarioSelection e seu Reload automaticamente.
-        return request("/api/controller/commands", "POST", JSONObject()
-            .put("action", "scenario-select")
-            .put("scenarioId", scenarioId)
-            .put("subcenarioId", subcenarioId))
+        val parentId = scenarioId.trim()
+        val targetId = subcenarioId.trim()
+        require(parentId.isNotEmpty() && targetId.isNotEmpty()) { "Cenário e subcenário obrigatórios." }
+
+        // Valida o vínculo antes de gravar: a rota do servidor aceita IDs de subcenários inexistentes.
+        val items = scenarios()
+        val scenario = (0 until items.length()).mapNotNull { items.optJSONObject(it) }
+            .firstOrNull { it.optString("id").trim() == parentId }
+            ?: throw IllegalStateException("Cenário não encontrado. Configure novamente este botão.")
+        val subs = scenario.optJSONArray("subScenarios")
+        val target = (0 until (subs?.length() ?: 0)).mapNotNull { subs?.optJSONObject(it) }
+            .firstOrNull { it.optString("id").trim() == targetId }
+            ?: throw IllegalStateException("Subcenário não encontrado neste cenário. Configure novamente este botão.")
+        require(target.optJSONArray("instances") != null) { "Subcenário sem conteúdo válido salvo." }
+
+        val payload = JSONObject().put("scenarioId", parentId).put("subcenarioId", targetId)
+        val result = try {
+            request("/api/cenarios/select-subscenario", "POST", payload)
+        } catch (error: Exception) {
+            throw IllegalStateException("Falha ao salvar a seleção do subcenário: ${error.message}", error)
+        }
+        val updated = result.optJSONObject("item")
+        check(updated != null && updated.optString("id").trim() == parentId &&
+            updated.optString("selectedSubScenarioId").trim() == targetId) {
+            "O servidor não confirmou a seleção do subcenário."
+        }
+
+        // O navegador da live executa a mesma seleção das hotkeys e o Reload existente.
+        // A gravação acima termina antes de enfileirar a atualização.
+        try {
+            request("/api/controller/commands", "POST", JSONObject()
+                .put("action", "scenario-select")
+                .put("scenarioId", parentId)
+                .put("subcenarioId", targetId))
+        } catch (error: Exception) {
+            throw IllegalStateException("Seleção salva, mas falhou o envio ao navegador da live: ${error.message}", error)
+        }
+        return result
     }
 
     fun sendCommand(action: String): JSONObject {

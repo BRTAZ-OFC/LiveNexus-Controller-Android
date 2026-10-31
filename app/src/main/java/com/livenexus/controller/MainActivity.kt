@@ -21,6 +21,7 @@ import org.json.JSONObject
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceResponse
 import android.webkit.WebResourceRequest
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -32,6 +33,39 @@ import android.content.Context
 class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("buttons", MODE_PRIVATE) }
     @Volatile private var authenticated = false
+    private val loginBrowsers = mutableListOf<WebView>()
+    private val loginDialogs = mutableListOf<AlertDialog>()
+
+    // A tela de login nunca pode retirar comandos destinados ao navegador da live.
+    private open inner class LoginWebViewClient : WebViewClient() {
+        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+            val destination = request?.url ?: return null
+            val root = Uri.parse(LiveNexusApi.baseUrl)
+            if (request.method == "GET" && destination.scheme == root.scheme &&
+                destination.host == root.host && destination.port == root.port &&
+                destination.path?.trimEnd('/') == "/api/controller/commands") {
+                return WebResourceResponse(
+                    "application/json", "UTF-8",
+                    """{"ok":true,"commands":[]}""".byteInputStream(Charsets.UTF_8)
+                )
+            }
+            return super.shouldInterceptRequest(view, request)
+        }
+    }
+
+    private fun releaseLoginBrowser(browser: WebView) {
+        if (!loginBrowsers.remove(browser)) return
+        browser.stopLoading()
+        browser.removeJavascriptInterface("AndroidLogin")
+        (browser.parent as? ViewGroup)?.removeView(browser)
+        browser.destroy()
+    }
+
+    private fun closeLoginBrowsers() {
+        loginDialogs.toList().forEach { it.dismiss() }
+        loginDialogs.clear()
+        loginBrowsers.toList().forEach { releaseLoginBrowser(it) }
+    }
     private val cyan = Color.rgb(43, 205, 239)
     private val background = Color.rgb(10, 15, 25)
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
@@ -72,6 +106,7 @@ class MainActivity : Activity() {
     private fun showLogin() {
         authenticated = false
         val browser = WebView(this)
+        loginBrowsers.add(browser)
         browser.settings.javaScriptEnabled = true
         browser.addJavascriptInterface(LoginBridge(), "AndroidLogin")
         browser.settings.domStorageEnabled = true
@@ -82,21 +117,27 @@ class MainActivity : Activity() {
         browser.webChromeClient = object : WebChromeClient() {
             override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
                 val popup = WebView(this@MainActivity)
+                loginBrowsers.add(popup)
                 popup.settings.javaScriptEnabled = true
                 popup.settings.domStorageEnabled = true
                 CookieManager.getInstance().setAcceptThirdPartyCookies(popup, true)
                 popup.isFocusable = true
                 popup.isFocusableInTouchMode = true
-                popup.webViewClient = WebViewClient()
+                popup.webViewClient = LoginWebViewClient()
                 popup.webChromeClient = object : WebChromeClient() {
                     override fun onCloseWindow(window: WebView?) {
-                        popup.destroy()
+                        releaseLoginBrowser(popup)
                         verifyLogin()
                     }
                 }
                 val dialog = AlertDialog.Builder(this@MainActivity).setView(popup)
                     .setNegativeButton("Fechar") { _, _ -> verifyLogin() }.create()
-                dialog.setOnDismissListener { verifyLogin() }
+                loginDialogs.add(dialog)
+                dialog.setOnDismissListener {
+                    loginDialogs.remove(dialog)
+                    releaseLoginBrowser(popup)
+                    verifyLogin()
+                }
                 dialog.window?.setSoftInputMode(
                     WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
                         WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
@@ -122,7 +163,7 @@ class MainActivity : Activity() {
                 return true
             }
         }
-        browser.webViewClient = object : WebViewClient() {
+        browser.webViewClient = object : LoginWebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val destination = request?.url ?: return false
                 val root = Uri.parse(LiveNexusApi.baseUrl)
@@ -223,6 +264,7 @@ class MainActivity : Activity() {
     }
     private fun render() {
         if (!authenticated) { showLogin(); return }
+        closeLoginBrowsers()
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(this@MainActivity.background) }
         val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(17), dp(17), dp(17), dp(17)) }
         header.addView(text("☰", 29f, Color.LTGRAY).apply {
