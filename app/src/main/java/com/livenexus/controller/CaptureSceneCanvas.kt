@@ -36,7 +36,6 @@ class CaptureSceneCanvas(context: Context) : View(context) {
     var onChange: (() -> Unit)? = null
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val surface = RectF()
     private val area = RectF()
     private var moving: CaptureLayer? = null
     private var resizing = false
@@ -88,7 +87,17 @@ class CaptureSceneCanvas(context: Context) : View(context) {
                 paint.alpha = 255
                 paint.color = Color.WHITE
                 val bitmap = frame!!
-                canvas.drawBitmap(bitmap, null, box, paint)
+                // CENTER_CROP / COVER: removes empty borders from mismatched aspect ratios.
+                val ratio = max(box.width() / bitmap.width, box.height() / bitmap.height)
+                val sourceWidth = (box.width() / ratio).toInt().coerceIn(1, bitmap.width)
+                val sourceHeight = (box.height() / ratio).toInt().coerceIn(1, bitmap.height)
+                val sourceLeft = (bitmap.width - sourceWidth) / 2
+                val sourceTop = (bitmap.height - sourceHeight) / 2
+                canvas.drawBitmap(
+                    bitmap,
+                    android.graphics.Rect(sourceLeft, sourceTop, sourceLeft + sourceWidth, sourceTop + sourceHeight),
+                    box, paint
+                )
             } else {
                 paint.style = Paint.Style.FILL
                 paint.color = if (layer.type == "text") Color.rgb(32, 16, 63) else Color.rgb(17, 52, 75)
@@ -145,11 +154,11 @@ class CaptureSceneCanvas(context: Context) : View(context) {
                 val dx = (event.x - downX) / max(1f, area.width())
                 val dy = (event.y - downY) / max(1f, area.height())
                 if (resizing) {
-                    target.width = (originW + dx).coerceIn(.08f, 1f - target.x)
-                    target.height = (originH + dy).coerceIn(.08f, 1f - target.y)
+                    target.width = (originW + dx).coerceIn(.08f, 3f)
+                    target.height = (originH + dy).coerceIn(.08f, 3f)
                 } else {
-                    target.x = (originX + dx).coerceIn(0f, 1f - target.width)
-                    target.y = (originY + dy).coerceIn(0f, 1f - target.height)
+                    target.x = (originX + dx).coerceIn(-2f, 2f)
+                    target.y = (originY + dy).coerceIn(-2f, 2f)
                 }
                 invalidate()
                 return true
