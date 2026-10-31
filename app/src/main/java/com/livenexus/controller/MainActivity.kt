@@ -429,7 +429,7 @@ class MainActivity : Activity() {
             } else {
                 commandQueue.execute {
                     try {
-                        LiveNexusApi.selectSubscenario(recordId, subId)
+                        LiveNexusApi.selectSubscenario(recordId!!, subId)
                     } catch (e: Exception) {
                         runOnUiThread {
                             Toast.makeText(this, e.message ?: "Falha ao trocar subcenário.", Toast.LENGTH_SHORT).show()
