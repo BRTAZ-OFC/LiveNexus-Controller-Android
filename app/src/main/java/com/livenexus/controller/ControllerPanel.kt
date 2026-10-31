@@ -71,23 +71,37 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
         if (disposed) return
         removeAllViews()
         if (player) { renderPlayer(); return }
-        val grid = GridLayout(context).apply { columnCount = 3 }
+        // Na sobreposição a largura máxima é de 380 dp; no app, a grade pode
+        // usar quatro colunas apenas quando houver espaço horizontal suficiente.
+        val columns = if (!overlay && resources.configuration.screenWidthDp >= 600) 4 else 3
+        val tileHeight = if (columns == 4) 92 else 104
+        val grid = GridLayout(context).apply {
+            columnCount = columns
+            alignmentMode = GridLayout.ALIGN_BOUNDS
+        }
         fun tile(label: String, configure: (() -> Unit)? = null, action: () -> Unit) {
             val position = grid.childCount
             val violet = position % 2 == 1
             grid.addView(button(label.substringAfter('\n'), action).apply {
                 background = NeonTheme.card(violet, label.endsWith("Adicionar"))
-                textSize = 14f
-                maxLines = 3
-                setAutoSizeTextTypeUniformWithConfiguration(10, 14, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
-                setPadding(dp(6), dp(18), dp(6), dp(22))
-                val icon = NeonIcon(label.substringBefore('\n'), violet).apply { setBounds(0, 0, dp(44), dp(44)) }
+                textSize = 12f
+                maxLines = 2
+                setAutoSizeTextTypeUniformWithConfiguration(
+                    10, 12, 1, android.util.TypedValue.COMPLEX_UNIT_SP
+                )
+                setPadding(dp(4), dp(9), dp(4), dp(9))
+                val icon = NeonIcon(label.substringBefore('\n'), violet).apply {
+                    setBounds(0, 0, dp(30), dp(30))
+                }
                 setCompoundDrawables(null, icon, null, null)
-                compoundDrawablePadding = dp(10)
+                compoundDrawablePadding = dp(7)
                 if (configure != null) setOnLongClickListener { configure(); true }
             }, GridLayout.LayoutParams().apply {
-                width = 0; height = dp(138); columnSpec = GridLayout.spec(position % 3, 1f)
-                rowSpec = GridLayout.spec(position / 3); setMargins(dp(3), dp(4), dp(3), dp(4))
+                width = 0
+                height = dp(tileHeight)
+                columnSpec = GridLayout.spec(position % columns, 1f)
+                rowSpec = GridLayout.spec(position / columns)
+                setMargins(dp(3), dp(3), dp(3), dp(3))
             })
         }
         tile("♫\nMúsica") { player = true; render() }
