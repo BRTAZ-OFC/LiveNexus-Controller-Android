@@ -374,7 +374,19 @@ class ScreenCaptureEditorActivity : Activity() {
             Toast.makeText(this, "Não foi possível carregar as cenas.", Toast.LENGTH_LONG).show()
         }
         if (scenes.isEmpty()) scenes.add(Scene("default", "Cena 1",
-            mutableListOf(CaptureLayer("default-screen", "screen", "Captura de tela"))))
+            mutableListOf(CaptureLayer("default-screen", "screen", "Captura de tela", 0f, 0f, 1f, 1f))))
+        // Migra somente a camada padrao antiga, preservando ajustes personalizados.
+        scenes.forEach { scene ->
+            scene.sources.filter { it.id == "default-screen" && it.type == "screen" }.forEach { layer ->
+                if (layer.x == 0.1f && layer.y == 0.1f &&
+                    layer.width == 0.8f && layer.height == 0.65f) {
+                    layer.x = 0f
+                    layer.y = 0f
+                    layer.width = 1f
+                    layer.height = 1f
+                }
+            }
+        }
         val savedId = prefs.getString("active_capture_scene", "")
         selectedSceneId = scenes.find { it.id == savedId }?.id ?: scenes.first().id
         selectedLayerId = activeScene()?.sources?.lastOrNull()?.id
