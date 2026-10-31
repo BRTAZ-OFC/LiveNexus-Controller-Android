@@ -329,15 +329,15 @@ class MainActivity : Activity() {
             background = NeonTheme.card()
             setPadding(dp(6), dp(8), dp(6), dp(8))
         }
-        listOf("Sobreposição", "Perfil", "Configuração").forEachIndexed { index, title ->
+        listOf("Sobreposição", "Captura", "Configuração").forEachIndexed { index, title ->
             nav.addView(text(title, 12f, if (page == index) cyan else Color.rgb(142, 143, 169)).apply {
                 gravity = Gravity.CENTER
                 setPadding(dp(2), dp(5), dp(2), dp(12))
                 if (page == index) background = NeonTheme.card(true)
-                val icon = NeonIcon(listOf("▱", "♙", "⚙")[index]).apply { setBounds(0, 0, dp(26), dp(26)) }
+                val icon = NeonIcon(listOf("▱", "▣", "⚙")[index]).apply { setBounds(0, 0, dp(26), dp(26)) }
                 setCompoundDrawables(null, icon, null, null)
                 compoundDrawablePadding = dp(5)
-                setOnClickListener { page = index; render() }
+                setOnClickListener { if (index == 1) startActivity(Intent(this@MainActivity, ScreenCaptureEditorActivity::class.java)) else { page = index; render() } }
             }, LinearLayout.LayoutParams(0, dp(72), 1f))
         }
         root.addView(nav)
