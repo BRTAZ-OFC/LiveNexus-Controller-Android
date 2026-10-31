@@ -383,31 +383,40 @@ class ScreenCaptureEditorActivity : Activity() {
             else params(-1, -2, 6))
 
         if (compact) {
+            // Conteudo rolavel: o canvas mantem 16:9 sem ser achatado pela altura da tela.
+            val scroll = ScrollView(this).apply {
+                isFillViewport = false
+                isVerticalScrollBarEnabled = false
+            }
+            val stack = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            }
             val columns = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(0, dp(4), 0, dp(4))
+                gravity = Gravity.TOP
             }
             val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            left.addView(canvasEditor, LinearLayout.LayoutParams(-1, 0, 1f))
+            left.addView(canvasEditor, params(-1, -2))
             left.addView(status, params(-1, dp(19), 3))
-            columns.addView(left, LinearLayout.LayoutParams(0, -1, 3f).apply {
+            columns.addView(left, LinearLayout.LayoutParams(0, -2, 3f).apply {
                 rightMargin = dp(8)
             })
             val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             right.addView(scenePanel, params(-1, -2, 0, 6))
-            val sourceScroll = ScrollView(this).apply { isFillViewport = false }
-            sourceScroll.addView(sourcesPanel)
-            right.addView(sourceScroll, LinearLayout.LayoutParams(-1, 0, 1f))
-            columns.addView(right, LinearLayout.LayoutParams(0, -1, 2f))
-            root.addView(columns, LinearLayout.LayoutParams(-1, 0, 1f))
-            root.addView(bottom, params(-1, dp(57), 2))
-            root.addView(audioPanel(true), params(-1, dp(49), 3))
+            right.addView(sourcesPanel, params(-1, -2))
+            columns.addView(right, LinearLayout.LayoutParams(0, -2, 2f))
+            stack.addView(columns, params(-1, -2))
+            stack.addView(bottom, params(-1, dp(57), 2))
+            stack.addView(audioPanel(true), params(-1, dp(49), 3))
+            scroll.addView(stack)
+            root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         } else {
             val scroll = ScrollView(this)
             val stack = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             stack.addView(section("EDITOR DE CAPTURA", 19f))
             stack.addView(caption("Crie cenas, adicione fontes e capture sua tela.", 12f))
-            stack.addView(canvasEditor, params(-1, dp(238), 8, 5))
+            stack.addView(canvasEditor, params(-1, -2, 8, 5))
             stack.addView(status, params(-1, -2, 0, 8))
             stack.addView(scenePanel, params(-1, -2, 0, 9))
             stack.addView(sourcesPanel, params(-1, -2, 0, 9))
