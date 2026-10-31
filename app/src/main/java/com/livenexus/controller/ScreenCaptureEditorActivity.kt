@@ -427,7 +427,7 @@ class ScreenCaptureEditorActivity : Activity() {
         ).apply { leftMargin = dp(6) })
         bottom.addView(resolutionRow,
             if (compact) LinearLayout.LayoutParams(0, dp(42), 2f) else params(-1, dp(42)))
-        resolutionRow.visibility = View.GONE
+
         val actions = row(
             "◉ Iniciar captura" to { askPermission() },
             "■ Parar captura" to { stopCapture() },
@@ -438,14 +438,52 @@ class ScreenCaptureEditorActivity : Activity() {
             if (compact) LinearLayout.LayoutParams(0, -2, 3f).apply { leftMargin = dp(9) }
             else params(-1, -2, 6))
 
-        val audioSettings = audioPanel(false).apply { visibility = View.GONE }
-        scenePanel.visibility = View.GONE
-        sourcesPanel.visibility = View.GONE
+        val audioSettings = audioPanel(false)
+        val settingsContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun openEditorPage(title: String, content: View) {
+            (content.parent as? android.view.ViewGroup)?.removeView(content)
+            val host = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                background = NeonTheme.backdrop()
+            }
+            val heading = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(tap("‹ Voltar", false) { },
+                    params(dp(105), dp(43)))
+                addView(section(title, 18f), LinearLayout.LayoutParams(0, -2, 1f))
+            }
+            val page = AlertDialog.Builder(this).setView(host).create()
+            (heading.getChildAt(0) as View).setOnClickListener { page.dismiss() }
+            host.addView(heading, params(-1, dp(48)))
+            val scroll = ScrollView(this)
+            scroll.addView(content)
+            host.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+            page.setOnDismissListener {
+                scroll.removeView(content)
+                when (content) {
+                    scenePanel -> settingsContent.addView(scenePanel)
+                    sourcesPanel -> settingsContent.addView(sourcesPanel)
+                    resolutionRow -> settingsContent.addView(resolutionRow)
+                    audioSettings -> settingsContent.addView(audioSettings)
+                }
+            }
+            page.show()
+            page.window?.setLayout(
+                android.view.WindowManager.LayoutParams.MATCH_PARENT,
+                android.view.WindowManager.LayoutParams.MATCH_PARENT
+            )
+        }
+        settingsContent.addView(scenePanel)
+        settingsContent.addView(sourcesPanel)
+        settingsContent.addView(resolutionRow)
+        settingsContent.addView(audioSettings)
         val menus = row(
-            "Cenas" to { scenePanel.visibility = if (scenePanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE },
-            "Fontes" to { sourcesPanel.visibility = if (sourcesPanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE },
-            "Vídeo" to { resolutionRow.visibility = if (resolutionRow.visibility == View.VISIBLE) View.GONE else View.VISIBLE },
-            "Áudio" to { audioSettings.visibility = if (audioSettings.visibility == View.VISIBLE) View.GONE else View.VISIBLE },
+            "Cenas" to { openEditorPage("CENAS", scenePanel) },
+            "Fontes" to { openEditorPage("FONTES", sourcesPanel) },
+            "Vídeo" to { openEditorPage("VÍDEO", resolutionRow) },
+            "Áudio" to { openEditorPage("ÁUDIO", audioSettings) },
             height = 42
         )
 
@@ -471,9 +509,7 @@ class ScreenCaptureEditorActivity : Activity() {
             })
             val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             right.addView(menus, params(-1, dp(44), 0, 5))
-            right.addView(scenePanel, params(-1, -2, 0, 6))
-            right.addView(sourcesPanel, params(-1, -2))
-            right.addView(audioSettings, params(-1, -2, 4))
+
             columns.addView(right, LinearLayout.LayoutParams(0, -2, 2f))
             stack.addView(columns, params(-1, -2))
             stack.addView(bottom, params(-1, dp(57), 2))
@@ -488,10 +524,9 @@ class ScreenCaptureEditorActivity : Activity() {
             stack.addView(canvasHost, params(-1, -2, 8, 5))
             stack.addView(status, params(-1, -2, 0, 8))
             stack.addView(menus, params(-1, dp(44), 0, 9))
-            stack.addView(scenePanel, params(-1, -2, 0, 9))
-            stack.addView(sourcesPanel, params(-1, -2, 0, 9))
+
             stack.addView(bottom)
-            stack.addView(audioSettings, params(-1, -2, 7))
+
             scroll.addView(stack)
             root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         }
