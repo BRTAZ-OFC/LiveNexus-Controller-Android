@@ -445,7 +445,7 @@ class MainActivity : Activity() {
                         Toast.makeText(this, e.message ?: "Falha ao enviar comando.", Toast.LENGTH_SHORT).show()
                     }
                 }
-            }.start()
+            }
         } else {
             showConnectionMessage("Ação ainda não conectada: ${name(i)}")
         }
