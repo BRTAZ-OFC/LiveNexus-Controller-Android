@@ -63,6 +63,31 @@ class CaptureSceneCanvas(context: Context) : View(context) {
         area.top + (layer.y + layer.height) * area.height()
     )
 
+    // Remove somente barras claras uniformes que já venham embutidas no bitmap.
+    // Não corta bordas de uma captura normal que tenha conteúdo até as extremidades.
+    private fun previewContentRect(bitmap: Bitmap): android.graphics.Rect {
+        val full = android.graphics.Rect(0, 0, bitmap.width, bitmap.height)
+        if (bitmap.width < 100 || bitmap.height < 100) return full
+        fun blankAt(x: Int): Boolean {
+            for (fraction in floatArrayOf(.25f, .5f, .75f)) {
+                val y = (bitmap.height * fraction).toInt().coerceIn(0, bitmap.height - 1)
+                val color = bitmap.getPixel(x.coerceIn(0, bitmap.width - 1), y)
+                val r = Color.red(color)
+                val g = Color.green(color)
+                val b = Color.blue(color)
+                if (minOf(r, g, b) < 170 || maxOf(r, g, b) - minOf(r, g, b) > 24) return false
+            }
+            return true
+        }
+        if (!blankAt(1) || !blankAt(bitmap.width - 2) || blankAt(bitmap.width / 2)) return full
+        var left = 1
+        while (left < bitmap.width / 3 && blankAt(left)) left += 3
+        var right = bitmap.width - 2
+        while (right > bitmap.width * 2 / 3 && blankAt(right)) right -= 3
+        if (left < bitmap.width / 12 || bitmap.width - 1 - right < bitmap.width / 12) return full
+        return android.graphics.Rect(left, 0, right + 1, bitmap.height)
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         canvas.drawColor(Color.rgb(4, 8, 28))
@@ -97,11 +122,12 @@ class CaptureSceneCanvas(context: Context) : View(context) {
                 paint.color = Color.WHITE
                 val bitmap = frame!!
                 // CENTER_CROP / COVER: removes empty borders from mismatched aspect ratios.
-                val ratio = max(box.width() / bitmap.width, box.height() / bitmap.height)
-                val sourceWidth = (box.width() / ratio).toInt().coerceIn(1, bitmap.width)
-                val sourceHeight = (box.height() / ratio).toInt().coerceIn(1, bitmap.height)
-                val sourceLeft = (bitmap.width - sourceWidth) / 2
-                val sourceTop = (bitmap.height - sourceHeight) / 2
+                val region = previewContentRect(bitmap)
+                val ratio = max(box.width() / region.width(), box.height() / region.height())
+                val sourceWidth = (box.width() / ratio).toInt().coerceIn(1, region.width())
+                val sourceHeight = (box.height() / ratio).toInt().coerceIn(1, region.height())
+                val sourceLeft = region.left + (region.width() - sourceWidth) / 2
+                val sourceTop = region.top + (region.height() - sourceHeight) / 2
                 canvas.drawBitmap(
                     bitmap,
                     android.graphics.Rect(sourceLeft, sourceTop, sourceLeft + sourceWidth, sourceTop + sourceHeight),
