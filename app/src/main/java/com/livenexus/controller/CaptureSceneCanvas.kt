@@ -10,6 +10,7 @@ import android.view.MotionEvent
 import android.view.View
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.hypot
 
 /** Coordenadas proporcionais (0..1), independentes do tamanho do aparelho. */
 data class CaptureLayer(
@@ -45,6 +46,14 @@ class CaptureSceneCanvas(context: Context) : View(context) {
     private var originY = 0f
     private var originW = 0f
     private var originH = 0f
+    private var multiTouch = false
+    private var initialSpanX = 0f
+    private var initialSpanY = 0f
+    private var initialCenterX = 0f
+    private var initialCenterY = 0f
+    private var originCenterX = 0f
+    private var originCenterY = 0f
+    private var touched = false
     private val handleSize get() = resources.displayMetrics.density * 20f
 
     private fun bounds(layer: CaptureLayer): RectF = RectF(
@@ -125,6 +134,21 @@ class CaptureSceneCanvas(context: Context) : View(context) {
         paint.style = Paint.Style.FILL
     }
 
+    private fun rememberPinch(event: MotionEvent, target: CaptureLayer) {
+        multiTouch = true
+        resizing = false
+        initialSpanX = abs(event.getX(1) - event.getX(0)).coerceAtLeast(1f)
+        initialSpanY = abs(event.getY(1) - event.getY(0)).coerceAtLeast(1f)
+        initialCenterX = (event.getX(0) + event.getX(1)) / 2f
+        initialCenterY = (event.getY(0) + event.getY(1)) / 2f
+        originX = target.x
+        originY = target.y
+        originW = target.width
+        originH = target.height
+        originCenterX = originX + originW / 2f
+        originCenterY = originY + originH / 2f
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (area.isEmpty) return false
         when (event.actionMasked) {
@@ -140,38 +164,99 @@ class CaptureSceneCanvas(context: Context) : View(context) {
                 val target = moving
                 selectedLayerId = target?.id
                 onSelection?.invoke(target?.id)
-                if (target == null || target.locked) { moving = null; return true }
+                multiTouch = false
+                touched = false
+                if (target == null || target.locked) {
+                    moving = null
+                    return true
+                }
                 val box = bounds(target)
                 resizing = abs(x - box.right) <= handleSize && abs(y - box.bottom) <= handleSize
-                downX = x; downY = y
-                originX = target.x; originY = target.y
-                originW = target.width; originH = target.height
+                downX = x
+                downY = y
+                originX = target.x
+                originY = target.y
+                originW = target.width
+                originH = target.height
                 parent?.requestDisallowInterceptTouchEvent(true)
+                return true
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                val target = moving ?: selectedLayerId?.let { id ->
+                    layers.find { it.id == id && it.visible && !it.locked }
+                }
+                if (event.pointerCount >= 2 && target != null) {
+                    moving = target
+                    rememberPinch(event, target)
+                    parent?.requestDisallowInterceptTouchEvent(true)
+                }
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
                 val target = moving ?: return true
-                val dx = (event.x - downX) / max(1f, area.width())
-                val dy = (event.y - downY) / max(1f, area.height())
-                if (resizing) {
-                    target.width = (originW + dx).coerceIn(.08f, 3f)
-                    target.height = (originH + dy).coerceIn(.08f, 3f)
-                } else {
-                    target.x = (originX + dx).coerceIn(-2f, 2f)
-                    target.y = (originY + dy).coerceIn(-2f, 2f)
+                if (multiTouch && event.pointerCount >= 2) {
+                    val spanX = abs(event.getX(1) - event.getX(0))
+                    val spanY = abs(event.getY(1) - event.getY(0))
+                    val deltaX = spanX - initialSpanX
+                    val deltaY = spanY - initialSpanY
+                    val threshold = handleSize * .45f
+                    val horizontal = abs(deltaX) > threshold
+                    val vertical = abs(deltaY) > threshold
+                    val scaleX = if (horizontal) spanX / initialSpanX else 1f
+                    val scaleY = if (vertical) spanY / initialSpanY else 1f
+                    // Diagonal pinch scales both axes by the same amount.
+                    val proportional = horizontal && vertical &&
+                        abs(deltaX / max(1f, area.width())) > .015f &&
+                        abs(deltaY / max(1f, area.height())) > .015f
+                    val factor = if (proportional) {
+                        hypot(spanX, spanY) / hypot(initialSpanX, initialSpanY)
+                    } else 1f
+                    target.width = (originW * if (proportional) factor else scaleX).coerceIn(.08f, 4f)
+                    target.height = (originH * if (proportional) factor else scaleY).coerceIn(.08f, 4f)
+                    val centerDx = ((event.getX(0) + event.getX(1)) / 2f - initialCenterX) /
+                        max(1f, area.width())
+                    val centerDy = ((event.getY(0) + event.getY(1)) / 2f - initialCenterY) /
+                        max(1f, area.height())
+                    target.x = (originCenterX + centerDx - target.width / 2f).coerceIn(-3f, 3f)
+                    target.y = (originCenterY + centerDy - target.height / 2f).coerceIn(-3f, 3f)
+                } else if (!multiTouch) {
+                    val dx = (event.x - downX) / max(1f, area.width())
+                    val dy = (event.y - downY) / max(1f, area.height())
+                    if (resizing) {
+                        target.width = (originW + dx).coerceIn(.08f, 4f)
+                        target.height = (originH + dy).coerceIn(.08f, 4f)
+                    } else {
+                        target.x = (originX + dx).coerceIn(-3f, 3f)
+                        target.y = (originY + dy).coerceIn(-3f, 3f)
+                    }
                 }
+                touched = true
                 invalidate()
                 return true
             }
+            MotionEvent.ACTION_POINTER_UP -> {
+                if (multiTouch) {
+                    if (touched) onChange?.invoke()
+                    moving = null
+                    multiTouch = false
+                    touched = false
+                    parent?.requestDisallowInterceptTouchEvent(false)
+                }
+                return true
+            }
             MotionEvent.ACTION_UP -> {
-                if (moving != null) onChange?.invoke()
+                if (moving != null && touched) onChange?.invoke()
                 moving = null
+                multiTouch = false
+                touched = false
                 parent?.requestDisallowInterceptTouchEvent(false)
                 performClick()
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
                 moving = null
+                multiTouch = false
+                touched = false
                 parent?.requestDisallowInterceptTouchEvent(false)
                 return true
             }
