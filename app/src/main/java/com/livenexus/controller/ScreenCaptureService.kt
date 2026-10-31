@@ -33,6 +33,8 @@ class ScreenCaptureService : Service() {
         const val EXTRA_RESULT_CODE = "capture_result_code"
         const val EXTRA_RESULT_DATA = "capture_result_data"
         const val EXTRA_MAX_DIMENSION = "capture_max_dimension"
+        const val EXTRA_FPS = "capture_fps"
+        const val EXTRA_BITRATE_KBPS = "capture_bitrate_kbps"
         @Volatile var previewFrame: Bitmap? = null
             private set
         @Volatile var lastError: String? = null
@@ -46,6 +48,8 @@ class ScreenCaptureService : Service() {
 
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
+    private var encoderDisplay: VirtualDisplay? = null
+    private var videoEncoder: LocalVideoEncoder? = null
     private var reader: ImageReader? = null
     private var captureThread: HandlerThread? = null
     private var projectionCallback: MediaProjection.Callback? = null
@@ -185,6 +189,23 @@ class ScreenCaptureService : Service() {
                 null
             )
             if (virtualDisplay == null) throw IllegalStateException("Falha ao criar a tela virtual.")
+            val fps = intent.getIntExtra(EXTRA_FPS, 30)
+            val bitrate = intent.getIntExtra(EXTRA_BITRATE_KBPS, 4500)
+            val evenWidth = width - width % 2
+            val evenHeight = height - height % 2
+            val encoder = LocalVideoEncoder(
+                evenWidth, evenHeight, fps, bitrate,
+                onSample = { _, _ -> },
+                onFormat = { _ -> }
+            )
+            encoder.start()
+            videoEncoder = encoder
+            encoderDisplay = activeProjection.createVirtualDisplay(
+                "LiveNEXUS H264 Encoder",
+                evenWidth, evenHeight, metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                encoder.surface, null, null
+            ) ?: throw IllegalStateException("Falha ao conectar captura ao encoder.")
             isCapturing = true
         } catch (error: Exception) {
             lastError = error.message ?: "Falha ao iniciar a captura."
@@ -196,6 +217,10 @@ class ScreenCaptureService : Service() {
 
     override fun onDestroy() {
         isCapturing = false
+        encoderDisplay?.release()
+        encoderDisplay = null
+        videoEncoder?.close()
+        videoEncoder = null
         virtualDisplay?.release()
         virtualDisplay = null
         reader?.setOnImageAvailableListener(null, null)
