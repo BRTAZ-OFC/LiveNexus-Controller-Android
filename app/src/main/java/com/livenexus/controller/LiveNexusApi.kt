@@ -79,7 +79,7 @@ object LiveNexusApi {
     fun scenarios() = request("/api/cenarios").getJSONArray("items")
     fun overlays() = request("/api/overlays").getJSONArray("items")
     fun sendCommand(action: String): JSONObject {
-        require(action in setOf("death-increment", "death-decrement", "death-reset", "rtc-reload")) {
+        require(action in setOf("death-increment", "death-decrement", "death-reset", "rtc-reload", "music-toggle", "music-next", "music-previous", "music-volume-up", "music-volume-down")) {
             "Comando não permitido."
         }
         return request("/api/controller/commands", "POST", JSONObject().put("action", action))
