@@ -362,16 +362,38 @@ class ScreenCaptureEditorActivity : Activity() {
                 android.R.layout.simple_spinner_dropdown_item,
                 arrayOf("30 FPS", "60 FPS")
             )
-            val savedFps = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .getInt(KEY_FPS, 30)
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val savedFps = prefs.getInt(KEY_FPS, 30)
             setSelection(if (savedFps == 60) 1 else 0)
             background = shape(violet)
+            var confirmedPosition = if (savedFps == 60) 1 else 0
+            var skipSelection = true
             onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(
                     parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long
                 ) {
-                    getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                        .putInt(KEY_FPS, if (position == 1) 60 else 30).apply()
+                    if (skipSelection) {
+                        skipSelection = false
+                        return
+                    }
+                    if (position == confirmedPosition) return
+                    if (position == 1) {
+                        AlertDialog.Builder(this@ScreenCaptureEditorActivity)
+                            .setTitle("Confirmar 60 FPS")
+                            .setMessage("Essa qualidade consome muita bateria e requer muito desempenho. Tem certeza que quer essa qualidade mesmo?")
+                            .setPositiveButton("Sim") { _, _ ->
+                                confirmedPosition = 1
+                                prefs.edit().putInt(KEY_FPS, 60).apply()
+                            }
+                            .setNegativeButton("Cancelar") { _, _ ->
+                                setSelection(confirmedPosition)
+                            }
+                            .setOnCancelListener { setSelection(confirmedPosition) }
+                            .show()
+                    } else {
+                        confirmedPosition = 0
+                        prefs.edit().putInt(KEY_FPS, 30).apply()
+                    }
                 }
                 override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
             }
