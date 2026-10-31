@@ -831,6 +831,7 @@ class ScreenCaptureEditorActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        resumeCaptureRefresh()
         val platform = pendingStreamingPlatform ?: return
         pendingStreamingPlatform = null
         Thread {
@@ -976,8 +977,7 @@ class ScreenCaptureEditorActivity : Activity() {
         }
     }
 
-    override fun onResume() {
-        super.onResume()
+    private fun resumeCaptureRefresh() {
         activeUi = true
         ui.post(refresh)
     }
