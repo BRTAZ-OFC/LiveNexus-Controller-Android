@@ -11,7 +11,7 @@ import android.webkit.CookieManager
  * O token fica somente na memória do processo durante este teste.
  */
 object LiveNexusApi {
-    @Volatile var baseUrl: String = "https://livenexus-teste.acq.lat"
+    @Volatile var baseUrl: String = "https://livenexus.acq.lat"
         private set
     @Volatile private var token: String? = null
 
