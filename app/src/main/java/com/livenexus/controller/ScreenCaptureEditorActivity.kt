@@ -430,9 +430,7 @@ class ScreenCaptureEditorActivity : Activity() {
         val actions = row(
             "◉ Iniciar captura" to { askPermission() },
             "■ Parar captura" to { stopCapture() },
-            "◉ Transmitir" to {
-                Toast.makeText(this, "Transmissão não integrada.", Toast.LENGTH_LONG).show()
-            },
+            "◉ Transmitir" to { selectStreamingPlatforms() },
             height = 41
         )
         bottom.addView(actions,
@@ -827,6 +825,30 @@ class ScreenCaptureEditorActivity : Activity() {
         sources.add(next, layer)
         persistScenes()
         showLayers()
+    }
+
+    private fun selectStreamingPlatforms() {
+        val platforms = arrayOf("Twitch", "Kick", "YouTube")
+        val keys = arrayOf("stream_twitch", "stream_kick", "stream_youtube")
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val selected = BooleanArray(platforms.size) { prefs.getBoolean(keys[it], false) }
+        AlertDialog.Builder(this)
+            .setTitle("Plataformas de transmissão")
+            .setMultiChoiceItems(platforms, selected) { _, index, checked ->
+                selected[index] = checked
+            }
+            .setPositiveButton("Salvar") { _, _ ->
+                val editor = prefs.edit()
+                keys.forEachIndexed { index, key -> editor.putBoolean(key, selected[index]) }
+                editor.apply()
+                Toast.makeText(
+                    this,
+                    "Plataformas salvas. A conexão de transmissão ainda não está integrada.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
     }
 
     private fun askPermission() {
