@@ -228,21 +228,14 @@ class ScreenCaptureEditorActivity : Activity() {
                 gravity = Gravity.CENTER_VERTICAL
                 addView(section("CENAS", 14f), LinearLayout.LayoutParams(0, -1, 1f))
                 addView(caption("Gerenciar cenas ›", 10f).apply {
-                    setOnClickListener { editSceneName(null) }
+                    setOnClickListener { manageScene() }
                 })
             }
             addView(top, params(-1, dp(27)))
-            addView(sceneStatus, params(-1, dp(19)))
             addView(HorizontalScrollView(this@ScreenCaptureEditorActivity).apply {
                 isHorizontalScrollBarEnabled = false
                 addView(scenesList)
-            }, params(-1, dp(43), 2, 4))
-            addView(row(
-                "+ Cena" to { editSceneName(null) },
-                "Renomear" to { activeScene()?.let { editSceneName(it) } },
-                "Excluir" to { removeScene() },
-                height = 34
-            ))
+            }, params(-1, dp(45), 6, 1))
         }
 
         val sourcesPanel = LinearLayout(this).apply {
@@ -412,22 +405,35 @@ class ScreenCaptureEditorActivity : Activity() {
             .apply()
     }
 
+    private fun manageScene() {
+        AlertDialog.Builder(this).setTitle("Gerenciar cenas")
+            .setItems(arrayOf("Adicionar cena", "Renomear cena", "Excluir cena")) { _, index ->
+                when (index) {
+                    0 -> editSceneName(null)
+                    1 -> activeScene()?.let { editSceneName(it) }
+                    2 -> removeScene()
+                }
+            }.show()
+    }
+
     private fun showScenes() {
         scenesList.removeAllViews()
         scenes.forEach { scene ->
             val selected = scene.id == selectedSceneId
-            scenesList.addView(neonButton(
-                (if (selected) "● " else "○ ") + scene.name,
-                if (selected) violet else Color.rgb(63, 74, 126)
+            scenesList.addView(tap(
+                (if (selected) "● " else "") + scene.name,
+                selected
             ) {
                 selectedSceneId = scene.id
                 selectedLayerId = scene.sources.lastOrNull()?.id
                 persistScenes()
                 showScenes()
-            }, LinearLayout.LayoutParams(dp(145), dp(43)).apply {
-                rightMargin = dp(7)
+            }, LinearLayout.LayoutParams(dp(if (landscapeEditor) 122 else 136), dp(42)).apply {
+                rightMargin = dp(6)
             })
         }
+        scenesList.addView(tap("+ Nova cena") { editSceneName(null) },
+            LinearLayout.LayoutParams(dp(if (landscapeEditor) 120 else 136), dp(42)))
         sceneStatus.text = "Cena ativa: " + (activeScene()?.name ?: "Nenhuma")
         showLayers()
     }
@@ -437,44 +443,39 @@ class ScreenCaptureEditorActivity : Activity() {
         layersList.removeAllViews()
         val sources = activeScene()?.sources ?: emptyList()
         sources.asReversed().forEach { layer ->
-            val row = LinearLayout(this).apply {
+            val selected = layer.id == selectedLayerId
+            val item = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                background = panel(if (layer.id == selectedLayerId) violet else Color.rgb(40, 50, 87))
-                setPadding(dp(6), dp(3), dp(6), dp(3))
+                background = shape(if (selected) violet else stroke)
+                setPadding(dp(3), dp(2), dp(3), dp(2))
             }
-            val prefix = when (layer.type) {
+            val icon = when (layer.type) {
                 "screen" -> "▣"
                 "text" -> "T"
-                else -> "▧"
+                else -> "▤"
             }
-            row.addView(label(prefix + "  " + layer.name, 13f).apply {
+            item.addView(label(icon + "  " + layer.name, if (landscapeEditor) 11f else 12f).apply {
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 gravity = Gravity.CENTER_VERTICAL
-                setOnClickListener {
-                    selectedLayerId = layer.id
-                    showLayers()
-                }
+                setOnClickListener { selectedLayerId = layer.id; showLayers() }
             }, LinearLayout.LayoutParams(0, -1, 1f))
-            fun actionButton(text: String, color: Int = violet, action: () -> Unit) {
-                row.addView(neonButton(text, color, action),
-                    LinearLayout.LayoutParams(dp(35), dp(38)).apply { leftMargin = dp(3) })
+            fun action(glyph: String, color: Int = Color.WHITE, command: () -> Unit) {
+                item.addView(label(glyph, if (landscapeEditor) 17f else 19f).apply {
+                    gravity = Gravity.CENTER
+                    setTextColor(color)
+                    setOnClickListener { selectedLayerId = layer.id; command() }
+                }, params(dp(if (landscapeEditor) 26 else 31), -1))
             }
-            actionButton(if (layer.visible) "◉" else "⊘") {
-                selectedLayerId = layer.id; changeLayer("visible")
-            }
-            actionButton(if (layer.locked) "▣" else "♧") {
-                selectedLayerId = layer.id; changeLayer("locked")
-            }
-            actionButton("↑") { selectedLayerId = layer.id; reorderLayer(1) }
-            actionButton("↓") { selectedLayerId = layer.id; reorderLayer(-1) }
-            actionButton("×", Color.rgb(199, 53, 97)) {
-                selectedLayerId = layer.id; changeLayer("remove")
-            }
-            layersList.addView(row, layoutParams(dp(48), -1, 0, 5))
+            action(if (layer.visible) "◉" else "⊘", violet) { changeLayer("visible") }
+            action(if (layer.locked) "▣" else "♧") { changeLayer("locked") }
+            action("↑") { reorderLayer(1) }
+            action("↓") { reorderLayer(-1) }
+            action("×", Color.rgb(250, 70, 101)) { changeLayer("remove") }
+            layersList.addView(item, params(-1, dp(if (landscapeEditor) 37 else 43), 0, 3))
         }
-        if (sources.isEmpty()) layersList.addView(label("Nenhuma fonte nesta cena.", 12f))
+        if (sources.isEmpty()) layersList.addView(caption("Adicione uma fonte à cena.", 12f))
         canvasEditor.layers = sources
         canvasEditor.selectedLayerId = selectedLayerId
     }
