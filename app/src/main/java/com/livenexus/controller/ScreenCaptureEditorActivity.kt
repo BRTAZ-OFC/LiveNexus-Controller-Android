@@ -8,6 +8,8 @@ import org.json.JSONObject
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
+import android.content.res.Configuration
 import android.graphics.Typeface
 import android.media.projection.MediaProjectionManager
 import android.os.Bundle
@@ -23,6 +25,7 @@ import android.widget.Spinner
 import android.widget.ArrayAdapter
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.HorizontalScrollView
 
 /**
  * Editor local de captura. Não inclui transmissão, áudio nem salvamento de vídeo.
@@ -65,106 +68,223 @@ class ScreenCaptureEditorActivity : Activity() {
         setOnClickListener { action() }
     }
 
+    private val violet = Color.rgb(198, 22, 244)
+    private val cyan = NeonTheme.cyan
+
+    private fun panel(stroke: Int = Color.rgb(57, 65, 110)): GradientDrawable =
+        GradientDrawable(GradientDrawable.Orientation.TL_BR,
+            intArrayOf(Color.rgb(18, 19, 51), Color.rgb(5, 9, 31))).apply {
+            cornerRadius = dp(15).toFloat()
+            setStroke(dp(1), stroke)
+        }
+
+    private fun neonButton(text: String, accent: Int = violet, action: () -> Unit): TextView =
+        label(text, 13f).apply {
+            gravity = Gravity.CENTER
+            setTypeface(null, Typeface.BOLD)
+            background = panel(accent)
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { action() }
+        }
+
+    private fun section(title: String): TextView = label("▏" + title, 16f).apply {
+        setTypeface(null, Typeface.BOLD)
+        setPadding(dp(4), dp(8), dp(4), dp(8))
+    }
+
+    private fun layoutParams(
+        height: Int = -2, width: Int = -1, top: Int = 0, bottom: Int = 0
+    ): LinearLayout.LayoutParams = LinearLayout.LayoutParams(width, height).apply {
+        topMargin = dp(top)
+        bottomMargin = dp(bottom)
+    }
+
+    private fun weightedRow(vararg buttons: Pair<String, () -> Unit>): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            buttons.forEachIndexed { i, item ->
+                addView(neonButton(item.first, if (i == 0) violet else Color.rgb(65, 78, 146), item.second),
+                    LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+                        if (i > 0) leftMargin = dp(6)
+                    })
+            }
+        }
+
+    private fun openSettings() {
+        AlertDialog.Builder(this)
+            .setTitle("Configurações de captura")
+            .setItems(arrayOf("Sobre a prévia", "Encerrar captura")) { _, index ->
+                if (index == 1) stopCapture()
+                else Toast.makeText(this,
+                    "A prévia é local; a transmissão não está integrada.", Toast.LENGTH_LONG).show()
+            }.show()
+    }
+
+    private fun stopCapture() {
+        stopService(Intent(this, ScreenCaptureService::class.java))
+        status.text = "Encerrando captura..."
+        canvasEditor.frame = null
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = NeonTheme.ink
         window.navigationBarColor = NeonTheme.ink
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = NeonTheme.backdrop()
-            setPadding(dp(14), dp(12), dp(14), dp(16))
+            setPadding(dp(if (landscape) 12 else 14), dp(6), dp(if (landscape) 12 else 14), dp(8))
         }
-        root.addView(NeonHeader(this), LinearLayout.LayoutParams(-1, dp(80)))
-        val scroll = ScrollView(this)
-        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        content.addView(label("EDITOR DE CAPTURA", 20f).apply {
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(NeonHeader(this), LinearLayout.LayoutParams(
+            if (landscape) dp(210) else 0, dp(if (landscape) 65 else 72),
+            if (landscape) 0f else 1f
+        ))
+        if (landscape) header.addView(label("▏EDITOR DE CAPTURA", 19f).apply {
             setTypeface(null, Typeface.BOLD)
-            setPadding(0, dp(10), 0, dp(8))
-        })
-        content.addView(label("Prévia local da tela autorizada. Nada é transmitido para a internet.", 12f))
+            setPadding(dp(12), 0, 0, 0)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(neonButton("▣", violet) { finish() }, layoutParams(dp(40), dp(46)))
+        header.addView(neonButton("⋮", cyan) { openSettings() },
+            LinearLayout.LayoutParams(dp(46), dp(40)).apply { leftMargin = dp(6) })
+        root.addView(header)
+
         canvasEditor = CaptureSceneCanvas(this).apply {
-            contentDescription = "Canvas visual de cenas. Arraste a fonte ou redimensione pelo canto."
-            onSelection = { id ->
-                selectedLayerId = id
-                showLayers()
-            }
+            contentDescription = "Prévia editável de cenas. Arraste ou redimensione as fontes."
+            onSelection = { selectedLayerId = it; showLayers() }
             onChange = { persistScenes(); showLayers() }
+            background = panel(violet)
         }
-        content.addView(canvasEditor, LinearLayout.LayoutParams(-1, dp(270)).apply {
-            topMargin = dp(12)
-            bottomMargin = dp(10)
-        })
         preview = ImageView(this).apply { visibility = View.GONE }
-        status = label("Captura desligada.", 13f)
-        content.addView(status, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) })
-        content.addView(label("CENAS", 17f).apply {
-            setTypeface(null, Typeface.BOLD)
-            setPadding(0, dp(12), 0, dp(8))
-        })
-        sceneStatus = label("", 13f)
-        content.addView(sceneStatus)
-        scenesList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        content.addView(scenesList)
-        val sceneButtons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun sceneAction(name: String, action: () -> Unit) {
-            sceneButtons.addView(control(name, action),
-                LinearLayout.LayoutParams(0, dp(48), 1f))
+        status = label("Captura desligada.", 12f).apply {
+            setTextColor(Color.rgb(164, 180, 207))
         }
-        sceneAction("+ Cena") { editSceneName(null) }
-        sceneAction("Renomear") { activeScene()?.let { editSceneName(it) } }
-        sceneAction("Excluir") { removeScene() }
-        content.addView(sceneButtons)
-        content.addView(label("FONTES / CAMADAS", 17f).apply {
-            setTypeface(null, Typeface.BOLD)
-            setPadding(0, dp(15), 0, dp(7))
-        })
+        sceneStatus = label("", 12f)
+        scenesList = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         layersList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        content.addView(layersList)
-        content.addView(control("+ Adicionar fonte") { chooseSource() },
-            LinearLayout.LayoutParams(-1, dp(48)))
-        val layerActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun layerAction(name: String, action: () -> Unit) {
-            layerActions.addView(control(name, action), LinearLayout.LayoutParams(0, dp(47), 1f))
+
+        val scenePanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = panel()
+            setPadding(dp(9), dp(8), dp(9), dp(9))
+            addView(section("CENAS"))
+            addView(sceneStatus)
+            val swipe = HorizontalScrollView(this@ScreenCaptureEditorActivity).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(scenesList)
+            }
+            addView(swipe, layoutParams(dp(48), -1, 6, 5))
+            addView(weightedRow(
+                "+ Cena" to { editSceneName(null) },
+                "Renomear" to { activeScene()?.let { editSceneName(it) } },
+                "Excluir" to { removeScene() }
+            ))
         }
-        layerAction("↑") { reorderLayer(1) }
-        layerAction("↓") { reorderLayer(-1) }
-        layerAction("Ocultar") { changeLayer("visible") }
-        layerAction("Bloquear") { changeLayer("locked") }
-        layerAction("Remover") { changeLayer("remove") }
-        content.addView(layerActions)
-        content.addView(label("Toque na fonte para selecionar. Arraste no canvas para mover; use o canto inferior direito para redimensionar.", 12f).apply {
-            setPadding(0, dp(7), 0, dp(14))
-        })
+
+        val sourcesPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = panel()
+            setPadding(dp(9), dp(8), dp(9), dp(9))
+            val sectionHead = LinearLayout(this@ScreenCaptureEditorActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(section("FONTES / CAMADAS"), LinearLayout.LayoutParams(0, -2, 1f))
+                addView(neonButton("+ Adicionar fonte", cyan) { chooseSource() },
+                    LinearLayout.LayoutParams(dp(if (landscape) 144 else 160), dp(39)))
+            }
+            addView(sectionHead)
+            addView(layersList)
+        }
+
+        resolution = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@ScreenCaptureEditorActivity,
+                android.R.layout.simple_spinner_dropdown_item, options
+            )
+            val saved = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getInt(KEY_RESOLUTION, 1280)
+            setSelection(sizes.indexOf(saved).takeIf { it >= 0 } ?: 1)
+            background = panel(violet)
+        }
+        val bottomControls = LinearLayout(this).apply {
+            orientation = if (landscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = panel()
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        val resolutionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(label("▣  RESOLUÇÃO", 13f).apply {
+                setTypeface(null, Typeface.BOLD)
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(resolution, LinearLayout.LayoutParams(
+                dp(if (landscape) 185 else 200), dp(47)))
+        }
+        bottomControls.addView(resolutionRow, if (landscape)
+            LinearLayout.LayoutParams(0, dp(50), 1f) else layoutParams(dp(50)))
+        val actions = weightedRow(
+            "◉  Iniciar captura" to { askPermission() },
+            "■  Parar captura" to { stopCapture() },
+            "◉  Transmitir" to {
+                Toast.makeText(this,
+                    "Transmissão ainda não integrada. Somente prévia local.",
+                    Toast.LENGTH_LONG).show()
+            }
+        )
+        bottomControls.addView(actions, if (landscape)
+            LinearLayout.LayoutParams(0, -2, 2f).apply { leftMargin = dp(10) }
+            else layoutParams(dp(49), -1, 7))
+
+        val editorScroll = ScrollView(this).apply {
+            isFillViewport = false
+            clipToPadding = false
+        }
+        val work = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(4), 0, dp(5))
+        }
+        if (!landscape) {
+            work.addView(section("EDITOR DE CAPTURA"))
+            work.addView(label("Crie cenas, adicione fontes e capture sua tela.", 12f))
+            work.addView(canvasEditor, layoutParams(dp(245), -1, 12, 5))
+            work.addView(status, layoutParams(-2, -1, 0, 9))
+            work.addView(scenePanel, layoutParams(-2, -1, 4, 9))
+            work.addView(sourcesPanel, layoutParams(-2, -1, 0, 9))
+            work.addView(bottomControls)
+        } else {
+            val cols = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            left.addView(canvasEditor, layoutParams(dp(280), -1, 0, 5))
+            left.addView(status)
+            cols.addView(left, LinearLayout.LayoutParams(0, -2, 3f).apply { rightMargin = dp(9) })
+            val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            right.addView(scenePanel, layoutParams(-2, -1, 0, 8))
+            right.addView(sourcesPanel)
+            cols.addView(right, LinearLayout.LayoutParams(0, -2, 2f))
+            work.addView(cols)
+            work.addView(bottomControls, layoutParams(-2, -1, 8))
+        }
+        editorScroll.addView(work)
+        root.addView(editorScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        val navigation = weightedRow(
+            "⌂  Controlador" to { finish() },
+            "▣  Captura" to { },
+            "◉  Transmissão" to {
+                Toast.makeText(this, "Transmissão ainda não integrada.", Toast.LENGTH_SHORT).show()
+            },
+            "⚙  Configurações" to { openSettings() }
+        )
+        root.addView(navigation, layoutParams(dp(49), -1, 6))
+        setContentView(root)
         loadScenes()
         showScenes()
-        content.addView(label("Resolução da captura", 15f).apply {
-            setTypeface(null, Typeface.BOLD)
-        })
-        resolution = Spinner(this)
-        resolution.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, options)
-        val settings = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val saved = settings.getInt(KEY_RESOLUTION, 1280)
-        resolution.setSelection(sizes.indexOf(saved).takeIf { it >= 0 } ?: 1)
-        content.addView(resolution, LinearLayout.LayoutParams(-1, dp(54)))
-        content.addView(label("A mudança de resolução vale para a próxima captura.", 12f).apply {
-            setPadding(0, 0, 0, dp(15))
-        })
-        content.addView(control("Iniciar captura") { askPermission() },
-            LinearLayout.LayoutParams(-1, dp(56)).apply { bottomMargin = dp(9) })
-        content.addView(control("Parar captura") {
-            stopService(Intent(this, ScreenCaptureService::class.java))
-            status.text = "Encerrando captura..."
-            preview.setImageDrawable(null)
-        }, LinearLayout.LayoutParams(-1, dp(56)).apply { bottomMargin = dp(9) })
-        content.addView(control("Voltar ao controlador") { finish() },
-            LinearLayout.LayoutParams(-1, dp(52)))
-        content.addView(label(
-            "A prévia pode repetir a própria tela do editor enquanto ele estiver visível. " +
-                "Abra outro aplicativo para observar a captura de seu conteúdo.", 12f
-        ).apply { setPadding(0, dp(12), 0, 0) })
-        scroll.addView(content)
-        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        setContentView(root)
     }
 
     private fun activeScene(): Scene? = scenes.find { it.id == selectedSceneId }
@@ -194,16 +314,13 @@ class ScreenCaptureEditorActivity : Activity() {
                         sources.add(CaptureLayer(
                             sourceId, type,
                             raw.optString("name").ifBlank { if (type == "screen") "Captura de tela" else "Texto" },
-                            raw.optDouble("x", 0.1).toFloat().coerceIn(0f, .92f),
-                            raw.optDouble("y", 0.1).toFloat().coerceIn(0f, .92f),
-                            raw.optDouble("width", .8).toFloat().coerceIn(.08f, 1f),
-                            raw.optDouble("height", .65).toFloat().coerceIn(.08f, 1f),
+                            raw.optDouble("x", 0.1).toFloat().coerceIn(-2f, 2f),
+                            raw.optDouble("y", 0.1).toFloat().coerceIn(-2f, 2f),
+                            raw.optDouble("width", .8).toFloat().coerceIn(.08f, 3f),
+                            raw.optDouble("height", .65).toFloat().coerceIn(.08f, 3f),
                             raw.optBoolean("visible", true),
                             raw.optBoolean("locked", false)
-                        ).also {
-                            it.width = it.width.coerceAtMost(1f - it.x)
-                            it.height = it.height.coerceAtMost(1f - it.y)
-                        })
+                        ))
                     }
                 }
                 scenes.add(Scene(id, name, sources))
@@ -246,13 +363,18 @@ class ScreenCaptureEditorActivity : Activity() {
     private fun showScenes() {
         scenesList.removeAllViews()
         scenes.forEach { scene ->
-            scenesList.addView(control((if (scene.id == selectedSceneId) "● " else "○ ") +
-                scene.name + "  (${scene.sources.size} fontes)") {
+            val selected = scene.id == selectedSceneId
+            scenesList.addView(neonButton(
+                (if (selected) "● " else "○ ") + scene.name,
+                if (selected) violet else Color.rgb(63, 74, 126)
+            ) {
                 selectedSceneId = scene.id
                 selectedLayerId = scene.sources.lastOrNull()?.id
                 persistScenes()
                 showScenes()
-            }, LinearLayout.LayoutParams(-1, dp(43)))
+            }, LinearLayout.LayoutParams(dp(145), dp(43)).apply {
+                rightMargin = dp(7)
+            })
         }
         sceneStatus.text = "Cena ativa: " + (activeScene()?.name ?: "Nenhuma")
         showLayers()
@@ -263,14 +385,44 @@ class ScreenCaptureEditorActivity : Activity() {
         layersList.removeAllViews()
         val sources = activeScene()?.sources ?: emptyList()
         sources.asReversed().forEach { layer ->
-            val label = (if (selectedLayerId == layer.id) "● " else "○ ") +
-                (if (layer.visible) "◉ " else "⊘ ") +
-                (if (layer.locked) "▣ " else "") + layer.name
-            layersList.addView(control(label) {
-                selectedLayerId = layer.id
-                showLayers()
-            }, LinearLayout.LayoutParams(-1, dp(42)))
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = panel(if (layer.id == selectedLayerId) violet else Color.rgb(40, 50, 87))
+                setPadding(dp(6), dp(3), dp(6), dp(3))
+            }
+            val prefix = when (layer.type) {
+                "screen" -> "▣"
+                "text" -> "T"
+                else -> "▧"
+            }
+            row.addView(label(prefix + "  " + layer.name, 13f).apply {
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                gravity = Gravity.CENTER_VERTICAL
+                setOnClickListener {
+                    selectedLayerId = layer.id
+                    showLayers()
+                }
+            }, LinearLayout.LayoutParams(0, -1, 1f))
+            fun actionButton(text: String, color: Int = violet, action: () -> Unit) {
+                row.addView(neonButton(text, color, action),
+                    LinearLayout.LayoutParams(dp(35), dp(38)).apply { leftMargin = dp(3) })
+            }
+            actionButton(if (layer.visible) "◉" else "⊘") {
+                selectedLayerId = layer.id; changeLayer("visible")
+            }
+            actionButton(if (layer.locked) "▣" else "♧") {
+                selectedLayerId = layer.id; changeLayer("locked")
+            }
+            actionButton("↑") { selectedLayerId = layer.id; reorderLayer(1) }
+            actionButton("↓") { selectedLayerId = layer.id; reorderLayer(-1) }
+            actionButton("×", Color.rgb(199, 53, 97)) {
+                selectedLayerId = layer.id; changeLayer("remove")
+            }
+            layersList.addView(row, layoutParams(dp(48), -1, 0, 5))
         }
+        if (sources.isEmpty()) layersList.addView(label("Nenhuma fonte nesta cena.", 12f))
         canvasEditor.layers = sources
         canvasEditor.selectedLayerId = selectedLayerId
     }
