@@ -93,11 +93,14 @@ class CaptureSceneCanvas(context: Context) : View(context) {
         canvas.drawColor(Color.rgb(4, 8, 28))
         val availableWidth = width - paddingLeft - paddingRight
         val availableHeight = height - paddingTop - paddingBottom
-        val fittedWidth = minOf(availableWidth.toFloat(), availableHeight * 16f / 9f)
-        val fittedHeight = fittedWidth * 9f / 16f
-        val left = (width - fittedWidth) / 2f
-        val top = (height - fittedHeight) / 2f
-        area.set(left, top, left + fittedWidth, top + fittedHeight)
+        // O editor usa toda a area disponivel, sem letterbox 16:9.
+        // As coordenadas das camadas continuam normalizadas entre 0 e 1.
+        area.set(
+            paddingLeft.toFloat(),
+            paddingTop.toFloat(),
+            (paddingLeft + availableWidth).toFloat(),
+            (paddingTop + availableHeight).toFloat()
+        )
         paint.color = Color.rgb(11, 17, 40)
         paint.style = Paint.Style.FILL
         canvas.drawRect(area, paint)
