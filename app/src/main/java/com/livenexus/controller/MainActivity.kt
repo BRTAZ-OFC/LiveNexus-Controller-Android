@@ -571,6 +571,56 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun enableVolumeHold(view: View, action: String) {
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        val pending = java.util.concurrent.atomic.AtomicInteger(0)
+        var holding = false
+        fun dispatch() {
+            if (pending.incrementAndGet() > 2) {
+                pending.decrementAndGet()
+                return
+            }
+            commandQueue.execute {
+                try {
+                    LiveNexusApi.sendCommand(action)
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        Toast.makeText(this, e.message ?: "Falha ao enviar comando.", Toast.LENGTH_SHORT).show()
+                    }
+                } finally {
+                    pending.decrementAndGet()
+                }
+            }
+        }
+        val repeat = object : Runnable {
+            override fun run() {
+                if (!holding) return
+                dispatch()
+                handler.postDelayed(this, 220L)
+            }
+        }
+        view.setOnTouchListener { target, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    holding = true
+                    target.parent?.requestDisallowInterceptTouchEvent(true)
+                    animateButtonPress(target)
+                    dispatch()
+                    handler.postDelayed(repeat, 350L)
+                    true
+                }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    holding = false
+                    handler.removeCallbacks(repeat)
+                    animateButtonRelease(target)
+                    target.parent?.requestDisallowInterceptTouchEvent(false)
+                    true
+                }
+                else -> true
+            }
+        }
+    }
+
     private fun showPlayer() {
         val view = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -584,6 +634,9 @@ class MainActivity : Activity() {
                 background = tileStyle(cyan)
                 enableButtonFeedback(this)
                 setOnClickListener { sendMusicCommand(action) }
+                if (action == "music-volume-up" || action == "music-volume-down") {
+                    enableVolumeHold(this, action)
+                }
             }, LinearLayout.LayoutParams(-1, dp(54)).apply { bottomMargin = dp(8) })
         }
         playerButton("▶ / ❚❚  Play / Pause", "music-toggle")
