@@ -1,0 +1,177 @@
+package com.livenexus.controller
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
+import android.view.MotionEvent
+import android.view.View
+import kotlin.math.abs
+import kotlin.math.max
+
+/** Coordenadas proporcionais (0..1), independentes do tamanho do aparelho. */
+data class CaptureLayer(
+    val id: String,
+    val type: String,
+    var name: String,
+    var x: Float = 0.1f,
+    var y: Float = 0.1f,
+    var width: Float = 0.8f,
+    var height: Float = 0.65f,
+    var visible: Boolean = true,
+    var locked: Boolean = false
+)
+
+/** Canvas visual de cenas: arrastar para mover e usar o canto inferior direito para redimensionar. */
+class CaptureSceneCanvas(context: Context) : View(context) {
+    var layers: List<CaptureLayer> = emptyList()
+        set(value) { field = value; invalidate() }
+    var selectedLayerId: String? = null
+        set(value) { field = value; invalidate() }
+    var frame: Bitmap? = null
+        set(value) { field = value; invalidate() }
+    var onSelection: ((String?) -> Unit)? = null
+    var onChange: (() -> Unit)? = null
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val surface = RectF()
+    private val area = RectF()
+    private var moving: CaptureLayer? = null
+    private var resizing = false
+    private var downX = 0f
+    private var downY = 0f
+    private var originX = 0f
+    private var originY = 0f
+    private var originW = 0f
+    private var originH = 0f
+    private val handleSize get() = resources.displayMetrics.density * 20f
+
+    private fun bounds(layer: CaptureLayer): RectF = RectF(
+        area.left + layer.x * area.width(),
+        area.top + layer.y * area.height(),
+        area.left + (layer.x + layer.width) * area.width(),
+        area.top + (layer.y + layer.height) * area.height()
+    )
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        canvas.drawColor(Color.rgb(4, 8, 28))
+        val availableWidth = width - paddingLeft - paddingRight
+        val availableHeight = height - paddingTop - paddingBottom
+        val fittedWidth = minOf(availableWidth.toFloat(), availableHeight * 16f / 9f)
+        val fittedHeight = fittedWidth * 9f / 16f
+        val left = (width - fittedWidth) / 2f
+        val top = (height - fittedHeight) / 2f
+        area.set(left, top, left + fittedWidth, top + fittedHeight)
+        paint.color = Color.rgb(11, 17, 40)
+        paint.style = Paint.Style.FILL
+        canvas.drawRect(area, paint)
+
+        paint.color = Color.rgb(35, 50, 81)
+        paint.strokeWidth = resources.displayMetrics.density
+        for (step in 1..3) {
+            val x = area.left + area.width() * step / 4f
+            val y = area.top + area.height() * step / 4f
+            canvas.drawLine(x, area.top, x, area.bottom, paint)
+            canvas.drawLine(area.left, y, area.right, y, paint)
+        }
+
+        canvas.save()
+        canvas.clipRect(area)
+        layers.forEach { layer ->
+            if (!layer.visible) return@forEach
+            val box = bounds(layer)
+            if (layer.type == "screen" && frame != null) {
+                paint.style = Paint.Style.FILL
+                paint.alpha = 255
+                paint.color = Color.WHITE
+                val bitmap = frame!!
+                canvas.drawBitmap(bitmap, null, box, paint)
+            } else {
+                paint.style = Paint.Style.FILL
+                paint.color = if (layer.type == "text") Color.rgb(32, 16, 63) else Color.rgb(17, 52, 75)
+                canvas.drawRoundRect(box, 7f, 7f, paint)
+                paint.color = Color.WHITE
+                paint.textSize = (area.height() * .065f).coerceIn(12f, 28f)
+                val label = if (layer.type == "screen") "TELA - INICIE A CAPTURA" else layer.name
+                canvas.drawText(label.take(40), box.left + 8f, box.centerY(), paint)
+            }
+            if (layer.id == selectedLayerId) {
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = resources.displayMetrics.density * 2f
+                paint.color = NeonTheme.cyan
+                canvas.drawRect(box, paint)
+                paint.style = Paint.Style.FILL
+                paint.color = NeonTheme.purple
+                canvas.drawCircle(box.right, box.bottom, handleSize * .55f, paint)
+            }
+        }
+        canvas.restore()
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = resources.displayMetrics.density * 2f
+        paint.color = NeonTheme.purple
+        canvas.drawRect(area, paint)
+        paint.style = Paint.Style.FILL
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (area.isEmpty) return false
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                val x = event.x
+                val y = event.y
+                moving = layers.asReversed().firstOrNull {
+                    it.visible && bounds(it).let { box ->
+                        box.contains(x, y) ||
+                            (abs(x - box.right) <= handleSize && abs(y - box.bottom) <= handleSize)
+                    }
+                }
+                val target = moving
+                selectedLayerId = target?.id
+                onSelection?.invoke(target?.id)
+                if (target == null || target.locked) { moving = null; return true }
+                val box = bounds(target)
+                resizing = abs(x - box.right) <= handleSize && abs(y - box.bottom) <= handleSize
+                downX = x; downY = y
+                originX = target.x; originY = target.y
+                originW = target.width; originH = target.height
+                parent?.requestDisallowInterceptTouchEvent(true)
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val target = moving ?: return true
+                val dx = (event.x - downX) / max(1f, area.width())
+                val dy = (event.y - downY) / max(1f, area.height())
+                if (resizing) {
+                    target.width = (originW + dx).coerceIn(.08f, 1f - target.x)
+                    target.height = (originH + dy).coerceIn(.08f, 1f - target.y)
+                } else {
+                    target.x = (originX + dx).coerceIn(0f, 1f - target.width)
+                    target.y = (originY + dy).coerceIn(0f, 1f - target.height)
+                }
+                invalidate()
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                if (moving != null) onChange?.invoke()
+                moving = null
+                parent?.requestDisallowInterceptTouchEvent(false)
+                performClick()
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                moving = null
+                parent?.requestDisallowInterceptTouchEvent(false)
+                return true
+            }
+        }
+        return true
+    }
+
+    override fun performClick(): Boolean {
+        super.performClick()
+        return true
+    }
+}
