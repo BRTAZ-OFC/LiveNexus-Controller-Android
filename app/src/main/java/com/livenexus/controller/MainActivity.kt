@@ -199,14 +199,28 @@ class MainActivity : Activity() {
         view.animate().cancel()
         view.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(135L).start()
     }
+    private val lastButtonTap = mutableMapOf<Int, Long>()
+    private fun acceptButtonTap(index: Int): Boolean {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val last = lastButtonTap[index] ?: 0L
+        if (now - last < 650L) return false
+        lastButtonTap[index] = now
+        return true
+    }
     private fun enableButtonFeedback(view: View) {
         view.isClickable = true
         view.isFocusable = true
         view.setOnTouchListener { target, event ->
             when (event.actionMasked) {
-                android.view.MotionEvent.ACTION_DOWN -> animateButtonPress(target)
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    target.parent?.requestDisallowInterceptTouchEvent(true)
+                    animateButtonPress(target)
+                }
                 android.view.MotionEvent.ACTION_UP,
-                android.view.MotionEvent.ACTION_CANCEL -> animateButtonRelease(target)
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    animateButtonRelease(target)
+                    target.parent?.requestDisallowInterceptTouchEvent(false)
+                }
             }
             false
         }
@@ -238,6 +252,7 @@ class MainActivity : Activity() {
                         orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; background = tileStyle(color)
                         elevation = dp(5).toFloat(); enableButtonFeedback(this)
                         setOnClickListener {
+                            if (!acceptButtonTap(i)) return@setOnClickListener
                             if (i == 0) showPlayer()
                             else if (i == 2) sendRtcReload()
                             else if (i < 3) showConnectionMessage("Ação ainda não conectada: ${name(i)}")
@@ -263,6 +278,7 @@ class MainActivity : Activity() {
                     orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; background = tileStyle(cyan)
                     enableButtonFeedback(this)
                     setOnClickListener {
+                        if (!acceptButtonTap(total)) return@setOnClickListener
                         showAddMenu()
                     }
                 }
