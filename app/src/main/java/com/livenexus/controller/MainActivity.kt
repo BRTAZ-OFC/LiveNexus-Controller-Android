@@ -14,6 +14,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -193,7 +194,9 @@ class MainActivity : Activity() {
     }
     private fun animateButtonPress(view: View) {
         view.animate().cancel()
-        view.animate().scaleX(0.94f).scaleY(0.94f).alpha(0.78f).setDuration(75L).start()
+        view.scaleX = 0.94f
+        view.scaleY = 0.94f
+        view.alpha = 0.78f
     }
     private fun animateButtonRelease(view: View) {
         view.animate().cancel()
@@ -223,6 +226,7 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(this@MainActivity.background) }
         val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(17), dp(17), dp(17), dp(17)) }
         header.addView(text("☰", 29f, Color.LTGRAY).apply {
+            enableButtonFeedback(this)
             setOnClickListener { showOptions() }
         }, LinearLayout.LayoutParams(dp(46), dp(55)))
         val heading = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -232,7 +236,9 @@ class MainActivity : Activity() {
         status = text("●", 13f, cyan).apply { gravity = Gravity.CENTER; background = shape(Color.rgb(20, 31, 48)) }
         header.addView(status, LinearLayout.LayoutParams(dp(52), dp(42)))
         root.addView(header)
-        val content = ScrollView(this).apply { isFillViewport = true }
+        val content = object : ScrollView(this) {
+            override fun shouldDelayChildPressedState() = false
+        }.apply { isFillViewport = true }
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(13), dp(10), dp(13), dp(16)) }
         when (page) {
             0 -> {
@@ -289,7 +295,7 @@ class MainActivity : Activity() {
                 body.addView(text("CONFIGURAÇÕES", 19f, cyan).apply { setPadding(dp(8), dp(15), 0, dp(20)) })
                 fun setting(label: String, onTap: () -> Unit) {
                     body.addView(text(label, 16f).apply {
-                        gravity = Gravity.CENTER; background = tileStyle(cyan); setOnClickListener { onTap() }
+                        gravity = Gravity.CENTER; background = tileStyle(cyan); enableButtonFeedback(this); setOnClickListener { onTap() }
                     }, LinearLayout.LayoutParams(-1, dp(62)).apply { bottomMargin = dp(12) })
                 }
                 setting("Conta LiveNexus") { showConnectionMessage("Conta conectada ao LiveNexus.") }
@@ -318,6 +324,7 @@ class MainActivity : Activity() {
         listOf("◇\nSobreposição", "◎\nPerfis", "⚙\nConfigurações").forEachIndexed { index, label ->
             nav.addView(text(label, 13f, if (page == index) cyan else Color.GRAY).apply {
                 gravity = Gravity.CENTER; setTypeface(null, if (page == index) Typeface.BOLD else Typeface.NORMAL)
+                enableButtonFeedback(this)
                 setOnClickListener { page = index; render() }
             }, LinearLayout.LayoutParams(0, dp(58), 1f))
         }
@@ -575,6 +582,7 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER
                 setPadding(dp(12), dp(14), dp(12), dp(14))
                 background = tileStyle(cyan)
+                enableButtonFeedback(this)
                 setOnClickListener { sendMusicCommand(action) }
             }, LinearLayout.LayoutParams(-1, dp(54)).apply { bottomMargin = dp(8) })
         }
