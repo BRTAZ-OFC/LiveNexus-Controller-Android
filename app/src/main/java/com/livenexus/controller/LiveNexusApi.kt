@@ -57,6 +57,11 @@ object LiveNexusApi {
         }
     }
 
+    fun streamingConnected(platform: String): Boolean {
+        require(platform == "twitch" || platform == "youtube") { "Plataforma não permitida." }
+        return request("/api/auth/$platform/status").getBoolean("connected")
+    }
+
     fun streamingAuthorizationUrl(platform: String): String {
         require(platform == "twitch" || platform == "youtube") { "Plataforma não permitida." }
         val response = request("/api/auth/$platform/url")
