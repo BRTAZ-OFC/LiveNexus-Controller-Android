@@ -5,30 +5,49 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.view.*
 import android.widget.*
-import org.json.JSONObject
 
 class OverlayService : Service() {
     private lateinit var manager: WindowManager
     private var bubble: View? = null
     private var bubbleLayout: WindowManager.LayoutParams? = null
+    private var timerBadge: TextView? = null
+    private val overlayHandler = Handler(Looper.getMainLooper())
+    private val overlayTimerRunnable = object : Runnable {
+        override fun run() {
+            updateTimerBadge()
+            overlayHandler.postDelayed(this, 1000L)
+        }
+    }
     private var previousWidth = 0
     private var previousHeight = 0
     private var trash: View? = null
     private var panel: View? = null
     private val channel = "controller_overlay"
     private var controls: ControllerPanel? = null
+
     companion object {
         private var active: OverlayService? = null
-        fun refreshVisibility() { active?.syncVisibility() }
+        fun refreshVisibility() {
+            active?.let {
+                it.syncVisibility()
+                it.updateTimerBadge()
+            }
+        }
     }
+
     private val prefs by lazy { getSharedPreferences("buttons", MODE_PRIVATE) }
     private fun tileBackground(accent: Int = Color.rgb(55, 88, 120)) = GradientDrawable().apply {
-        setColor(Color.rgb(19, 29, 45)); cornerRadius = dp(15).toFloat(); setStroke(dp(1), accent)
+        setColor(Color.rgb(19, 29, 45))
+        cornerRadius = dp(15).toFloat()
+        setStroke(dp(1), accent)
     }
 
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
@@ -77,7 +96,10 @@ class OverlayService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         repositionBubble()
-        if (panel != null) { hidePanel(); showPanel() }
+        if (panel != null) {
+            hidePanel()
+            showPanel()
+        }
     }
 
     private fun repositionBubble() {
@@ -105,7 +127,6 @@ class OverlayService : Service() {
             setTextColor(Color.WHITE)
             background = tileBackground(Color.rgb(239, 70, 85))
         }
-        val screen = screenSize()
         try {
             manager.addView(target, params(dp(76), dp(76),
                 Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
@@ -133,14 +154,89 @@ class OverlayService : Service() {
             rawY <= location[1] + target.height + tolerance
     }
 
+    private fun formatElapsedTime(millis: Long): String {
+        val totalSec = (millis / 1000).coerceAtLeast(0)
+        val h = totalSec / 3600
+        val m = (totalSec % 3600) / 60
+        val s = totalSec % 60
+        return if (h > 0) String.format("%02d:%02d:%02d", h, m, s) else String.format("%02d:%02d", m, s)
+    }
+
+    private fun updateTimerBadge() {
+        val badge = timerBadge ?: return
+        val transmitting = ControllerRuntime.isTransmitting || ScreenCaptureService.isCapturing
+        if (transmitting) {
+            val start = ControllerRuntime.transmissionStartTime
+            val elapsed = if (start > 0) System.currentTimeMillis() - start else 0L
+            badge.text = "● ${formatElapsedTime(elapsed)}"
+            if (badge.visibility != View.VISIBLE) {
+                badge.visibility = View.VISIBLE
+                bubble?.let { b ->
+                    bubbleLayout?.let { bl ->
+                        try { manager.updateViewLayout(b, bl) } catch (_: Exception) {}
+                    }
+                }
+            }
+        } else {
+            if (badge.visibility != View.GONE) {
+                badge.visibility = View.GONE
+                bubble?.let { b ->
+                    bubbleLayout?.let { bl ->
+                        try { manager.updateViewLayout(b, bl) } catch (_: Exception) {}
+                    }
+                }
+            }
+        }
+    }
+
     private fun showBubble() {
-        val size = dp(56)
+        val logoSize = dp(56)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, 0, 0, 0)
+        }
+
+        val logoView = TextView(this).apply {
+            text = ""
+            contentDescription = "LiveNexus Controller"
+            background = NeonTheme.floatingLogo(this@OverlayService)
+        }
+        container.addView(logoView, LinearLayout.LayoutParams(logoSize, logoSize))
+
+        val badge = TextView(this).apply {
+            textSize = 10f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(dp(6), dp(2), dp(6), dp(2))
+            background = GradientDrawable().apply {
+                setColor(Color.argb(230, 20, 6, 36))
+                cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), Color.rgb(255, 64, 92))
+            }
+            visibility = if (ControllerRuntime.isTransmitting || ScreenCaptureService.isCapturing) View.VISIBLE else View.GONE
+        }
+        timerBadge = badge
+        container.addView(badge, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            topMargin = dp(2)
+        })
+
+        updateTimerBadge()
+
         val screen = screenSize()
-        val maxX = (screen.x - size).coerceAtLeast(0)
-        val maxY = (screen.y - size).coerceAtLeast(0)
+        val maxX = (screen.x - dp(64)).coerceAtLeast(0)
+        val maxY = (screen.y - dp(80)).coerceAtLeast(0)
         previousWidth = maxX
         previousHeight = maxY
-        val layout = params(size, size, Gravity.TOP or Gravity.LEFT).apply {
+        val layout = params(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.LEFT
+        ).apply {
             x = (prefs.getFloat("bubble_ratio_x", 1f).coerceIn(0f, 1f) * maxX).toInt()
             y = (prefs.getFloat("bubble_ratio_y", 0.5f).coerceIn(0f, 1f) * maxY).toInt()
         }
@@ -150,94 +246,99 @@ class OverlayService : Service() {
         var startX = 0
         var startY = 0
         var dragging = false
-        val button = TextView(this).apply {
-            text = "LN"
-            textSize = 17f
-            gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
-            background = NeonTheme.card()
-            setOnTouchListener { view, event ->
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        downRawX = event.rawX; downRawY = event.rawY
-                        repositionBubble()
-                        startX = layout.x; startY = layout.y
-                        dragging = false
-                        true
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        val dx = event.rawX - downRawX
-                        val dy = event.rawY - downRawY
-                        if (!dragging && (kotlin.math.abs(dx) > touchSlop || kotlin.math.abs(dy) > touchSlop)) {
-                            dragging = true
-                            showTrash(false)
-                        }
-                        if (dragging) {
-                            val currentScreen = screenSize()
-                            val currentMaxX = (currentScreen.x - size).coerceAtLeast(0)
-                            val currentMaxY = (currentScreen.y - size).coerceAtLeast(0)
-                            layout.x = (startX + dx.toInt()).coerceIn(0, currentMaxX)
-                            layout.y = (startY + dy.toInt()).coerceIn(0, currentMaxY)
-                            manager.updateViewLayout(view, layout)
-                            trash?.alpha = if (isOverTrash(event.rawX, event.rawY)) 1f else 0.75f
-                        }
-                        true
-                    }
-                    MotionEvent.ACTION_UP -> {
-                        val remove = dragging && isOverTrash(event.rawX, event.rawY)
-                        hideTrash()
-                        if (remove) {
-                            stopSelf()
-                        } else if (dragging) {
-                            val bounds = screenSize()
-                            val rangeX = (bounds.x - size).coerceAtLeast(0)
-                            val rangeY = (bounds.y - size).coerceAtLeast(0)
-                            prefs.edit()
-                                .putFloat("bubble_ratio_x", if (rangeX > 0) layout.x.toFloat() / rangeX else 0f)
-                                .putFloat("bubble_ratio_y", if (rangeY > 0) layout.y.toFloat() / rangeY else 0f)
-                                .apply()
-                        } else {
-                            view.performClick()
-                            showPanel()
-                        }
-                        true
-                    }
-                    MotionEvent.ACTION_CANCEL -> { hideTrash(); true }
-                    else -> false
+
+        container.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downRawX = event.rawX; downRawY = event.rawY
+                    repositionBubble()
+                    startX = layout.x; startY = layout.y
+                    dragging = false
+                    true
                 }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - downRawX
+                    val dy = event.rawY - downRawY
+                    if (!dragging && (kotlin.math.abs(dx) > touchSlop || kotlin.math.abs(dy) > touchSlop)) {
+                        dragging = true
+                        showTrash(false)
+                    }
+                    if (dragging) {
+                        val currentScreen = screenSize()
+                        val currentMaxX = (currentScreen.x - dp(64)).coerceAtLeast(0)
+                        val currentMaxY = (currentScreen.y - dp(80)).coerceAtLeast(0)
+                        layout.x = (startX + dx.toInt()).coerceIn(0, currentMaxX)
+                        layout.y = (startY + dy.toInt()).coerceIn(0, currentMaxY)
+                        manager.updateViewLayout(view, layout)
+                        trash?.alpha = if (isOverTrash(event.rawX, event.rawY)) 1f else 0.75f
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    val remove = dragging && isOverTrash(event.rawX, event.rawY)
+                    hideTrash()
+                    if (remove) {
+                        stopSelf()
+                    } else if (dragging) {
+                        val bounds = screenSize()
+                        val rangeX = (bounds.x - dp(64)).coerceAtLeast(0)
+                        val rangeY = (bounds.y - dp(80)).coerceAtLeast(0)
+                        prefs.edit()
+                            .putFloat("bubble_ratio_x", if (rangeX > 0) layout.x.toFloat() / rangeX else 0f)
+                            .putFloat("bubble_ratio_y", if (rangeY > 0) layout.y.toFloat() / rangeY else 0f)
+                            .apply()
+                    } else {
+                        view.performClick()
+                        showPanel()
+                    }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> { hideTrash(); true }
+                else -> false
             }
         }
         try {
-            manager.addView(button, layout)
-            bubble = button
+            manager.addView(container, layout)
+            bubble = container
             bubbleLayout = layout
+            overlayHandler.removeCallbacks(overlayTimerRunnable)
+            overlayHandler.post(overlayTimerRunnable)
         } catch (_: RuntimeException) { stopSelf() }
     }
-
 
     private fun syncVisibility() {
         if (ControllerRuntime.foreground || !ControllerRuntime.signedIn) {
             hidePanel()
             hideTrash()
+            overlayHandler.removeCallbacks(overlayTimerRunnable)
+            timerBadge = null
             bubble?.let { try { manager.removeView(it) } catch (_: RuntimeException) {} }
             bubble = null
             bubbleLayout = null
-        } else if (Settings.canDrawOverlays(this) && bubble == null) {
-            showBubble()
+        } else if (Settings.canDrawOverlays(this)) {
+            if (bubble == null) {
+                showBubble()
+            } else {
+                updateTimerBadge()
+            }
         }
     }
 
     private fun showPanel() {
         if (panel != null || ControllerRuntime.foreground || !ControllerRuntime.signedIn) return
+        val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(8), dp(8), dp(8), dp(8))
             background = NeonTheme.backdrop()
         }
         val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        header.addView(NeonHeader(this), LinearLayout.LayoutParams(0, dp(68), 1f))
+        header.addView(NeonHeader(this), LinearLayout.LayoutParams(0, dp(if (isLandscape) 52 else 64), 1f))
         header.addView(TextView(this).apply {
-            text = "−"; textSize = 28f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
+            text = "−"
+            textSize = 28f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
             contentDescription = "Minimizar painel"
             setOnClickListener { hidePanel() }
         }, LinearLayout.LayoutParams(dp(48), dp(48)))
@@ -245,15 +346,24 @@ class OverlayService : Service() {
         val view = ControllerPanel(this, true)
         controls = view
         val screen = screenSize()
-        val height = minOf(dp(440), (screen.y - dp(100)).coerceAtLeast(dp(100)))
+        val height = if (isLandscape) {
+            minOf(dp(300), (screen.y - dp(48)).coerceAtLeast(dp(120)))
+        } else {
+            minOf(dp(440), (screen.y - dp(100)).coerceAtLeast(dp(120)))
+        }
         root.addView(ScrollView(this).apply { addView(view) }, LinearLayout.LayoutParams(-1, height))
-        val width = minOf(dp(380), screen.x - dp(24))
+        val width = if (isLandscape) {
+            minOf(dp(520), screen.x - dp(32))
+        } else {
+            minOf(dp(380), screen.x - dp(24))
+        }
         try {
             manager.addView(root, params(width, WindowManager.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
             panel = root
             bubble?.visibility = View.GONE
         } catch (e: RuntimeException) {
-            view.dispose(); controls = null
+            view.dispose()
+            controls = null
             Toast.makeText(this, "Falha ao abrir painel: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
@@ -267,6 +377,8 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        overlayHandler.removeCallbacks(overlayTimerRunnable)
+        timerBadge = null
         if (active === this) active = null
         hidePanel()
         hideTrash()
@@ -278,4 +390,3 @@ class OverlayService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 }
-

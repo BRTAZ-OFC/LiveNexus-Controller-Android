@@ -39,6 +39,9 @@ class ScreenCaptureService : Service() {
             private set
         @Volatile var lastError: String? = null
             private set
+        fun reportError(message: String?) {
+            lastError = message
+        }
         private const val CHANNEL_ID = "livenexus_screen_capture"
         private const val NOTIFICATION_ID = 2
 
@@ -80,6 +83,7 @@ class ScreenCaptureService : Service() {
         val consent = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
         if (resultCode != android.app.Activity.RESULT_OK || consent == null) {
+            lastError = "Captura de tela indisponível neste ambiente"
             stopSelf()
             return START_NOT_STICKY
         }
@@ -109,7 +113,7 @@ class ScreenCaptureService : Service() {
             val projectionManager =
                 getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             val activeProjection = projectionManager.getMediaProjection(resultCode, consent)
-                ?: throw IllegalStateException("O Android não autorizou a captura.")
+                ?: throw IllegalStateException("Captura de tela indisponível neste ambiente")
             projection = activeProjection
             val callback = object : MediaProjection.Callback() {
                 override fun onStop() {
@@ -188,27 +192,35 @@ class ScreenCaptureService : Service() {
                 null,
                 null
             )
-            if (virtualDisplay == null) throw IllegalStateException("Falha ao criar a tela virtual.")
+            if (virtualDisplay == null) throw IllegalStateException("Captura de tela indisponível neste ambiente")
             val fps = intent.getIntExtra(EXTRA_FPS, 30)
             val bitrate = intent.getIntExtra(EXTRA_BITRATE_KBPS, 4500)
             val evenWidth = width - width % 2
             val evenHeight = height - height % 2
-            val encoder = LocalVideoEncoder(
-                evenWidth, evenHeight, fps, bitrate,
-                onSample = { _, _ -> },
-                onFormat = { _ -> }
-            )
-            encoder.start()
-            videoEncoder = encoder
-            encoderDisplay = activeProjection.createVirtualDisplay(
-                "LiveNEXUS H264 Encoder",
-                evenWidth, evenHeight, metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                encoder.surface, null, null
-            ) ?: throw IllegalStateException("Falha ao conectar captura ao encoder.")
+            try {
+                val encoder = LocalVideoEncoder(
+                    evenWidth, evenHeight, fps, bitrate,
+                    onSample = { _, _ -> },
+                    onFormat = { _ -> }
+                )
+                encoder.start()
+                videoEncoder = encoder
+                encoderDisplay = activeProjection.createVirtualDisplay(
+                    "LiveNEXUS H264 Encoder",
+                    evenWidth, evenHeight, metrics.densityDpi,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    encoder.surface, null, null
+                )
+            } catch (encoderError: Throwable) {
+                videoEncoder?.close()
+                videoEncoder = null
+                encoderDisplay?.release()
+                encoderDisplay = null
+                android.util.Log.w("LiveNexusCapture", "Encoder secundário indisponível neste ambiente", encoderError)
+            }
             isCapturing = true
-        } catch (error: Exception) {
-            lastError = error.message ?: "Falha ao iniciar a captura."
+        } catch (error: Throwable) {
+            lastError = "Captura de tela indisponível neste ambiente"
             android.util.Log.e("LiveNexusCapture", "Falha ao iniciar captura", error)
             stopSelf()
         }

@@ -2,41 +2,75 @@ package com.livenexus.controller
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.LayerDrawable
-import android.graphics.drawable.InsetDrawable
-import android.graphics.drawable.StateListDrawable
 import android.graphics.drawable.GradientDrawable
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.Message
 import android.provider.Settings
 import android.view.Gravity
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.UUID
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
+import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.*
 import org.json.JSONArray
 import org.json.JSONObject
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceResponse
-import android.webkit.WebResourceRequest
-import android.webkit.CookieManager
-import android.webkit.JavascriptInterface
-import android.os.Message
-import android.view.WindowManager
-import android.view.inputmethod.InputMethodManager
-import android.content.Context
 
 class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("buttons", MODE_PRIVATE) }
+    private val capturePrefs by lazy { getSharedPreferences("livenexus_capture_settings", MODE_PRIVATE) }
     @Volatile private var authenticated = false
     private val loginBrowsers = mutableListOf<WebView>()
     private val loginDialogs = mutableListOf<AlertDialog>()
+    private val uiHandler = Handler(Looper.getMainLooper())
 
-    // A tela de login nunca pode retirar comandos destinados ao navegador da live.
+    private var panel: ControllerPanel? = null
+    // page: 0 = Controlador, 1 = Captura, 2 = Transmissão, 3 = Conexão, 4 = Configuração
+    private var page = 0
+    private var resumed = false
+    private var isTransmitting = false
+
+    companion object {
+        private const val CAPTURE_REQUEST = 7820
+    }
+
+    private var pendingStreamingPlatform: String? = null
+    private var pendingStartTransmissionAfterCapture = false
+    private var transmissionStartTime = 0L
+
+    private val platformConnected = mutableMapOf(
+        "youtube" to false,
+        "twitch" to false,
+        "kick" to false
+    )
+
+    data class Scene(val id: String, var name: String, val sources: MutableList<CaptureLayer>)
+    private val captureScenes = mutableListOf<Scene>()
+    private var activeCaptureSceneId = ""
+    private var activeCaptureLayerId: String? = null
+    private var captureCanvas: CaptureSceneCanvas? = null
+    private var captureCanvasHost: FrameLayout? = null
+    private var captureBrowserView: WebView? = null
+    private var captureBrowserUrl: String? = null
+
     private open inner class LoginWebViewClient : WebViewClient() {
         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
             val destination = request?.url ?: return null
@@ -66,24 +100,41 @@ class MainActivity : Activity() {
         loginDialogs.clear()
         loginBrowsers.toList().forEach { releaseLoginBrowser(it) }
     }
-    private val cyan = NeonTheme.cyan
-    private val background = Color.rgb(10, 15, 25)
+
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
-    private fun shape(color: Int, stroke: Int = Color.rgb(47, 67, 89)) = GradientDrawable().apply {
-        setColor(color); cornerRadius = dp(17).toFloat(); setStroke(dp(1), stroke)
-    }
-    private fun count() = prefs.getInt("scenario_count", 0).coerceIn(0, 57)
-    private fun controlType(i: Int) = prefs.getString("control_type_$i", "Cenário") ?: "Cenário"
-    private fun name(i: Int) = if (i < 3) listOf("Música", "Câmera", "Reload RTC")[i]
-        else prefs.getString("scenario_${i - 3}", controlType(i - 3)) ?: controlType(i - 3)
+    private fun shape(color: Int, stroke: Int = Color.rgb(47, 67, 89), radiusDp: Int = 16) =
+        GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = dp(radiusDp).toFloat()
+            setStroke(dp(1), stroke)
+        }
+
     private fun text(value: String, size: Float, color: Int = Color.WHITE) = TextView(this).apply {
-        text = value; textSize = size; setTextColor(color); gravity = Gravity.CENTER_VERTICAL
+        text = value
+        textSize = size
+        setTextColor(color)
+        gravity = Gravity.CENTER_VERTICAL
     }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = NeonTheme.ink
         window.navigationBarColor = NeonTheme.ink
-        if (ControllerRuntime.signedIn) { authenticated = true; render() } else showLogin()
+        val targetPage = intent?.getIntExtra("target_page", -1) ?: -1
+        if (targetPage >= 0) page = targetPage
+        authenticated = true
+        ControllerRuntime.signedIn = true
+        loadCaptureScenes()
+        render()
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        val targetPage = intent?.getIntExtra("target_page", -1) ?: -1
+        if (targetPage >= 0 && targetPage != page) {
+            page = targetPage
+            render()
+        }
     }
 
     private inner class LoginBridge {
@@ -98,9 +149,7 @@ class MainActivity : Activity() {
                             render()
                         }
                     }
-                } catch (_: Exception) {
-                    // Sessao invalida: manter login.
-                }
+                } catch (_: Exception) {}
             }.start()
         }
     }
@@ -216,15 +265,9 @@ class MainActivity : Activity() {
                         render()
                     }
                 }
-            } catch (_: Exception) {
-                // Mantém a tela de login enquanto a sessão não for validada.
-            }
+            } catch (_: Exception) {}
         }.start()
     }
-
-    private var panel: ControllerPanel? = null
-    private var page = 0
-    private var resumed = false
 
     override fun onStart() {
         super.onStart()
@@ -236,10 +279,72 @@ class MainActivity : Activity() {
         super.onResume()
         resumed = true
         if (authenticated) prepareOverlay()
+        resumeCaptureRefresh()
+        val pending = pendingStreamingPlatform
+        if (pending != null) {
+            val platform = pending
+            pendingStreamingPlatform = null
+            Thread {
+                var connected = false
+                try {
+                    connected = LiveNexusApi.streamingConnected(platform)
+                } catch (_: Exception) {}
+                platformConnected[platform] = connected
+                if (connected) capturePrefs.edit().putBoolean("stream_$platform", true).apply()
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) {
+                        if (connected) {
+                            AlertDialog.Builder(this@MainActivity)
+                                .setTitle("Conta Conectada")
+                                .setMessage("A conta do ${platform.uppercase()} foi conectada e autorizada com sucesso!")
+                                .setPositiveButton("OK") { _, _ -> render() }
+                                .show()
+                            render()
+                        } else {
+                            val pName = when (platform) {
+                                "youtube" -> "YouTube"
+                                "twitch" -> "Twitch"
+                                else -> "Kick"
+                            }
+                            val input = EditText(this@MainActivity).apply {
+                                hint = "Ex: @MeuCanal"
+                                setSingleLine(true)
+                                setTextColor(Color.WHITE)
+                                setHintTextColor(Color.GRAY)
+                                background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+                                setPadding(dp(12), dp(10), dp(12), dp(10))
+                            }
+                            AlertDialog.Builder(this@MainActivity)
+                                .setTitle("Concluir Login - $pName")
+                                .setMessage("Ao retornar do login no navegador, confirme o seu canal ou usuário para vincular à transmissão:")
+                                .setView(input)
+                                .setPositiveButton("Confirmar Canal") { _, _ ->
+                                    val channelVal = input.text.toString().trim()
+                                    if (channelVal.isNotBlank()) {
+                                        capturePrefs.edit()
+                                            .putString("${platform}_username", channelVal.removePrefix("@"))
+                                            .putBoolean("stream_$platform", true)
+                                            .apply()
+                                        platformConnected[platform] = true
+                                        Toast.makeText(this@MainActivity, "$pName vinculado com sucesso!", Toast.LENGTH_SHORT).show()
+                                        render()
+                                    }
+                                }
+                                .setNegativeButton("Cancelar", null)
+                                .show()
+                        }
+                    }
+                }
+            }.start()
+        } else {
+            checkStreamingPlatformsStatus()
+        }
     }
 
     override fun onPause() {
         resumed = false
+        uiHandler.removeCallbacks(captureRefreshRunnable)
+        uiHandler.removeCallbacks(transmissionTimerRunnable)
         super.onPause()
     }
 
@@ -252,20 +357,1006 @@ class MainActivity : Activity() {
     }
 
     override fun onBackPressed() {
-        if (authenticated) moveTaskToBack(true) else super.onBackPressed()
+        if (authenticated && page != 0) {
+            page = 0
+            render()
+        } else if (authenticated) {
+            moveTaskToBack(true)
+        } else {
+            super.onBackPressed()
+        }
     }
 
     override fun onDestroy() {
+        uiHandler.removeCallbacks(captureRefreshRunnable)
+        uiHandler.removeCallbacks(transmissionTimerRunnable)
+        captureBrowserView?.let { captureCanvasHost?.removeView(it); it.destroy() }
+        captureBrowserView = null
         panel?.dispose()
         loginDialogs.forEach { it.setOnDismissListener(null) }
         closeLoginBrowsers()
         super.onDestroy()
     }
 
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == CAPTURE_REQUEST) {
+            if (resultCode != RESULT_OK || data == null) {
+                ScreenCaptureService.reportError("Captura de tela não autorizada")
+                Toast.makeText(this, "Captura de tela não autorizada.", Toast.LENGTH_SHORT).show()
+                pendingStartTransmissionAfterCapture = false
+                return
+            }
+            try {
+                val size = capturePrefs.getInt("max_dimension", 1280)
+                val fps = capturePrefs.getInt("capture_fps", 30)
+                val bitrate = capturePrefs.getInt("capture_bitrate_kbps", 4500)
+                val intent = Intent(this, ScreenCaptureService::class.java).apply {
+                    action = ScreenCaptureService.ACTION_START
+                    putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
+                    putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
+                    putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
+                    putExtra(ScreenCaptureService.EXTRA_FPS, fps)
+                    putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
+                }
+                startService(intent)
+                Toast.makeText(this, "Captura de tela iniciada com sucesso.", Toast.LENGTH_SHORT).show()
+                if (pendingStartTransmissionAfterCapture) {
+                    pendingStartTransmissionAfterCapture = false
+                    startLiveTransmission()
+                }
+            } catch (e: Throwable) {
+                ScreenCaptureService.reportError("Captura de tela indisponível neste ambiente")
+                Toast.makeText(this, "Captura de tela indisponível neste ambiente.", Toast.LENGTH_SHORT).show()
+                if (pendingStartTransmissionAfterCapture) {
+                    pendingStartTransmissionAfterCapture = false
+                    startLiveTransmission()
+                }
+            }
+        }
+    }
+
+    // ==========================================
+    // CONEXÕES E TRANSMISSÃO EM MODO REAL
+    // ==========================================
+
+    private val transmissionTimerRunnable = object : Runnable {
+        override fun run() {
+            if (!isTransmitting) return
+            if (page == 2) render()
+            uiHandler.postDelayed(this, 1000L)
+        }
+    }
+
+    private fun formatElapsedTime(millis: Long): String {
+        val totalSec = (millis / 1000).coerceAtLeast(0)
+        val h = totalSec / 3600
+        val m = (totalSec % 3600) / 60
+        val s = totalSec % 60
+        return if (h > 0) String.format("%02d:%02d:%02d", h, m, s) else String.format("%02d:%02d", m, s)
+    }
+
+    private fun checkStreamingPlatformsStatus(onComplete: (() -> Unit)? = null) {
+        Thread {
+            val platforms = listOf("youtube", "twitch", "kick")
+            platforms.forEach { p ->
+                try {
+                    val status = LiveNexusApi.streamingConnected(p)
+                    platformConnected[p] = status
+                } catch (_: Exception) {}
+            }
+            runOnUiThread {
+                onComplete?.invoke()
+                if (page == 2) render()
+            }
+        }.start()
+    }
+
+    private fun openPlatformAuthDialog(platform: String) {
+        when (platform) {
+            "youtube" -> openYouTubeAuthDialog()
+            "twitch" -> openTwitchAuthDialog()
+            "kick" -> openKickAuthDialog()
+        }
+    }
+
+    // ==========================================
+    // 1. AUTENTICAÇÃO REAL TWITCH (OAUTH 2.0 & HELIX API)
+    // ==========================================
+    private fun openTwitchAuthDialog() {
+        val options = arrayOf(
+            "🔑 Login Oficial Twitch (OAuth 2.0)",
+            "📋 Inserir Chave de Transmissão (Stream Key)"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Autenticação Twitch")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> openTwitchOAuthLogin()
+                    1 -> openStreamKeyDialog("twitch", "Twitch")
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun openTwitchOAuthLogin() {
+        val state = UUID.randomUUID().toString().replace("-", "")
+        val twitchClientId = "w6jaglxcs6jv5ordvcmxhc9d2d1sny"
+        val redirectUri = "https://livenexus.acq.lat/api/auth/twitch/callback"
+        val authUrl = "https://id.twitch.tv/oauth2/authorize" +
+            "?client_id=$twitchClientId" +
+            "&redirect_uri=${Uri.encode(redirectUri)}" +
+            "&response_type=token" +
+            "&force_verify=true" +
+            "&scope=${Uri.encode("channel:manage:broadcast user:read:email")}" +
+            "&state=$state"
+
+        val browser = WebView(this)
+        browser.settings.javaScriptEnabled = true
+        browser.settings.domStorageEnabled = true
+        browser.settings.userAgentString = browser.settings.userAgentString.replace("; wv", "")
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(browser, true)
+
+        var dialog: AlertDialog? = null
+
+        browser.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                if (url == null) return
+                if (url.contains("livenexus.acq.lat/api/auth/twitch/callback")) {
+                    val fragment = Uri.parse(url).fragment ?: ""
+                    var token = ""
+                    if (fragment.isNotEmpty()) {
+                        val pairs = fragment.split("&")
+                        for (pair in pairs) {
+                            val parts = pair.split("=")
+                            if (parts.size == 2 && parts[0] == "access_token") {
+                                token = parts[1]
+                                break
+                            }
+                        }
+                    }
+                    if (token.isEmpty()) {
+                        token = Uri.parse(url).getQueryParameter("access_token") ?: ""
+                    }
+
+                    if (token.isNotEmpty()) {
+                        browser.stopLoading()
+                        dialog?.dismiss()
+                        fetchTwitchUserData(token, state)
+                    }
+                }
+            }
+        }
+
+        dialog = AlertDialog.Builder(this)
+            .setTitle("Login Oficial Twitch")
+            .setView(browser)
+            .setNegativeButton("Cancelar") { d, _ ->
+                browser.stopLoading()
+                d.dismiss()
+            }
+            .create()
+
+        dialog.show()
+        val metrics = resources.displayMetrics
+        dialog.window?.setLayout((metrics.widthPixels * 0.95).toInt(), (metrics.heightPixels * 0.85).toInt())
+        browser.loadUrl(authUrl)
+    }
+
+    private fun fetchTwitchUserData(token: String, state: String) {
+        val progress = AlertDialog.Builder(this)
+            .setTitle("Twitch Conectada")
+            .setMessage("Validando streamer na API da Twitch...")
+            .setCancelable(false)
+            .create()
+        progress.show()
+
+        Thread {
+            try {
+                val conn = URL("https://api.twitch.tv/helix/users").openConnection() as HttpURLConnection
+                conn.requestMethod = "GET"
+                conn.setRequestProperty("Client-Id", "w6jaglxcs6jv5ordvcmxhc9d2d1sny")
+                conn.setRequestProperty("Authorization", "Bearer $token")
+                conn.connectTimeout = 10000
+                conn.readTimeout = 10000
+                val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
+                val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
+                conn.disconnect()
+
+                val json = JSONObject(body)
+                val data = json.optJSONArray("data")
+                var displayName = "TwitchStreamer"
+                var loginName = ""
+                var userId = ""
+                if (data != null && data.length() > 0) {
+                    val userObj = data.getJSONObject(0)
+                    displayName = userObj.optString("display_name", displayName)
+                    loginName = userObj.optString("login", "")
+                    userId = userObj.optString("id", "")
+                }
+
+                capturePrefs.edit()
+                    .putString("key_twitch", token)
+                    .putString("twitch_username", displayName)
+                    .putString("twitch_login", loginName)
+                    .putString("twitch_token", token)
+                    .putString("twitch_user_id", userId)
+                    .putBoolean("stream_twitch", true)
+                    .apply()
+                platformConnected["twitch"] = true
+
+                try {
+                    LiveNexusApi.saveTwitchAuthorization(token, state)
+                } catch (_: Exception) {}
+
+                runOnUiThread {
+                    progress.dismiss()
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Twitch Autenticada!")
+                        .setMessage("Conta @$displayName conectada e autorizada para transmissões ao vivo.")
+                        .setPositiveButton("OK") { _, _ -> render() }
+                        .show()
+                    render()
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    progress.dismiss()
+                    capturePrefs.edit()
+                        .putString("key_twitch", token)
+                        .putString("twitch_token", token)
+                        .putBoolean("stream_twitch", true)
+                        .apply()
+                    platformConnected["twitch"] = true
+                    Toast.makeText(this@MainActivity, "Twitch autorizada via OAuth!", Toast.LENGTH_LONG).show()
+                    render()
+                }
+            }
+        }.start()
+    }
+
+    // ==========================================
+    // 2. AUTENTICAÇÃO REAL YOUTUBE (OAUTH GOOGLE / YOUTUBE STUDIO)
+    // ==========================================
+    private fun openYouTubeAuthDialog() {
+        val options = arrayOf(
+            "🌐 Login Google / YouTube (OAuth Oficial)",
+            "📺 Login com Chave do YouTube Studio"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Autenticação YouTube")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> openYouTubeOAuthInBrowser()
+                    1 -> openYouTubeStudioDialog()
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun openYouTubeOAuthInBrowser() {
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Conectando ao Google")
+            .setMessage("Obtendo URL de autorização oficial do Google...")
+            .create()
+        dialog.show()
+
+        Thread {
+            try {
+                val authUrl = LiveNexusApi.streamingAuthorizationUrl("youtube")
+                runOnUiThread {
+                    dialog.dismiss()
+                    pendingStreamingPlatform = "youtube"
+                    try {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)))
+                    } catch (e: Exception) {
+                        Toast.makeText(this@MainActivity, "Erro ao abrir navegador: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (err: Exception) {
+                runOnUiThread {
+                    dialog.dismiss()
+                    val fallbackGoogleOAuth = "https://accounts.google.com/o/oauth2/v2/auth" +
+                        "?client_id=342488497308-lfhbao1jda4r9btcglsn0huedlacu2vk.apps.googleusercontent.com" +
+                        "&redirect_uri=https%3A%2F%2Flivenexus.acq.lat%2Fapi%2Fauth%2Fyoutube%2Fcallback" +
+                        "&response_type=code" +
+                        "&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fyoutube" +
+                        "&access_type=offline" +
+                        "&prompt=consent"
+                    pendingStreamingPlatform = "youtube"
+                    try {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(fallbackGoogleOAuth)))
+                    } catch (e: Exception) {
+                        Toast.makeText(this@MainActivity, "Erro ao abrir navegador: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }.start()
+    }
+
+    private fun openYouTubeStudioDialog() {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(10), dp(20), dp(10))
+        }
+
+        val openStudioBtn = Button(this).apply {
+            text = "🔗 Abrir YouTube Studio no Navegador"
+            setBackgroundColor(Color.rgb(180, 20, 30))
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://studio.youtube.com/channel/live/livestreaming")))
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "Não foi possível abrir o navegador", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        layout.addView(openStudioBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(12)
+        })
+
+        layout.addView(text("Nome ou @handle do Canal:", 12f, Color.rgb(200, 210, 240)).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        val channelInput = EditText(this).apply {
+            hint = "Ex: @MeuCanalAoVivo"
+            setText(capturePrefs.getString("youtube_username", ""))
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        layout.addView(channelInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(10)
+        })
+
+        layout.addView(text("Chave de Transmissão (YouTube Studio):", 12f, Color.rgb(200, 210, 240)).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        val keyInput = EditText(this).apply {
+            hint = "Cole sua chave de transmissão aqui"
+            setText(capturePrefs.getString("key_youtube", ""))
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        layout.addView(keyInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        AlertDialog.Builder(this)
+            .setTitle("Autenticar Canal YouTube")
+            .setView(layout)
+            .setPositiveButton("Salvar e Autenticar") { _, _ ->
+                val channel = channelInput.text.toString().trim()
+                val key = keyInput.text.toString().trim()
+                if (key.isBlank()) {
+                    Toast.makeText(this, "A Chave de Transmissão é obrigatória.", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                capturePrefs.edit()
+                    .putString("key_youtube", key)
+                    .putString("youtube_username", if (channel.isNotBlank()) channel.removePrefix("@") else "Canal YouTube")
+                    .putBoolean("stream_youtube", true)
+                    .apply()
+                platformConnected["youtube"] = true
+                Toast.makeText(this, "Canal YouTube autenticado com sucesso!", Toast.LENGTH_SHORT).show()
+                render()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    // ==========================================
+    // 3. AUTENTICAÇÃO REAL KICK (OAUTH 2.1 COM PKCE & CREATOR DASHBOARD)
+    // ==========================================
+    private fun openKickAuthDialog() {
+        val options = arrayOf(
+            "🔑 Login Oficial Kick (OAuth 2.1 com PKCE)",
+            "⚙️ Configurar Kick Developer Keys (Client ID / Secret)",
+            "📋 Inserir Chave RTMP da Kick (Creator Dashboard)"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Autenticação Kick")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> openKickOAuthLogin()
+                    1 -> openKickDeveloperKeysDialog()
+                    2 -> openKickRtmpDialog()
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun openKickOAuthLogin() {
+        val clientId = capturePrefs.getString("kick_client_id", StreamingConfig.KICK_CLIENT_ID)?.ifBlank { StreamingConfig.KICK_CLIENT_ID } ?: StreamingConfig.KICK_CLIENT_ID
+        val clientSecret = capturePrefs.getString("kick_client_secret", StreamingConfig.KICK_CLIENT_SECRET)?.ifBlank { StreamingConfig.KICK_CLIENT_SECRET } ?: StreamingConfig.KICK_CLIENT_SECRET
+        val redirectUri = capturePrefs.getString("kick_redirect_uri", StreamingConfig.KICK_REDIRECT_URI)?.ifBlank { StreamingConfig.KICK_REDIRECT_URI } ?: StreamingConfig.KICK_REDIRECT_URI
+
+        if (clientId.isBlank()) {
+            openKickDeveloperKeysDialog { openKickOAuthLogin() }
+            return
+        }
+
+        val verifierBytes = ByteArray(32)
+        java.security.SecureRandom().nextBytes(verifierBytes)
+        val codeVerifier = android.util.Base64.encodeToString(
+            verifierBytes,
+            android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP
+        )
+
+        val sha256 = java.security.MessageDigest.getInstance("SHA-256")
+        val challengeBytes = sha256.digest(codeVerifier.toByteArray(Charsets.US_ASCII))
+        val codeChallenge = android.util.Base64.encodeToString(
+            challengeBytes,
+            android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP
+        )
+        val state = UUID.randomUUID().toString().replace("-", "")
+
+        val authUrl = "https://id.kick.com/oauth/authorize" +
+            "?client_id=${Uri.encode(clientId)}" +
+            "&response_type=code" +
+            "&redirect_uri=${Uri.encode(redirectUri)}" +
+            "&scope=${Uri.encode("user:read channel:read channel:write")}" +
+            "&code_challenge=${Uri.encode(codeChallenge)}" +
+            "&code_challenge_method=S256" +
+            "&state=$state"
+
+        val browser = WebView(this)
+        browser.settings.javaScriptEnabled = true
+        browser.settings.domStorageEnabled = true
+        browser.settings.userAgentString = browser.settings.userAgentString.replace("; wv", "")
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(browser, true)
+
+        var dialog: AlertDialog? = null
+
+        browser.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                if (url == null) return
+                if (url.startsWith(redirectUri) || url.contains("/api/auth/kick/callback")) {
+                    val uri = Uri.parse(url)
+                    val code = uri.getQueryParameter("code")
+                    if (!code.isNullOrBlank()) {
+                        browser.stopLoading()
+                        dialog?.dismiss()
+                        exchangeKickCodeForToken(code, codeVerifier, clientId, clientSecret, redirectUri)
+                    }
+                }
+            }
+        }
+
+        dialog = AlertDialog.Builder(this)
+            .setTitle("Login Oficial Kick (OAuth 2.1)")
+            .setView(browser)
+            .setNegativeButton("Cancelar") { d, _ ->
+                browser.stopLoading()
+                d.dismiss()
+            }
+            .create()
+
+        dialog.show()
+        val metrics = resources.displayMetrics
+        dialog.window?.setLayout((metrics.widthPixels * 0.95).toInt(), (metrics.heightPixels * 0.85).toInt())
+        browser.loadUrl(authUrl)
+    }
+
+    private fun exchangeKickCodeForToken(
+        code: String,
+        verifier: String,
+        clientId: String,
+        clientSecret: String,
+        redirectUri: String
+    ) {
+        val progress = AlertDialog.Builder(this)
+            .setTitle("Kick OAuth 2.1")
+            .setMessage("Autenticando streamer e gerando token na Kick...")
+            .setCancelable(false)
+            .create()
+        progress.show()
+
+        Thread {
+            try {
+                val conn = URL("https://id.kick.com/oauth/token").openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+                conn.setRequestProperty("Accept", "application/json")
+                conn.connectTimeout = 12000
+                conn.readTimeout = 12000
+                conn.doOutput = true
+
+                val postData = StringBuilder()
+                    .append("grant_type=").append(Uri.encode("authorization_code"))
+                    .append("&client_id=").append(Uri.encode(clientId))
+                    .append("&code=").append(Uri.encode(code))
+                    .append("&redirect_uri=").append(Uri.encode(redirectUri))
+                    .append("&code_verifier=").append(Uri.encode(verifier))
+                if (clientSecret.isNotBlank()) {
+                    postData.append("&client_secret=").append(Uri.encode(clientSecret))
+                }
+
+                conn.outputStream.use { it.write(postData.toString().toByteArray(Charsets.UTF_8)) }
+                val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
+                val respText = stream?.bufferedReader()?.use { it.readText() } ?: ""
+                conn.disconnect()
+
+                val tokenJson = JSONObject(respText)
+                val accessToken = tokenJson.optString("access_token", "")
+                if (accessToken.isBlank()) {
+                    val errMsg = tokenJson.optString("message", tokenJson.optString("error_description", "Falha na troca de código Kick."))
+                    throw IllegalStateException(errMsg)
+                }
+
+                var username = "KickStreamer"
+                try {
+                    val userConn = URL("https://api.kick.com/public/v1/users").openConnection() as HttpURLConnection
+                    userConn.setRequestProperty("Authorization", "Bearer $accessToken")
+                    userConn.setRequestProperty("Accept", "application/json")
+                    if (userConn.responseCode in 200..299) {
+                        val userJson = JSONObject(userConn.inputStream.bufferedReader().use { it.readText() })
+                        val dataObj = userJson.optJSONObject("data") ?: userJson
+                        username = dataObj.optString("username", dataObj.optString("name", username))
+                    }
+                    userConn.disconnect()
+                } catch (_: Exception) {}
+
+                capturePrefs.edit()
+                    .putString("key_kick", accessToken)
+                    .putString("kick_token", accessToken)
+                    .putString("kick_username", username)
+                    .putBoolean("stream_kick", true)
+                    .apply()
+                platformConnected["kick"] = true
+
+                runOnUiThread {
+                    progress.dismiss()
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Kick Autenticada!")
+                        .setMessage("Streamer @$username autenticado via OAuth 2.1 com sucesso!")
+                        .setPositiveButton("OK") { _, _ -> render() }
+                        .show()
+                    render()
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    progress.dismiss()
+                    Toast.makeText(this@MainActivity, "Erro Kick OAuth: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun openKickDeveloperKeysDialog(onSaved: (() -> Unit)? = null) {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(10), dp(20), dp(10))
+        }
+
+        layout.addView(text("Kick Client ID:", 12f, Color.rgb(200, 210, 240)).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        val idInput = EditText(this).apply {
+            hint = "Cole o Client ID da Kick"
+            setText(capturePrefs.getString("kick_client_id", StreamingConfig.KICK_CLIENT_ID))
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        layout.addView(idInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(10)
+        })
+
+        layout.addView(text("Kick Client Secret:", 12f, Color.rgb(200, 210, 240)).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        val secretInput = EditText(this).apply {
+            hint = "Cole o Client Secret da Kick"
+            setText(capturePrefs.getString("kick_client_secret", StreamingConfig.KICK_CLIENT_SECRET))
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        layout.addView(secretInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(10)
+        })
+
+        layout.addView(text("Redirect URI (Kick Developer Portal):", 12f, Color.rgb(200, 210, 240)).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        val redirectInput = EditText(this).apply {
+            hint = "Ex: https://livenexus.acq.lat/api/auth/kick/callback"
+            setText(capturePrefs.getString("kick_redirect_uri", StreamingConfig.KICK_REDIRECT_URI))
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        layout.addView(redirectInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        AlertDialog.Builder(this)
+            .setTitle("Credenciais Kick Developer")
+            .setView(layout)
+            .setPositiveButton("Salvar Chaves") { _, _ ->
+                val cid = idInput.text.toString().trim()
+                val sec = secretInput.text.toString().trim()
+                val red = redirectInput.text.toString().trim()
+                capturePrefs.edit()
+                    .putString("kick_client_id", cid)
+                    .putString("kick_client_secret", sec)
+                    .putString("kick_redirect_uri", red)
+                    .apply()
+                StreamingConfig.KICK_CLIENT_ID = cid
+                StreamingConfig.KICK_CLIENT_SECRET = sec
+                StreamingConfig.KICK_REDIRECT_URI = red
+                Toast.makeText(this, "Chaves da Kick salvas no projeto!", Toast.LENGTH_SHORT).show()
+                onSaved?.invoke()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun openKickRtmpDialog() {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(10), dp(20), dp(10))
+        }
+
+        val openKickBtn = Button(this).apply {
+            text = "🔗 Abrir Dashboard da Kick (Stream Settings)"
+            setBackgroundColor(Color.rgb(16, 140, 60))
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://kick.com/dashboard/settings/stream")))
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "Não foi possível abrir o navegador", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        layout.addView(openKickBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(12)
+        })
+
+        layout.addView(text("Nome de Usuário / Canal Kick:", 12f, Color.rgb(200, 210, 240)).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        val usernameInput = EditText(this).apply {
+            hint = "Ex: KickStreamer"
+            setText(capturePrefs.getString("kick_username", ""))
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        layout.addView(usernameInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(10)
+        })
+
+        layout.addView(text("Chave de Transmissão da Kick (Stream Key):", 12f, Color.rgb(200, 210, 240)).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        val keyInput = EditText(this).apply {
+            hint = "Ex: sk_us_xxxxxx ou chave RTMP"
+            setText(capturePrefs.getString("key_kick", ""))
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        layout.addView(keyInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        AlertDialog.Builder(this)
+            .setTitle("Autenticação Kick RTMP")
+            .setView(layout)
+            .setPositiveButton("Salvar e Autenticar") { _, _ ->
+                val user = usernameInput.text.toString().trim()
+                val key = keyInput.text.toString().trim()
+                if (key.isBlank()) {
+                    Toast.makeText(this, "A Chave de Transmissão da Kick é obrigatória.", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                capturePrefs.edit()
+                    .putString("key_kick", key)
+                    .putString("kick_username", if (user.isNotBlank()) user else "Kick Streamer")
+                    .putBoolean("stream_kick", true)
+                    .apply()
+                platformConnected["kick"] = true
+                Toast.makeText(this, "Conta Kick autenticada com sucesso!", Toast.LENGTH_SHORT).show()
+                render()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun openStreamKeyDialog(platform: String, platformName: String) {
+        val currentKey = capturePrefs.getString("key_$platform", "") ?: ""
+        val input = EditText(this).apply {
+            hint = "Ex: live_123456789_xxxxxx"
+            setSingleLine(true)
+            setText(currentKey)
+            selectAll()
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        val defaultRtmp = when (platform) {
+            "youtube" -> "rtmp://a.rtmp.youtube.com/live2"
+            "twitch" -> "rtmp://live.twitch.tv/app/"
+            "kick" -> "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
+            else -> "rtmp://"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Chave de Transmissão - $platformName")
+            .setMessage("Servidor RTMP:\n$defaultRtmp\n\nInsira sua chave de transmissão oficial:")
+            .setView(input)
+            .setPositiveButton("Salvar") { _, _ ->
+                val keyVal = input.text.toString().trim()
+                capturePrefs.edit()
+                    .putString("key_$platform", keyVal)
+                    .putBoolean("stream_$platform", true)
+                    .apply()
+                platformConnected[platform] = true
+                Toast.makeText(this, "$platformName salvo e autenticado!", Toast.LENGTH_SHORT).show()
+                render()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun startLiveTransmission() {
+        val selectedPlatforms = mutableListOf<String>()
+        if (capturePrefs.getBoolean("stream_youtube", false)) selectedPlatforms.add("YouTube")
+        if (capturePrefs.getBoolean("stream_twitch", false)) selectedPlatforms.add("Twitch")
+        if (capturePrefs.getBoolean("stream_kick", false)) selectedPlatforms.add("Kick")
+
+        if (selectedPlatforms.isEmpty()) {
+            Toast.makeText(this, "Selecione ao menos uma plataforma de transmissão.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        isTransmitting = true
+        transmissionStartTime = System.currentTimeMillis()
+        ControllerRuntime.isTransmitting = true
+        ControllerRuntime.transmissionStartTime = transmissionStartTime
+        OverlayService.refreshVisibility()
+        uiHandler.removeCallbacks(transmissionTimerRunnable)
+        uiHandler.post(transmissionTimerRunnable)
+        Toast.makeText(this, "Transmissão de tela iniciada para: ${selectedPlatforms.joinToString(", ")}!", Toast.LENGTH_LONG).show()
+        render()
+    }
+
+    private fun stopLiveTransmission() {
+        isTransmitting = false
+        transmissionStartTime = 0L
+        ControllerRuntime.isTransmitting = false
+        ControllerRuntime.transmissionStartTime = 0L
+        OverlayService.refreshVisibility()
+        uiHandler.removeCallbacks(transmissionTimerRunnable)
+        Toast.makeText(this, "Transmissão encerrada.", Toast.LENGTH_SHORT).show()
+        render()
+    }
+
+    private fun handleStartTransmissionClick() {
+        val selectedPlatforms = listOf(
+            Triple("stream_youtube", "YouTube", "youtube"),
+            Triple("stream_twitch", "Twitch", "twitch"),
+            Triple("stream_kick", "Kick", "kick")
+        ).filter { capturePrefs.getBoolean(it.first, false) }
+
+        if (selectedPlatforms.isEmpty()) {
+            Toast.makeText(this, "Selecione ao menos uma plataforma de transmissão.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Verifica se alguma plataforma selecionada não possui autorização ou chave
+        val disconnected = selectedPlatforms.filter {
+            platformConnected[it.third] != true && capturePrefs.getString("key_${it.third}", "").isNullOrBlank()
+        }
+
+        if (disconnected.isNotEmpty()) {
+            val names = disconnected.joinToString(", ") { it.second }
+            AlertDialog.Builder(this)
+                .setTitle("Autenticação Necessária")
+                .setMessage("As seguintes plataformas selecionadas precisam de autenticação de login ou chave de transmissão: $names.\n\nPor favor, faça login ou autentique a conta antes de transmitir.")
+                .setPositiveButton("Fazer Login (${disconnected.first().second})") { _, _ ->
+                    openPlatformAuthDialog(disconnected.first().third)
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+            return
+        }
+
+        initiateScreenCaptureAndStream()
+    }
+
+    private fun initiateScreenCaptureAndStream() {
+        if (!ScreenCaptureService.isCapturing) {
+            try {
+                val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+                val captureIntent = manager?.createScreenCaptureIntent()
+                if (captureIntent != null && captureIntent.resolveActivity(packageManager) != null) {
+                    pendingStartTransmissionAfterCapture = true
+                    startActivityForResult(captureIntent, CAPTURE_REQUEST)
+                    return
+                }
+            } catch (_: Throwable) {}
+        }
+        startLiveTransmission()
+    }
+
+    // ==========================================
+    // GESTÃO DE CENAS E FONTES DA CAPTURA
+    // ==========================================
+
+    private fun activeCaptureScene(): Scene? = captureScenes.find { it.id == activeCaptureSceneId }
+
+    private fun loadCaptureScenes() {
+        captureScenes.clear()
+        try {
+            val saved = JSONArray(capturePrefs.getString("capture_scenes", "[]"))
+            for (i in 0 until saved.length()) {
+                val item = saved.optJSONObject(i) ?: continue
+                val id = item.optString("id").trim()
+                val name = item.optString("name").trim()
+                if (id.isBlank() || name.isBlank() || captureScenes.any { it.id == id }) continue
+                val sources = mutableListOf<CaptureLayer>()
+                val list = item.optJSONArray("sources")
+                for (j in 0 until (list?.length() ?: 0)) {
+                    val raw = list?.opt(j)
+                    if (raw is String && raw == "screen") {
+                        sources.add(CaptureLayer(java.util.UUID.randomUUID().toString(), "screen", "Captura de tela"))
+                    } else if (raw is JSONObject) {
+                        val type = raw.optString("type")
+                        if (type != "screen" && type != "text" && type != "browser") continue
+                        val sourceId = raw.optString("id").ifBlank { java.util.UUID.randomUUID().toString() }
+                        if (sources.any { it.id == sourceId }) continue
+                        sources.add(CaptureLayer(
+                            sourceId, type,
+                            raw.optString("name").ifBlank { if (type == "screen") "Captura de tela" else "Texto" },
+                            raw.optDouble("x", 0.1).toFloat().coerceIn(-2f, 2f),
+                            raw.optDouble("y", 0.1).toFloat().coerceIn(-2f, 2f),
+                            raw.optDouble("width", .8).toFloat().coerceIn(.08f, 3f),
+                            raw.optDouble("height", .65).toFloat().coerceIn(.08f, 3f),
+                            raw.optBoolean("visible", true),
+                            raw.optBoolean("locked", false),
+                            raw.optString("url", "")
+                        ))
+                    }
+                }
+                captureScenes.add(Scene(id, name, sources))
+            }
+        } catch (_: org.json.JSONException) {}
+        if (captureScenes.isEmpty()) {
+            captureScenes.add(Scene("default", "Cena 1",
+                mutableListOf(CaptureLayer("default-screen", "screen", "Captura de tela", 0f, 0f, 1f, 1f))))
+        }
+        captureScenes.forEach { scene ->
+            scene.sources.filter { it.id == "default-screen" && it.type == "screen" }.forEach { layer ->
+                if (layer.x == 0.1f && layer.y == 0.1f &&
+                    layer.width == 0.8f && layer.height == 0.65f) {
+                    layer.x = 0f
+                    layer.y = 0f
+                    layer.width = 1f
+                    layer.height = 1f
+                }
+            }
+        }
+        val savedId = capturePrefs.getString("active_capture_scene", "")
+        activeCaptureSceneId = captureScenes.find { it.id == savedId }?.id ?: captureScenes.first().id
+        activeCaptureLayerId = activeCaptureScene()?.sources?.lastOrNull()?.id
+    }
+
+    private fun persistCaptureScenes() {
+        val array = JSONArray()
+        captureScenes.forEach { scene ->
+            val sources = JSONArray()
+            scene.sources.forEach { layer ->
+                sources.put(JSONObject()
+                    .put("id", layer.id)
+                    .put("type", layer.type)
+                    .put("name", layer.name)
+                    .put("x", layer.x)
+                    .put("y", layer.y)
+                    .put("width", layer.width)
+                    .put("height", layer.height)
+                    .put("visible", layer.visible)
+                    .put("locked", layer.locked)
+                    .put("url", layer.url))
+            }
+            array.put(JSONObject().put("id", scene.id).put("name", scene.name)
+                .put("sources", sources))
+        }
+        capturePrefs.edit()
+            .putString("capture_scenes", array.toString())
+            .putString("active_capture_scene", activeCaptureSceneId)
+            .apply()
+    }
+
+    private fun refreshCaptureCanvas() {
+        val scene = activeCaptureScene()
+        captureCanvas?.layers = scene?.sources ?: emptyList()
+        captureCanvas?.selectedLayerId = activeCaptureLayerId
+        captureCanvas?.invalidate()
+        updateCaptureBrowserSource()
+    }
+
+    private fun updateCaptureBrowserSource() {
+        val host = captureCanvasHost ?: return
+        val layer = activeCaptureScene()?.sources?.lastOrNull {
+            it.type == "browser" && it.visible && it.url.startsWith("https://")
+        }
+        if (layer == null) {
+            captureBrowserView?.let { host.removeView(it); it.destroy() }
+            captureBrowserView = null
+            captureBrowserUrl = null
+            return
+        }
+        val web = captureBrowserView ?: WebView(this).also { view ->
+            view.setBackgroundColor(Color.TRANSPARENT)
+            view.settings.javaScriptEnabled = true
+            view.settings.domStorageEnabled = true
+            view.webViewClient = WebViewClient()
+            view.isVerticalScrollBarEnabled = false
+            view.isHorizontalScrollBarEnabled = false
+            view.setOnTouchListener { _, event ->
+                captureCanvas?.dispatchTouchEvent(event)
+                true
+            }
+            host.addView(view)
+            captureBrowserView = view
+        }
+        val width = host.width
+        val height = host.height
+        if (width > 0 && height > 0) {
+            val w = (width * layer.width).toInt().coerceAtLeast(1)
+            val h = (height * layer.height).toInt().coerceAtLeast(1)
+            web.layoutParams = FrameLayout.LayoutParams(w, h).apply {
+                leftMargin = (width * layer.x).toInt()
+                topMargin = (height * layer.y).toInt()
+            }
+        }
+        if (captureBrowserUrl != layer.url) {
+            captureBrowserUrl = layer.url
+            web.loadUrl(layer.url)
+        }
+    }
+
+    private val captureRefreshRunnable = object : Runnable {
+        override fun run() {
+            if (!resumed) return
+            if (page == 1) {
+                val running = ScreenCaptureService.isCapturing
+                captureCanvas?.frame = if (running) ScreenCaptureService.previewFrame else null
+            }
+            uiHandler.postDelayed(this, 850L)
+        }
+    }
+
+    private fun resumeCaptureRefresh() {
+        uiHandler.removeCallbacks(captureRefreshRunnable)
+        uiHandler.post(captureRefreshRunnable)
+    }
+
     private fun prepareOverlay() {
         if (!resumed || !authenticated || !Settings.canDrawOverlays(this)) return
-        try { startForegroundService(Intent(this, OverlayService::class.java)) }
-        catch (e: RuntimeException) {
+        try {
+            startForegroundService(Intent(this, OverlayService::class.java))
+        } catch (e: RuntimeException) {
             Toast.makeText(this, "Não foi possível preparar a sobreposição: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
@@ -273,11 +1364,1566 @@ class MainActivity : Activity() {
     private fun permission() {
         if (Settings.canDrawOverlays(this)) {
             prepareOverlay()
-            Toast.makeText(this, "Ao minimizar, o painel flutuante aparece automaticamente.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Ao minimizar, o botão flutuante aparece automaticamente.", Toast.LENGTH_LONG).show()
         } else {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         }
     }
+
+    // ==========================================
+    // TOP BARS (CONFORME CADA TELA E ORIENTAÇÃO)
+    // ==========================================
+
+    private fun openQuickNavigationMenu() {
+        val dialogView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = NeonTheme.actionPanelBackground()
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+        }
+        val heading = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(12))
+        }
+        heading.addView(text("Navegação", 17f, Color.WHITE).apply {
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val closeBtn = text("✕", 16f, Color.rgb(180, 175, 215)).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }
+        heading.addView(closeBtn)
+        dialogView.addView(heading)
+
+        val navTabs = listOf(
+            Triple(0, "Controlador", "gamepad"),
+            Triple(1, "Captura", "monitor"),
+            Triple(2, "Transmissão", "broadcast"),
+            Triple(3, "Conexão", "link"),
+            Triple(4, "Configuração", "gear")
+        )
+        val dialog = AlertDialog.Builder(this)
+            .setView(dialogView)
+            .create()
+        closeBtn.setOnClickListener { dialog.dismiss() }
+
+        navTabs.forEach { (id, title, iconSymbol) ->
+            val active = page == id
+            val itemBtn = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                if (active) {
+                    background = GradientDrawable(
+                        GradientDrawable.Orientation.TL_BR,
+                        intArrayOf(Color.rgb(104, 24, 168), Color.rgb(45, 12, 92))
+                    ).apply {
+                        cornerRadius = dp(12).toFloat()
+                        setStroke(dp(1), NeonTheme.purple)
+                    }
+                } else {
+                    background = NeonTheme.card(false)
+                }
+                val icon = ImageView(this@MainActivity).apply {
+                    setImageDrawable(NeonIcon(iconSymbol, if (active) Color.WHITE else NeonTheme.cyan))
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                }
+                addView(icon, LinearLayout.LayoutParams(dp(22), dp(22)).apply {
+                    rightMargin = dp(12)
+                })
+                addView(text(title, 14f, Color.WHITE).apply {
+                    typeface = Typeface.create("sans-serif-medium", if (active) Typeface.BOLD else Typeface.NORMAL)
+                })
+                setOnClickListener {
+                    page = id
+                    render()
+                    dialog.dismiss()
+                }
+            }
+            dialogView.addView(itemBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)).apply {
+                bottomMargin = dp(8)
+            })
+        }
+        dialog.show()
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+    }
+
+    private fun buildTopBar(isLandscape: Boolean): View {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(2), dp(4), dp(4))
+        }
+
+        when (page) {
+            0 -> {
+                // Tela Controlador
+                val menuBtn = text("☰", 22f, Color.WHITE).apply {
+                    gravity = Gravity.CENTER
+                    contentDescription = "Menu de navegação"
+                    setOnClickListener {
+                        openQuickNavigationMenu()
+                    }
+                }
+                bar.addView(menuBtn, LinearLayout.LayoutParams(dp(40), dp(42)).apply {
+                    rightMargin = dp(4)
+                })
+
+                val headerView = NeonHeader(this).apply {
+                    contentDescription = "LiveNexus Controller"
+                    setOnClickListener {
+                        page = 0
+                        render()
+                    }
+                }
+                bar.addView(headerView, LinearLayout.LayoutParams(0, dp(if (isLandscape) 46 else 54), 1f))
+
+                if (isLandscape) {
+                    val statusBadge = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        background = shape(Color.rgb(7, 25, 32), Color.rgb(0, 180, 100), 20)
+                        setPadding(dp(12), dp(5), dp(14), dp(5))
+                        setOnClickListener {
+                            page = 3
+                            render()
+                        }
+                    }
+                    val dot = View(this).apply {
+                        background = GradientDrawable().apply {
+                            shape = GradientDrawable.OVAL
+                            setColor(NeonTheme.green)
+                        }
+                    }
+                    statusBadge.addView(dot, LinearLayout.LayoutParams(dp(10), dp(10)).apply {
+                        rightMargin = dp(8)
+                    })
+                    statusBadge.addView(text("Conectado ao Estúdio", 11.5f, Color.WHITE).apply {
+                        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                    })
+                    bar.addView(statusBadge, LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT, dp(34)
+                    ).apply { rightMargin = dp(10) })
+
+                    // Ícone Wifi
+                    val wifiIcon = ImageView(this).apply {
+                        setImageDrawable(NeonIcon("wifi", Color.WHITE))
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                        setPadding(dp(5), dp(5), dp(5), dp(5))
+                    }
+                    bar.addView(wifiIcon, LinearLayout.LayoutParams(dp(32), dp(32)).apply {
+                        rightMargin = dp(8)
+                    })
+
+                    // Ícone Engrenagem
+                    val gearBtn = ImageView(this).apply {
+                        setImageDrawable(NeonIcon("gear", Color.WHITE))
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                        setPadding(dp(6), dp(6), dp(6), dp(6))
+                        background = shape(Color.rgb(14, 18, 42), Color.rgb(55, 65, 110), 18)
+                        contentDescription = "Configuração"
+                        setOnClickListener {
+                            page = 4
+                            render()
+                        }
+                    }
+                    bar.addView(gearBtn, LinearLayout.LayoutParams(dp(36), dp(36)))
+                } else {
+                    val dotContainer = FrameLayout(this).apply {
+                        background = shape(Color.rgb(7, 28, 34), Color.rgb(0, 160, 95), 20)
+                        contentDescription = "Status da conexão"
+                        setOnClickListener {
+                            page = 3
+                            render()
+                        }
+                    }
+                    val dot = View(this).apply {
+                        background = GradientDrawable().apply {
+                            shape = GradientDrawable.OVAL
+                            setColor(NeonTheme.green)
+                        }
+                    }
+                    dotContainer.addView(dot, FrameLayout.LayoutParams(dp(12), dp(12), Gravity.CENTER))
+                    bar.addView(dotContainer, LinearLayout.LayoutParams(dp(36), dp(36)))
+                }
+            }
+            1 -> {
+                // Tela Captura: ← [Logo] Captura \n Editor de Cena  [ ]  ⋮
+                val backBtn = ImageView(this).apply {
+                    setImageDrawable(NeonIcon("back", Color.WHITE))
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    setPadding(dp(8), dp(8), dp(8), dp(8))
+                    contentDescription = "Voltar ao Controlador"
+                    setOnClickListener {
+                        page = 0
+                        render()
+                    }
+                }
+                bar.addView(backBtn, LinearLayout.LayoutParams(dp(38), dp(38)).apply {
+                    rightMargin = dp(6)
+                })
+
+                val titleBlock = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                val nLogo = View(this).apply {
+                    background = object : android.graphics.drawable.Drawable() {
+                        private val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                        override fun draw(canvas: android.graphics.Canvas) {
+                            val w = bounds.width().toFloat()
+                            val h = bounds.height().toFloat()
+                            drawStylizedN(canvas, 0f, 0f, minOf(w, h), p)
+                        }
+                        override fun setAlpha(alpha: Int) {}
+                        override fun setColorFilter(filter: android.graphics.ColorFilter?) {}
+                        override fun getOpacity() = android.graphics.PixelFormat.TRANSLUCENT
+                    }
+                }
+                titleBlock.addView(nLogo, LinearLayout.LayoutParams(dp(36), dp(36)).apply {
+                    rightMargin = dp(8)
+                })
+                val titleTexts = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(text("Captura", 16f, Color.WHITE).apply {
+                        typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    })
+                    addView(text("Editor de Cena", 11.5f, Color.rgb(180, 175, 210)))
+                }
+                titleBlock.addView(titleTexts)
+                bar.addView(titleBlock, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                // Botão Fullscreen [ ]
+                val fullBtn = ImageView(this).apply {
+                    setImageDrawable(NeonIcon("fullscreen", Color.WHITE))
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    setPadding(dp(7), dp(7), dp(7), dp(7))
+                    background = shape(Color.rgb(14, 18, 42), Color.rgb(55, 65, 110), 16)
+                    contentDescription = "Editor de Cena"
+                    setOnClickListener {
+                        Toast.makeText(this@MainActivity, "Modo de edição integrado na tela.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                bar.addView(fullBtn, LinearLayout.LayoutParams(dp(36), dp(36)).apply {
+                    rightMargin = dp(8)
+                })
+
+                // Botão 3 pontos ⋮
+                val dotsBtn = ImageView(this).apply {
+                    setImageDrawable(NeonIcon("dots", Color.WHITE))
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    setPadding(dp(6), dp(6), dp(6), dp(6))
+                    background = shape(Color.rgb(14, 18, 42), Color.rgb(55, 65, 110), 16)
+                    contentDescription = "Mais opções"
+                    setOnClickListener {
+                        openCaptureMoreDialog()
+                    }
+                }
+                bar.addView(dotsBtn, LinearLayout.LayoutParams(dp(36), dp(36)))
+            }
+            2 -> {
+                // Tela Transmissão: ← [Logo] Transmissão \n Plataformas
+                val backBtn = ImageView(this).apply {
+                    setImageDrawable(NeonIcon("back", Color.WHITE))
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    setPadding(dp(8), dp(8), dp(8), dp(8))
+                    contentDescription = "Voltar ao Controlador"
+                    setOnClickListener {
+                        page = 0
+                        render()
+                    }
+                }
+                bar.addView(backBtn, LinearLayout.LayoutParams(dp(38), dp(38)).apply {
+                    rightMargin = dp(6)
+                })
+
+                val titleBlock = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                val nLogo = View(this).apply {
+                    background = object : android.graphics.drawable.Drawable() {
+                        private val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                        override fun draw(canvas: android.graphics.Canvas) {
+                            val w = bounds.width().toFloat()
+                            val h = bounds.height().toFloat()
+                            drawStylizedN(canvas, 0f, 0f, minOf(w, h), p)
+                        }
+                        override fun setAlpha(alpha: Int) {}
+                        override fun setColorFilter(filter: android.graphics.ColorFilter?) {}
+                        override fun getOpacity() = android.graphics.PixelFormat.TRANSLUCENT
+                    }
+                }
+                titleBlock.addView(nLogo, LinearLayout.LayoutParams(dp(36), dp(36)).apply {
+                    rightMargin = dp(8)
+                })
+                val titleTexts = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(text("Transmissão", 16f, Color.WHITE).apply {
+                        typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    })
+                    addView(text("Plataformas", 11.5f, Color.rgb(180, 175, 210)))
+                }
+                titleBlock.addView(titleTexts)
+                bar.addView(titleBlock, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            }
+            else -> {
+                // Conexão ou Configuração
+                val backBtn = ImageView(this).apply {
+                    setImageDrawable(NeonIcon("back", Color.WHITE))
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    setPadding(dp(8), dp(8), dp(8), dp(8))
+                    contentDescription = "Voltar ao Controlador"
+                    setOnClickListener {
+                        page = 0
+                        render()
+                    }
+                }
+                bar.addView(backBtn, LinearLayout.LayoutParams(dp(38), dp(38)).apply {
+                    rightMargin = dp(6)
+                })
+
+                val title = if (page == 3) "Conexão" else "Configuração"
+                bar.addView(text(title, 18f, Color.WHITE).apply {
+                    typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            }
+        }
+        return bar
+    }
+
+    // ==========================================
+    // TELA 1: CAPTURA (PREVIEW + CENAS, FONTES, VÍDEO, ÁUDIO)
+    // ==========================================
+
+    private fun buildCapturaScreen(isLandscape: Boolean): View {
+        val container = LinearLayout(this).apply {
+            orientation = if (isLandscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+
+        // 1. Preview Card (16:9) contendo o CaptureSceneCanvas real
+        val previewCard = FrameLayout(this).apply {
+            background = NeonTheme.previewCardBackground()
+            contentDescription = "Prévia da Captura"
+        }
+
+        val canvas = CaptureSceneCanvas(this).apply {
+            contentDescription = "Prévia do cenário: mover com um dedo; redimensionar com dois."
+            layers = activeCaptureScene()?.sources ?: emptyList()
+            selectedLayerId = activeCaptureLayerId
+            frame = if (ScreenCaptureService.isCapturing) ScreenCaptureService.previewFrame else null
+            onSelection = { id ->
+                activeCaptureLayerId = id
+                refreshCaptureCanvas()
+            }
+            onChange = {
+                persistCaptureScenes()
+                refreshCaptureCanvas()
+            }
+        }
+        captureCanvas = canvas
+
+        val host = FrameLayout(this).apply {
+            addView(canvas, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ))
+        }
+        captureCanvasHost = host
+        host.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateCaptureBrowserSource() }
+        previewCard.addView(host, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+
+        // Badge "● Preview" no canto superior esquerdo
+        val previewBadge = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = shape(Color.argb(210, 7, 28, 32), Color.rgb(0, 180, 100), 12)
+            setPadding(dp(8), dp(4), dp(10), dp(4))
+        }
+        val greenDot = View(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(NeonTheme.green)
+            }
+        }
+        previewBadge.addView(greenDot, LinearLayout.LayoutParams(dp(8), dp(8)).apply {
+            rightMargin = dp(6)
+        })
+        val previewLabel = text(if (ScreenCaptureService.isCapturing) "Ao Vivo" else "Preview", 11f, Color.WHITE).apply {
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        }
+        previewBadge.addView(previewLabel)
+        previewCard.addView(previewBadge, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.START
+        ).apply {
+            setMargins(dp(12), dp(12), 0, 0)
+        })
+
+        // Ícone indicador no canto superior direito do Preview
+        val cornerFull = ImageView(this).apply {
+            setImageDrawable(NeonIcon("fullscreen", Color.WHITE))
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            contentDescription = "Editor de Cena"
+            setOnClickListener {
+                Toast.makeText(this@MainActivity, "Prévia interativa: arraste para mover, use dois dedos para dimensionar.", Toast.LENGTH_SHORT).show()
+            }
+        }
+        previewCard.addView(cornerFull, FrameLayout.LayoutParams(
+            dp(32), dp(32),
+            Gravity.TOP or Gravity.END
+        ).apply {
+            setMargins(0, dp(10), dp(10), 0)
+        })
+
+        // 2. Os quatro botões: Cenas, Fontes, Vídeo, Áudio em grade 2x2
+        val buttonsGrid = GridLayout(this).apply {
+            columnCount = 2
+            alignmentMode = GridLayout.ALIGN_BOUNDS
+        }
+        val tileHeight = dp(if (isLandscape) 70 else 88)
+
+        fun addCaptureMenuTile(title: String, iconName: String, cardKind: String, accent: Int, col: Int, row: Int, onClick: () -> Unit) {
+            val btn = TextView(this).apply {
+                text = title
+                textSize = 13f
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                background = NeonTheme.tileCard(cardKind)
+                setPadding(dp(6), dp(8), dp(6), dp(8))
+                val iconSize = dp(28)
+                val icon = NeonIcon(iconName, accent).apply {
+                    setBounds(0, 0, iconSize, iconSize)
+                }
+                setCompoundDrawables(null, icon, null, null)
+                compoundDrawablePadding = dp(6)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { onClick() }
+            }
+            buttonsGrid.addView(btn, GridLayout.LayoutParams().apply {
+                width = 0
+                height = tileHeight
+                columnSpec = GridLayout.spec(col, 1f)
+                rowSpec = GridLayout.spec(row)
+                setMargins(dp(5), dp(5), dp(5), dp(5))
+            })
+        }
+
+        addCaptureMenuTile("Cenas", "▱", "cenario", NeonTheme.cyan, 0, 0) { openCenasDialog() }
+        addCaptureMenuTile("Fontes", "🖼", "overlay", NeonTheme.blue, 1, 0) { openFontesDialog() }
+        addCaptureMenuTile("Vídeo", "video", "camera", NeonTheme.purple, 0, 1) { openVideoDialog() }
+        addCaptureMenuTile("Áudio", "audio", "camera", NeonTheme.purple, 1, 1) { openAudioDialog() }
+
+        if (isLandscape) {
+            val previewHeight = dp(210)
+            container.addView(previewCard, LinearLayout.LayoutParams(0, previewHeight, 1.15f).apply {
+                rightMargin = dp(12)
+            })
+            container.addView(buttonsGrid, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        } else {
+            val previewHeight = dp(200)
+            container.addView(previewCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, previewHeight).apply {
+                bottomMargin = dp(14)
+            })
+            container.addView(buttonsGrid, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+
+        return container
+    }
+
+    private fun createGamerDialog(title: String, buildContent: (LinearLayout, AlertDialog) -> Unit) {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(Color.rgb(18, 14, 42), Color.rgb(8, 10, 26))
+            ).apply {
+                cornerRadius = dp(18).toFloat()
+                setStroke(dp(1), NeonTheme.purple)
+            }
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(12))
+        }
+        header.addView(text(title, 16f, Color.WHITE).apply {
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val closeBtn = text("✕", 17f, Color.rgb(200, 190, 230)).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+        }
+        header.addView(closeBtn)
+        root.addView(header)
+
+        val contentContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(contentContainer)
+        }
+        root.addView(scroll, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            0, 1f
+        ))
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(root)
+            .create()
+        closeBtn.setOnClickListener { dialog.dismiss() }
+
+        buildContent(contentContainer, dialog)
+
+        dialog.show()
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        val width = (resources.displayMetrics.widthPixels * 0.92f).toInt()
+        val maxHeight = (resources.displayMetrics.heightPixels * 0.82f).toInt()
+        dialog.window?.setLayout(width, maxHeight)
+    }
+
+    private fun openCenasDialog() {
+        createGamerDialog("Cenas") { contentContainer, _ ->
+            fun populate() {
+                contentContainer.removeAllViews()
+
+                val activeScene = activeCaptureScene()
+                val headerInfo = text("Cena ativa: ${activeScene?.name ?: "Nenhuma"}", 12f, Color.rgb(180, 175, 215)).apply {
+                    setPadding(0, 0, 0, dp(10))
+                }
+                contentContainer.addView(headerInfo)
+
+                captureScenes.forEach { scene ->
+                    val isSelected = scene.id == activeCaptureSceneId
+                    val item = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(12), dp(10), dp(8), dp(10))
+                        background = if (isSelected) {
+                            GradientDrawable(
+                                GradientDrawable.Orientation.TL_BR,
+                                intArrayOf(Color.rgb(85, 18, 140), Color.rgb(38, 10, 75))
+                            ).apply {
+                                cornerRadius = dp(12).toFloat()
+                                setStroke(dp(1), NeonTheme.cyan)
+                            }
+                        } else {
+                            shape(Color.rgb(14, 18, 44), Color.rgb(45, 52, 90), 12)
+                        }
+                        isClickable = true
+                        isFocusable = true
+                        setOnClickListener {
+                            activeCaptureSceneId = scene.id
+                            activeCaptureLayerId = scene.sources.lastOrNull()?.id
+                            persistCaptureScenes()
+                            refreshCaptureCanvas()
+                            populate()
+                        }
+                    }
+
+                    val indicator = text(if (isSelected) "●" else "○", 16f, if (isSelected) NeonTheme.cyan else Color.rgb(130, 135, 170)).apply {
+                        setPadding(0, 0, dp(10), 0)
+                    }
+                    item.addView(indicator)
+
+                    val texts = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(text(scene.name, 14f, Color.WHITE).apply {
+                            typeface = Typeface.create("sans-serif-medium", if (isSelected) Typeface.BOLD else Typeface.NORMAL)
+                        })
+                        addView(text("${scene.sources.size} fontes", 11f, Color.rgb(165, 160, 200)))
+                    }
+                    item.addView(texts, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                    // Botão Renomear
+                    val renameBtn = text("✎", 16f, NeonTheme.cyan).apply {
+                        setPadding(dp(8), dp(6), dp(8), dp(6))
+                        contentDescription = "Renomear ${scene.name}"
+                        setOnClickListener {
+                            val input = EditText(this@MainActivity).apply {
+                                setSingleLine(true)
+                                setText(scene.name)
+                                selectAll()
+                                setTextColor(Color.WHITE)
+                                setHintTextColor(Color.GRAY)
+                                background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+                                setPadding(dp(12), dp(10), dp(12), dp(10))
+                            }
+                            AlertDialog.Builder(this@MainActivity)
+                                .setTitle("Renomear cena")
+                                .setView(input)
+                                .setPositiveButton("Salvar") { _, _ ->
+                                    val newName = input.text.toString().trim()
+                                    if (newName.isNotBlank()) {
+                                        scene.name = newName.take(50)
+                                        persistCaptureScenes()
+                                        refreshCaptureCanvas()
+                                        populate()
+                                    }
+                                }
+                                .setNegativeButton("Cancelar", null)
+                                .show()
+                        }
+                    }
+                    item.addView(renameBtn)
+
+                    // Botão Excluir
+                    val deleteBtn = text("✕", 16f, Color.rgb(250, 70, 95)).apply {
+                        setPadding(dp(8), dp(6), dp(8), dp(6))
+                        contentDescription = "Excluir ${scene.name}"
+                        setOnClickListener {
+                            if (captureScenes.size <= 1) {
+                                Toast.makeText(this@MainActivity, "Mantenha ao menos uma cena.", Toast.LENGTH_SHORT).show()
+                                return@setOnClickListener
+                            }
+                            AlertDialog.Builder(this@MainActivity)
+                                .setTitle("Remover cena?")
+                                .setMessage("Tem certeza que deseja remover '${scene.name}'?")
+                                .setPositiveButton("Remover") { _, _ ->
+                                    captureScenes.removeAll { it.id == scene.id }
+                                    if (activeCaptureSceneId == scene.id) {
+                                        activeCaptureSceneId = captureScenes.first().id
+                                        activeCaptureLayerId = activeCaptureScene()?.sources?.lastOrNull()?.id
+                                    }
+                                    persistCaptureScenes()
+                                    refreshCaptureCanvas()
+                                    populate()
+                                }
+                                .setNegativeButton("Cancelar", null)
+                                .show()
+                        }
+                    }
+                    item.addView(deleteBtn)
+
+                    contentContainer.addView(item, LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        bottomMargin = dp(8)
+                    })
+                }
+
+                // Botão + Nova Cena
+                val addBtn = TextView(this).apply {
+                    text = "+ Nova Cena"
+                    textSize = 13.5f
+                    setTextColor(Color.WHITE)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    gravity = Gravity.CENTER
+                    background = NeonTheme.tileCard("add_primary")
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener {
+                        val input = EditText(this@MainActivity).apply {
+                            setSingleLine(true)
+                            setText("Nova cena")
+                            selectAll()
+                            setTextColor(Color.WHITE)
+                            setHintTextColor(Color.GRAY)
+                            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+                            setPadding(dp(12), dp(10), dp(12), dp(10))
+                        }
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Criar cena")
+                            .setView(input)
+                            .setPositiveButton("Salvar") { _, _ ->
+                                val name = input.text.toString().trim()
+                                if (name.isNotBlank()) {
+                                    val created = Scene(java.util.UUID.randomUUID().toString(), name.take(50), mutableListOf())
+                                    captureScenes.add(created)
+                                    activeCaptureSceneId = created.id
+                                    activeCaptureLayerId = null
+                                    persistCaptureScenes()
+                                    refreshCaptureCanvas()
+                                    populate()
+                                }
+                            }
+                            .setNegativeButton("Cancelar", null)
+                            .show()
+                    }
+                }
+                contentContainer.addView(addBtn, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(44)
+                ).apply {
+                    topMargin = dp(6)
+                })
+            }
+            populate()
+        }
+    }
+
+    private fun openFontesDialog() {
+        createGamerDialog("Fontes / Camadas") { contentContainer, _ ->
+            fun populate() {
+                contentContainer.removeAllViews()
+                val scene = activeCaptureScene() ?: return
+
+                val subHeader = text("Cena: ${scene.name}", 12f, Color.rgb(180, 175, 215)).apply {
+                    setPadding(0, 0, 0, dp(10))
+                }
+                contentContainer.addView(subHeader)
+
+                // Botão + Adicionar Fonte
+                val addSourceBtn = TextView(this).apply {
+                    text = "+ Adicionar Fonte"
+                    textSize = 13.5f
+                    setTextColor(Color.WHITE)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    gravity = Gravity.CENTER
+                    background = NeonTheme.tileCard("add_primary")
+                    setPadding(dp(12), dp(11), dp(12), dp(11))
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener {
+                        val types = arrayOf("Captura de tela", "Texto", "Browser Source")
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Adicionar fonte")
+                            .setItems(types) { _, which ->
+                                when (which) {
+                                    0 -> {
+                                        if (scene.sources.any { it.type == "screen" }) {
+                                            Toast.makeText(this@MainActivity, "A cena já possui captura de tela.", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            val layer = CaptureLayer(java.util.UUID.randomUUID().toString(), "screen", "Captura de tela", 0f, 0f, 1f, 1f)
+                                            scene.sources.add(layer)
+                                            activeCaptureLayerId = layer.id
+                                            persistCaptureScenes()
+                                            refreshCaptureCanvas()
+                                            populate()
+                                        }
+                                    }
+                                    1 -> {
+                                        val input = EditText(this@MainActivity).apply {
+                                            setSingleLine(true)
+                                            setText("Texto")
+                                            selectAll()
+                                            setTextColor(Color.WHITE)
+                                            setHintTextColor(Color.GRAY)
+                                            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+                                            setPadding(dp(12), dp(10), dp(12), dp(10))
+                                        }
+                                        AlertDialog.Builder(this@MainActivity)
+                                            .setTitle("Conteúdo do texto")
+                                            .setView(input)
+                                            .setPositiveButton("Adicionar") { _, _ ->
+                                                val content = input.text.toString().trim()
+                                                if (content.isNotEmpty()) {
+                                                    val layer = CaptureLayer(java.util.UUID.randomUUID().toString(), "text", content.take(80), 0.15f, 0.15f, 0.6f, 0.25f)
+                                                    scene.sources.add(layer)
+                                                    activeCaptureLayerId = layer.id
+                                                    persistCaptureScenes()
+                                                    refreshCaptureCanvas()
+                                                    populate()
+                                                }
+                                            }
+                                            .setNegativeButton("Cancelar", null)
+                                            .show()
+                                        input.requestFocus()
+                                    }
+                                    2 -> {
+                                        val input = EditText(this@MainActivity).apply {
+                                            hint = "https://.../cenarios/receiver/..."
+                                            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+                                            setSingleLine(true)
+                                            setTextColor(Color.WHITE)
+                                            setHintTextColor(Color.GRAY)
+                                            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+                                            setPadding(dp(12), dp(10), dp(12), dp(10))
+                                        }
+                                        AlertDialog.Builder(this@MainActivity)
+                                            .setTitle("Browser Source - URL")
+                                            .setView(input)
+                                            .setPositiveButton("Adicionar") { _, _ ->
+                                                val url = input.text.toString().trim()
+                                                val uri = Uri.parse(url)
+                                                if (uri.scheme != "https" || uri.host.isNullOrBlank()) {
+                                                    Toast.makeText(this@MainActivity, "Informe uma URL HTTPS válida.", Toast.LENGTH_LONG).show()
+                                                } else {
+                                                    val layer = CaptureLayer(
+                                                        java.util.UUID.randomUUID().toString(), "browser", "Browser Source",
+                                                        0f, 0f, 1f, 1f, url = url
+                                                    )
+                                                    scene.sources.add(layer)
+                                                    activeCaptureLayerId = layer.id
+                                                    persistCaptureScenes()
+                                                    refreshCaptureCanvas()
+                                                    populate()
+                                                }
+                                            }
+                                            .setNegativeButton("Cancelar", null)
+                                            .show()
+                                        input.requestFocus()
+                                    }
+                                }
+                            }
+                            .show()
+                    }
+                }
+                contentContainer.addView(addSourceBtn, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(44)
+                ).apply {
+                    bottomMargin = dp(12)
+                })
+
+                val sources = scene.sources
+                if (sources.isEmpty()) {
+                    val emptyLabel = text("Nenhuma fonte adicionada à cena.", 12f, Color.rgb(160, 155, 190)).apply {
+                        gravity = Gravity.CENTER
+                        setPadding(0, dp(16), 0, dp(16))
+                    }
+                    contentContainer.addView(emptyLabel)
+                } else {
+                    sources.asReversed().forEach { layer ->
+                        val isSelected = layer.id == activeCaptureLayerId
+                        val item = LinearLayout(this).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(dp(8), dp(6), dp(8), dp(6))
+                            background = if (isSelected) {
+                                shape(Color.rgb(38, 14, 68), NeonTheme.cyan, 10)
+                            } else {
+                                shape(Color.rgb(14, 18, 42), Color.rgb(45, 52, 90), 10)
+                            }
+                        }
+
+                        val icon = when (layer.type) {
+                            "screen" -> "▣"
+                            "text" -> "T"
+                            "browser" -> "▤"
+                            else -> "▤"
+                        }
+                        val nameLabel = text("$icon  ${layer.name}", 13f, Color.WHITE).apply {
+                            maxLines = 1
+                            ellipsize = android.text.TextUtils.TruncateAt.END
+                            gravity = Gravity.CENTER_VERTICAL
+                            setOnClickListener {
+                                activeCaptureLayerId = layer.id
+                                refreshCaptureCanvas()
+                                populate()
+                            }
+                        }
+                        item.addView(nameLabel, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                        // Visibilidade
+                        val visBtn = text(if (layer.visible) "◉" else "⊘", 16f, if (layer.visible) NeonTheme.purple else Color.GRAY).apply {
+                            gravity = Gravity.CENTER
+                            setPadding(dp(6), dp(4), dp(6), dp(4))
+                            setOnClickListener {
+                                layer.visible = !layer.visible
+                                persistCaptureScenes()
+                                refreshCaptureCanvas()
+                                populate()
+                            }
+                        }
+                        item.addView(visBtn)
+
+                        // Bloqueio
+                        val lockBtn = text(if (layer.locked) "▣" else "♧", 16f, if (layer.locked) NeonTheme.cyan else Color.rgb(180, 175, 215)).apply {
+                            gravity = Gravity.CENTER
+                            setPadding(dp(6), dp(4), dp(6), dp(4))
+                            setOnClickListener {
+                                layer.locked = !layer.locked
+                                persistCaptureScenes()
+                                refreshCaptureCanvas()
+                                populate()
+                            }
+                        }
+                        item.addView(lockBtn)
+
+                        // Subir (↑)
+                        val upBtn = text("↑", 16f, Color.WHITE).apply {
+                            gravity = Gravity.CENTER
+                            setPadding(dp(6), dp(4), dp(6), dp(4))
+                            setOnClickListener {
+                                val idx = sources.indexOfFirst { it.id == layer.id }
+                                if (idx in 0 until sources.size - 1) {
+                                    val itemToMove = sources.removeAt(idx)
+                                    sources.add(idx + 1, itemToMove)
+                                    persistCaptureScenes()
+                                    refreshCaptureCanvas()
+                                    populate()
+                                }
+                            }
+                        }
+                        item.addView(upBtn)
+
+                        // Descer (↓)
+                        val downBtn = text("↓", 16f, Color.WHITE).apply {
+                            gravity = Gravity.CENTER
+                            setPadding(dp(6), dp(4), dp(6), dp(4))
+                            setOnClickListener {
+                                val idx = sources.indexOfFirst { it.id == layer.id }
+                                if (idx > 0) {
+                                    val itemToMove = sources.removeAt(idx)
+                                    sources.add(idx - 1, itemToMove)
+                                    persistCaptureScenes()
+                                    refreshCaptureCanvas()
+                                    populate()
+                                }
+                            }
+                        }
+                        item.addView(downBtn)
+
+                        // Excluir (✕)
+                        val delBtn = text("✕", 16f, Color.rgb(250, 70, 95)).apply {
+                            gravity = Gravity.CENTER
+                            setPadding(dp(6), dp(4), dp(6), dp(4))
+                            setOnClickListener {
+                                sources.remove(layer)
+                                if (activeCaptureLayerId == layer.id) {
+                                    activeCaptureLayerId = sources.lastOrNull()?.id
+                                }
+                                persistCaptureScenes()
+                                refreshCaptureCanvas()
+                                populate()
+                            }
+                        }
+                        item.addView(delBtn)
+
+                        contentContainer.addView(item, LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT, dp(44)
+                        ).apply {
+                            bottomMargin = dp(6)
+                        })
+                    }
+                }
+            }
+            populate()
+        }
+    }
+
+    private fun openVideoDialog() {
+        createGamerDialog("Configurações de Vídeo") { contentContainer, _ ->
+            fun populate() {
+                contentContainer.removeAllViews()
+
+                // 1. Resolução
+                val sec1 = text("RESOLUÇÃO DA CAPTURA", 12f, NeonTheme.cyan).apply {
+                    typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    setPadding(0, 0, 0, dp(8))
+                }
+                contentContainer.addView(sec1)
+
+                val resolutions = listOf(
+                    Pair(854, "480p (econômico)"),
+                    Pair(1280, "720p (padrão)"),
+                    Pair(1920, "1080p (alta resolução)")
+                )
+                val currentRes = capturePrefs.getInt("max_dimension", 1280)
+
+                resolutions.forEach { (size, label) ->
+                    val isSelected = currentRes == size
+                    val item = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(12), dp(10), dp(12), dp(10))
+                        background = if (isSelected) {
+                            shape(Color.rgb(38, 14, 68), NeonTheme.cyan, 10)
+                        } else {
+                            shape(Color.rgb(14, 18, 42), Color.rgb(45, 52, 90), 10)
+                        }
+                        isClickable = true
+                        isFocusable = true
+                        setOnClickListener {
+                            capturePrefs.edit().putInt("max_dimension", size).apply()
+                            populate()
+                        }
+                    }
+                    item.addView(text(if (isSelected) "● " else "○ ", 15f, if (isSelected) NeonTheme.cyan else Color.GRAY))
+                    item.addView(text(label, 13f, Color.WHITE).apply {
+                        typeface = Typeface.create("sans-serif-medium", if (isSelected) Typeface.BOLD else Typeface.NORMAL)
+                    })
+                    contentContainer.addView(item, LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        bottomMargin = dp(6)
+                    })
+                }
+
+                // 2. Taxa de Quadros (FPS)
+                val sec2 = text("TAXA DE QUADROS (FPS)", 12f, NeonTheme.purple).apply {
+                    typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    setPadding(0, dp(12), 0, dp(8))
+                }
+                contentContainer.addView(sec2)
+
+                val currentFps = capturePrefs.getInt("capture_fps", 30)
+                val fpsRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                }
+                listOf(30, 60).forEachIndexed { index, fps ->
+                    val isSelected = currentFps == fps
+                    val fpsBtn = TextView(this).apply {
+                        text = "$fps FPS"
+                        textSize = 13f
+                        gravity = Gravity.CENTER
+                        setTextColor(Color.WHITE)
+                        typeface = Typeface.create("sans-serif-medium", if (isSelected) Typeface.BOLD else Typeface.NORMAL)
+                        background = if (isSelected) {
+                            shape(Color.rgb(38, 14, 68), NeonTheme.purple, 10)
+                        } else {
+                            shape(Color.rgb(14, 18, 42), Color.rgb(45, 52, 90), 10)
+                        }
+                        isClickable = true
+                        isFocusable = true
+                        setOnClickListener {
+                            if (fps == 60 && currentFps != 60) {
+                                AlertDialog.Builder(this@MainActivity)
+                                    .setTitle("Confirmar 60 FPS")
+                                    .setMessage("Essa qualidade consome muita bateria e requer muito desempenho. Tem certeza que quer essa qualidade mesmo?")
+                                    .setPositiveButton("Sim") { _, _ ->
+                                        capturePrefs.edit().putInt("capture_fps", 60).apply()
+                                        populate()
+                                    }
+                                    .setNegativeButton("Cancelar", null)
+                                    .show()
+                            } else {
+                                capturePrefs.edit().putInt("capture_fps", fps).apply()
+                                populate()
+                            }
+                        }
+                    }
+                    fpsRow.addView(fpsBtn, LinearLayout.LayoutParams(0, dp(42), 1f).apply {
+                        if (index > 0) leftMargin = dp(8)
+                    })
+                }
+                contentContainer.addView(fpsRow, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                ))
+
+                // 3. Taxa de Bits (Bitrate)
+                val sec3 = text("TAXA DE BITS (BITRATE)", 12f, NeonTheme.cyan).apply {
+                    typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    setPadding(0, dp(12), 0, dp(8))
+                }
+                contentContainer.addView(sec3)
+
+                val bitrates = (2000..10000 step 1000).toList()
+                val currentBitrate = capturePrefs.getInt("capture_bitrate_kbps", 4500)
+                val bitrateSpinner = Spinner(this).apply {
+                    adapter = ArrayAdapter(
+                        this@MainActivity,
+                        android.R.layout.simple_spinner_dropdown_item,
+                        bitrates.map { "$it Kbps" }
+                    )
+                    val sel = bitrates.indexOfFirst { it >= currentBitrate }.coerceAtLeast(0)
+                    setSelection(sel)
+                    background = shape(Color.rgb(14, 18, 42), NeonTheme.purple, 10)
+                    setPadding(dp(12), dp(8), dp(12), dp(8))
+                    var skipFirst = true
+                    onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                        override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                            if (skipFirst) { skipFirst = false; return }
+                            capturePrefs.edit().putInt("capture_bitrate_kbps", bitrates[position]).apply()
+                        }
+                        override fun onNothingSelected(parent: AdapterView<*>?) {}
+                    }
+                }
+                contentContainer.addView(bitrateSpinner, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(44)
+                ))
+            }
+            populate()
+        }
+    }
+
+    private fun openAudioDialog() {
+        createGamerDialog("Áudio da Captura") { contentContainer, _ ->
+            fun populate() {
+                contentContainer.removeAllViews()
+
+                fun audioChannel(name: String, key: String, symbol: String) {
+                    val card = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        background = shape(Color.rgb(14, 18, 44), Color.rgb(45, 52, 90), 12)
+                        setPadding(dp(14), dp(12), dp(14), dp(12))
+                    }
+                    val topRow = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                    }
+                    topRow.addView(text("$symbol  $name", 13.5f, Color.WHITE).apply {
+                        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                    val isEnabled = capturePrefs.getBoolean("${key}_enabled", true)
+                    val switch = Switch(this).apply {
+                        isChecked = isEnabled
+                        setOnCheckedChangeListener { _, checked ->
+                            capturePrefs.edit().putBoolean("${key}_enabled", checked).apply()
+                        }
+                    }
+                    topRow.addView(switch)
+                    card.addView(topRow)
+
+                    val sliderRow = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(0, dp(8), 0, 0)
+                    }
+                    val savedVol = capturePrefs.getInt("${key}_volume", if (key == "mic") 75 else 85)
+                    val volLabel = text("$savedVol%", 12.5f, NeonTheme.cyan).apply {
+                        gravity = Gravity.CENTER
+                    }
+                    val slider = SeekBar(this).apply {
+                        max = 100
+                        progress = savedVol
+                        setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                                volLabel.text = "$progress%"
+                                if (fromUser) {
+                                    capturePrefs.edit().putInt("${key}_volume", progress).apply()
+                                }
+                            }
+                            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+                        })
+                    }
+                    sliderRow.addView(slider, LinearLayout.LayoutParams(0, dp(34), 1f))
+                    sliderRow.addView(volLabel, LinearLayout.LayoutParams(dp(44), LinearLayout.LayoutParams.WRAP_CONTENT))
+
+                    card.addView(sliderRow)
+                    contentContainer.addView(card, LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        bottomMargin = dp(12)
+                    })
+                }
+
+                audioChannel("Microfone", "mic", "♩")
+                audioChannel("Áudio interno", "internal", "♫")
+            }
+            populate()
+        }
+    }
+
+    private fun openCaptureMoreDialog() {
+        val options = arrayOf("Recarregar prévia", "Sobre o editor")
+        AlertDialog.Builder(this)
+            .setTitle("Opções de Captura")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> {
+                        refreshCaptureCanvas()
+                        Toast.makeText(this, "Prévia atualizada.", Toast.LENGTH_SHORT).show()
+                    }
+                    1 -> Toast.makeText(this, "Prévia interativa: arraste para mover ou redimensionar camadas.", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Fechar", null)
+            .show()
+    }
+
+    // ==========================================
+    // TELA 2: TRANSMISSÃO (PLATAFORMAS + CONTROLES)
+    // ==========================================
+
+    private fun buildTransmissaoScreen(isLandscape: Boolean): View {
+        val container = LinearLayout(this).apply {
+            orientation = if (isLandscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+
+        // 1. Container Selecionar Plataformas
+        val platformsCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = NeonTheme.actionPanelBackground()
+            setPadding(dp(12), dp(10), dp(12), dp(12))
+        }
+
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        headerRow.addView(text("Selecionar Plataformas", 14f, Color.WHITE).apply {
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val refreshConnBtn = text("🔄 Atualizar", 11f, NeonTheme.cyan).apply {
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            background = shape(Color.rgb(12, 24, 52), NeonTheme.cyan, 12)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                Toast.makeText(this@MainActivity, "Consultando conexões no LiveNexus...", Toast.LENGTH_SHORT).show()
+                checkStreamingPlatformsStatus {
+                    Toast.makeText(this@MainActivity, "Status das plataformas atualizado!", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        headerRow.addView(refreshConnBtn)
+        platformsCard.addView(headerRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(10)
+        })
+
+        val platformsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        fun makePlatformTile(slug: String, name: String, iconSymbol: String): View {
+            val prefKey = "stream_$slug"
+            val username = capturePrefs.getString("${slug}_username", "") ?: ""
+            val hasCustomKey = !capturePrefs.getString("key_$slug", "").isNullOrBlank()
+            val isConn = (platformConnected[slug] == true && (username.isNotBlank() || hasCustomKey)) ||
+                username.isNotBlank() || hasCustomKey
+            val selected = capturePrefs.getBoolean(prefKey, false) && isConn
+
+            val tile = FrameLayout(this).apply {
+                background = NeonTheme.platformCardBackground(selected)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    if (!isConn) {
+                        openPlatformAuthDialog(slug)
+                    } else {
+                        capturePrefs.edit().putBoolean(prefKey, !selected).apply()
+                        render()
+                    }
+                }
+                setOnLongClickListener {
+                    val options = arrayOf(
+                        if (isConn) "Alternar Seleção (${if (selected) "Selecionado" else "Desmarcado"})" else "Fazer Login",
+                        "Gerenciar Autenticação / Login",
+                        "Desconectar e Apagar Conta"
+                    )
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Conta - $name")
+                        .setItems(options) { _, which ->
+                            when (which) {
+                                0 -> {
+                                    if (!isConn) openPlatformAuthDialog(slug)
+                                    else {
+                                        capturePrefs.edit().putBoolean(prefKey, !selected).apply()
+                                        render()
+                                    }
+                                }
+                                1 -> openPlatformAuthDialog(slug)
+                                2 -> {
+                                    capturePrefs.edit()
+                                        .remove("key_$slug")
+                                        .remove("${slug}_username")
+                                        .remove("${slug}_token")
+                                        .remove("${slug}_login")
+                                        .remove("${slug}_user_id")
+                                        .putBoolean(prefKey, false)
+                                        .apply()
+                                    platformConnected[slug] = false
+                                    Toast.makeText(this@MainActivity, "Conta $name desconectada.", Toast.LENGTH_SHORT).show()
+                                    render()
+                                }
+                            }
+                        }
+                        .setNegativeButton("Fechar", null)
+                        .show()
+                    true
+                }
+            }
+
+            val content = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(4), dp(8), dp(4), dp(8))
+            }
+            val iconView = ImageView(this).apply {
+                setImageDrawable(NeonIcon(iconSymbol, Color.WHITE))
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+            content.addView(iconView, LinearLayout.LayoutParams(dp(28), dp(28)).apply {
+                bottomMargin = dp(4)
+            })
+            content.addView(text(name, 12f, Color.WHITE).apply {
+                gravity = Gravity.CENTER
+                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            })
+
+            val statusLabel = if (isConn) {
+                if (username.isNotBlank()) "● @$username" else "● Autenticado"
+            } else {
+                "○ Fazer Login"
+            }
+            val statusColor = if (isConn) NeonTheme.green else Color.rgb(180, 185, 215)
+            val statusText = text(statusLabel, 10f, statusColor).apply {
+                gravity = Gravity.CENTER
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            content.addView(statusText, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(2) })
+
+            tile.addView(content, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ))
+
+            // Checkbox no canto superior direito
+            val chk = ImageView(this).apply {
+                setImageDrawable(NeonIcon(
+                    if (selected) "checkbox_on" else "checkbox_off",
+                    if (selected) NeonTheme.purple else (if (isConn) Color.rgb(130, 140, 180) else Color.rgb(80, 90, 120))
+                ))
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+            tile.addView(chk, FrameLayout.LayoutParams(dp(18), dp(18), Gravity.TOP or Gravity.END).apply {
+                setMargins(0, dp(6), dp(6), 0)
+            })
+
+            return tile
+        }
+
+        val tileH = dp(if (isLandscape) 82 else 92)
+        platformsRow.addView(makePlatformTile("youtube", "YouTube", "youtube"),
+            LinearLayout.LayoutParams(0, tileH, 1f).apply { rightMargin = dp(6) })
+        platformsRow.addView(makePlatformTile("twitch", "Twitch", "twitch"),
+            LinearLayout.LayoutParams(0, tileH, 1f).apply { rightMargin = dp(6) })
+        platformsRow.addView(makePlatformTile("kick", "Kick", "kick"),
+            LinearLayout.LayoutParams(0, tileH, 1f))
+        platformsCard.addView(platformsRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // Barra inferior de opções rápidas de chave RTMP
+        val rtmpActionsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        val rtmpBtn = text("🔑 Inserir Chaves RTMP", 11f, Color.rgb(200, 205, 235)).apply {
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            background = shape(Color.rgb(16, 12, 36), NeonTheme.purple, 10)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                val platforms = arrayOf("YouTube (RTMP)", "Twitch (RTMP)", "Kick (RTMP)")
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Configurar Chave de Transmissão")
+                    .setItems(platforms) { _, which ->
+                        when (which) {
+                            0 -> openStreamKeyDialog("youtube", "YouTube")
+                            1 -> openStreamKeyDialog("twitch", "Twitch")
+                            2 -> openStreamKeyDialog("kick", "Kick")
+                        }
+                    }
+                    .setNegativeButton("Cancelar", null)
+                    .show()
+            }
+        }
+        rtmpActionsRow.addView(rtmpBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            rightMargin = dp(8)
+        })
+        val realModeBadge = text("● Modo Real Ativo", 11f, NeonTheme.green).apply {
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        rtmpActionsRow.addView(realModeBadge, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        platformsCard.addView(rtmpActionsRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // 2. Container Transmissão (Status e Ações)
+        val controlsColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        if (isTransmitting) {
+            // Painel Ao Vivo com Telemetria e Cronômetro
+            val livePanel = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = NeonTheme.actionPanelBackground()
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+            }
+
+            val liveHeader = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val liveBadge = text("● AO VIVO", 11f, Color.WHITE).apply {
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                background = shape(Color.rgb(220, 20, 60), Color.rgb(255, 64, 92), 10)
+                typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            }
+            liveHeader.addView(liveBadge)
+            val elapsed = if (transmissionStartTime > 0) formatElapsedTime(System.currentTimeMillis() - transmissionStartTime) else "00:00"
+            val timerText = text(elapsed, 20f, Color.WHITE).apply {
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            }
+            liveHeader.addView(timerText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            livePanel.addView(liveHeader, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+            })
+
+            // Plataformas ativas
+            val activePlatforms = mutableListOf<String>()
+            if (capturePrefs.getBoolean("stream_youtube", false)) activePlatforms.add("YouTube")
+            if (capturePrefs.getBoolean("stream_twitch", false)) activePlatforms.add("Twitch")
+            if (capturePrefs.getBoolean("stream_kick", false)) activePlatforms.add("Kick")
+
+            val activePillsRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            activePillsRow.addView(text("Transmitindo para:", 11.5f, Color.rgb(180, 185, 215)).apply {
+                setPadding(0, 0, dp(6), 0)
+            })
+            activePlatforms.forEach { p ->
+                val username = capturePrefs.getString("${p.lowercase()}_username", "") ?: ""
+                val label = if (username.isNotBlank()) "$p (@$username)" else p
+                val pill = text(label, 10.5f, NeonTheme.cyan).apply {
+                    setPadding(dp(6), dp(2), dp(6), dp(2))
+                    background = shape(Color.rgb(8, 24, 48), NeonTheme.cyan, 8)
+                }
+                activePillsRow.addView(pill, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    rightMargin = dp(4)
+                })
+            }
+            livePanel.addView(activePillsRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(6)
+            })
+
+            // Telemetria técnica da transmissão de tela
+            val resDim = capturePrefs.getInt("max_dimension", 1280)
+            val fpsVal = capturePrefs.getInt("capture_fps", 30)
+            val bitrateVal = capturePrefs.getInt("capture_bitrate_kbps", 4500)
+            val telemetryText = text("Captura: ${resDim}p • $fpsVal FPS • ${bitrateVal} kbps • H.264 / AVC", 10.5f, Color.rgb(140, 220, 180))
+            livePanel.addView(telemetryText)
+
+            controlsColumn.addView(livePanel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(10)
+            })
+
+            // Botão Encerrar Transmissão destacado
+            val stopBtn = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = NeonTheme.stopTransmitButtonBackground()
+                setPadding(dp(16), dp(10), dp(16), dp(10))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    stopLiveTransmission()
+                }
+            }
+            val stopSquare = ImageView(this).apply {
+                setImageDrawable(NeonIcon("checkbox_on", Color.rgb(255, 64, 92)))
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+            stopBtn.addView(stopSquare, LinearLayout.LayoutParams(dp(20), dp(20)).apply {
+                rightMargin = dp(10)
+            })
+            stopBtn.addView(text("Encerrar Transmissão", 14f, Color.rgb(255, 200, 210)).apply {
+                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            controlsColumn.addView(stopBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)))
+        } else {
+            val infoCard = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = NeonTheme.actionPanelBackground()
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+            }
+            val broadcastCircle = ImageView(this).apply {
+                setImageDrawable(NeonIcon("broadcast", NeonTheme.purple))
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                background = shape(Color.rgb(36, 12, 60), NeonTheme.purple, 24)
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+            }
+            infoCard.addView(broadcastCircle, LinearLayout.LayoutParams(dp(44), dp(44)).apply {
+                rightMargin = dp(12)
+            })
+            val infoText = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(text("Transmissão", 14f, Color.WHITE).apply {
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                })
+                addView(text("Inicie a transmissão nas plataformas selecionadas.", 11.5f, Color.rgb(185, 175, 215)))
+            }
+            infoCard.addView(infoText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            controlsColumn.addView(infoCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(10)
+            })
+
+            // Botão "((•)) Iniciar Transmissão >"
+            val startBtn = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = NeonTheme.transmitButtonBackground()
+                setPadding(dp(16), dp(10), dp(16), dp(10))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    handleStartTransmissionClick()
+                }
+            }
+            val transmitIcon = ImageView(this).apply {
+                setImageDrawable(NeonIcon("broadcast", Color.WHITE))
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+            startBtn.addView(transmitIcon, LinearLayout.LayoutParams(dp(22), dp(22)).apply {
+                rightMargin = dp(10)
+            })
+            startBtn.addView(text("Iniciar Transmissão", 14f, Color.WHITE).apply {
+                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            val arrowRight = ImageView(this).apply {
+                setImageDrawable(NeonIcon("arrow_right", Color.WHITE))
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+            startBtn.addView(arrowRight, LinearLayout.LayoutParams(dp(18), dp(18)))
+            controlsColumn.addView(startBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)).apply {
+                bottomMargin = dp(8)
+            })
+
+            // Botão "[ ] Encerrar Transmissão"
+            val stopBtn = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = NeonTheme.stopTransmitButtonBackground()
+                setPadding(dp(16), dp(10), dp(16), dp(10))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    Toast.makeText(this@MainActivity, "Nenhuma transmissão ativa.", Toast.LENGTH_SHORT).show()
+                }
+            }
+            val stopSquare = ImageView(this).apply {
+                setImageDrawable(NeonIcon("checkbox_off", Color.rgb(180, 185, 215)))
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+            stopBtn.addView(stopSquare, LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                rightMargin = dp(10)
+            })
+            stopBtn.addView(text("Encerrar Transmissão", 13.5f, Color.rgb(210, 215, 235)).apply {
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            })
+            controlsColumn.addView(stopBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
+        }
+
+        if (isLandscape) {
+            container.addView(platformsCard, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.1f).apply {
+                rightMargin = dp(12)
+            })
+            container.addView(controlsColumn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        } else {
+            container.addView(platformsCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(10)
+            })
+            container.addView(controlsColumn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+
+        return container
+    }
+
+    // ==========================================
+    // NAVEGAÇÃO E LAYOUT PRINCIPAL (VERTICAL / HORIZONTAL)
+    // ==========================================
 
     private fun render() {
         if (!authenticated || isDestroyed) return
@@ -285,94 +2931,257 @@ class MainActivity : Activity() {
         closeLoginBrowsers()
         panel?.dispose()
         panel = null
+
+        val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+            orientation = if (isLandscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
             background = NeonTheme.backdrop()
-            setPadding(dp(10), dp(10), dp(10), dp(10))
+            val hPad = dp(if (isLandscape) 10 else 10)
+            val vPad = dp(if (isLandscape) 8 else 8)
+            setPadding(hPad, vPad, hPad, vPad)
         }
-        root.addView(NeonHeader(this), LinearLayout.LayoutParams(-1, dp(88)))
-        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        fun option(label: String, onTap: () -> Unit) {
-            body.addView(text(label, 16f).apply {
-                setPadding(dp(16), dp(12), dp(16), dp(12)); background = NeonTheme.card(true)
-                setOnClickListener { onTap() }
-            }, LinearLayout.LayoutParams(-1, dp(64)).apply { bottomMargin = dp(10) })
-        }
-        when (page) {
-            0 -> {
-                if (!Settings.canDrawOverlays(this)) option("Autorizar sobreposição automática") { permission() }
-                panel = ControllerPanel(this, false)
-                body.addView(panel)
-            }
-            1 -> {
-                body.addView(text("Conta LiveNexus conectada.", 16f))
-                option("Desconectar conta") {
-                    ControllerRuntime.signedIn = false
-                    stopService(Intent(this, OverlayService::class.java))
-                    LiveNexusApi.logout()
-                    panel?.dispose()
-                    showLogin()
-                }
-            }
-            else -> {
-                option("Editor de captura de tela") {
-                    startActivity(Intent(this, ScreenCaptureEditorActivity::class.java))
-                }
-                option("Desconectar conta") {
-                    ControllerRuntime.signedIn = false
-                    stopService(Intent(this, OverlayService::class.java))
-                    LiveNexusApi.logout()
-                    panel?.dispose()
-                    showLogin()
-                }
-                option("Permissão de sobreposição") { permission() }
-                body.addView(text("Minimize para mostrar o botão flutuante.\nAo voltar ao aplicativo, a sobreposição desaparece.", 15f).apply {
-                    setPadding(dp(12), dp(12), dp(12), dp(12))
-                })
-            }
-        }
-        root.addView(ScrollView(this).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        // Navegação leve, com somente a aba ativa destacada, como no template.
-        val nav = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = shape(Color.rgb(7, 11, 33))
-            setPadding(dp(5), dp(4), dp(5), dp(4))
-        }
-        val titles = listOf("Controlador", "Captura", "Transmissão", "Configurações")
-        val symbols = listOf("⌂", "▣", "◉", "⚙")
-        titles.forEachIndexed { index, title ->
-            val active = (index == 0 && page == 0) || (index == 3 && page == 2)
-            val tab = LinearLayout(this).apply {
+
+        data class NavTab(val id: Int, val title: String, val iconSymbol: String)
+        val navTabs = listOf(
+            NavTab(0, "Controlador", "gamepad"),
+            NavTab(1, "Captura", "monitor"),
+            NavTab(2, "Transmissão", "broadcast"),
+            NavTab(3, "Conexão", "link"),
+            NavTab(4, "Configuração", "gear")
+        )
+
+        // No modo Paisagem (Horizontal): Left Navigation Rail
+        if (isLandscape) {
+            val rail = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
-                if (active) background = shape(Color.rgb(38, 10, 79), NeonTheme.purple)
-                addView(text(symbols[index], 21f,
-                    if (active) NeonTheme.purple else Color.WHITE).apply {
-                    gravity = Gravity.CENTER
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(dp(6), dp(4), dp(6), dp(4))
+            }
+
+            // Topo do Rail: Logo LiveNexus Controller
+            val railLogo = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(6), dp(4), dp(6), dp(10))
+            }
+            val logoIcon = View(this).apply {
+                background = object : android.graphics.drawable.Drawable() {
+                    private val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                    override fun draw(canvas: android.graphics.Canvas) {
+                        val w = bounds.width().toFloat()
+                        val h = bounds.height().toFloat()
+                        drawStylizedN(canvas, 0f, 0f, minOf(w, h), p)
+                    }
+                    override fun setAlpha(alpha: Int) {}
+                    override fun setColorFilter(filter: android.graphics.ColorFilter?) {}
+                    override fun getOpacity() = android.graphics.PixelFormat.TRANSLUCENT
+                }
+            }
+            railLogo.addView(logoIcon, LinearLayout.LayoutParams(dp(32), dp(32)).apply {
+                rightMargin = dp(6)
+            })
+            val logoText = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(text("LiveNexus", 13.5f, Color.WHITE).apply {
+                    typeface = Typeface.create("sans-serif", Typeface.BOLD)
                 })
-                addView(text(title, 10f,
-                    if (active) NeonTheme.purple else Color.WHITE).apply {
-                    gravity = Gravity.CENTER
-                    maxLines = 1
-                })
-                setOnClickListener {
-                    when (index) {
-                        0 -> { page = 0; render() }
-                        1 -> startActivity(
-                            Intent(this@MainActivity, ScreenCaptureEditorActivity::class.java)
-                        )
-                        2 -> Toast.makeText(this@MainActivity,
-                            "Transmissão ainda não integrada.", Toast.LENGTH_SHORT).show()
-                        3 -> { page = 2; render() }
+                addView(text("Controller", 10.5f, Color.rgb(180, 175, 210)))
+            }
+            railLogo.addView(logoText)
+            rail.addView(railLogo)
+
+            navTabs.forEach { tab ->
+                val active = page == tab.id
+                val tabBtn = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(7), dp(12), dp(7))
+                    if (active) {
+                        background = GradientDrawable(
+                            GradientDrawable.Orientation.TL_BR,
+                            intArrayOf(Color.rgb(104, 24, 168), Color.rgb(45, 12, 92))
+                        ).apply {
+                            cornerRadius = dp(12).toFloat()
+                            setStroke(dp(1), NeonTheme.purple)
+                        }
+                    } else {
+                        background = null
+                    }
+                    val icon = ImageView(this@MainActivity).apply {
+                        setImageDrawable(NeonIcon(tab.iconSymbol, if (active) Color.WHITE else Color.rgb(190, 190, 220)))
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                    }
+                    addView(icon, LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                        rightMargin = dp(8)
+                    })
+                    addView(text(tab.title, 12f, if (active) Color.WHITE else Color.rgb(190, 190, 220)).apply {
+                        typeface = Typeface.create("sans-serif-medium", if (active) Typeface.BOLD else Typeface.NORMAL)
+                    })
+                    setOnClickListener {
+                        page = tab.id
+                        render()
                     }
                 }
+                rail.addView(tabBtn, LinearLayout.LayoutParams(dp(136), dp(38)).apply {
+                    bottomMargin = dp(4)
+                })
             }
-            nav.addView(tab, LinearLayout.LayoutParams(0, -1, 1f))
+
+            root.addView(rail, LinearLayout.LayoutParams(dp(144), LinearLayout.LayoutParams.MATCH_PARENT).apply {
+                rightMargin = dp(8)
+            })
         }
-        root.addView(nav, LinearLayout.LayoutParams(-1, dp(60)))
+
+        // Área de Conteúdo da Direita (ou Principal no Retrato)
+        val contentArea = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        // Top Bar
+        contentArea.addView(buildTopBar(isLandscape), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(if (isLandscape) 46 else 56)
+        ).apply {
+            bottomMargin = dp(if (isLandscape) 4 else 6)
+        })
+
+        // Body de acordo com a página selecionada
+        val bodyScroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+        }
+        val bodyWrapper = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        when (page) {
+            0 -> {
+                // Tela Controlador
+                panel = ControllerPanel(this, false)
+                bodyWrapper.addView(panel)
+            }
+            1 -> {
+                // Tela Captura
+                bodyWrapper.addView(buildCapturaScreen(isLandscape))
+            }
+            2 -> {
+                // Tela Transmissão
+                bodyWrapper.addView(buildTransmissaoScreen(isLandscape))
+            }
+            3 -> {
+                // Tela Conexão
+                bodyWrapper.addView(text("CONEXÃO", 16f, NeonTheme.cyan).apply {
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    setPadding(dp(8), dp(4), dp(8), dp(6))
+                })
+                bodyWrapper.addView(
+                    text("Servidor: ${LiveNexusApi.baseUrl}\nStatus: Conectado ao LiveNexus.", 14f, Color.rgb(210, 215, 235)).apply {
+                        setPadding(dp(8), dp(2), dp(8), dp(12))
+                    }
+                )
+                fun option(label: String, onTap: () -> Unit) {
+                    bodyWrapper.addView(text(label, 15f).apply {
+                        setPadding(dp(16), dp(10), dp(16), dp(10))
+                        background = NeonTheme.card(false)
+                        setOnClickListener { onTap() }
+                    }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)).apply {
+                        bottomMargin = dp(8)
+                    })
+                }
+                option("Voltar ao painel do Controlador") { page = 0; render() }
+                option("Abrir Editor de Captura de Tela") { page = 1; render() }
+                option("Abrir Plataformas de Transmissão") { page = 2; render() }
+            }
+            else -> {
+                // Tela Configuração (page == 4)
+                bodyWrapper.addView(text("CONFIGURAÇÃO", 16f, NeonTheme.cyan).apply {
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    setPadding(dp(8), dp(4), dp(8), dp(8))
+                })
+                fun option(label: String, onTap: () -> Unit) {
+                    bodyWrapper.addView(text(label, 15f).apply {
+                        setPadding(dp(16), dp(10), dp(16), dp(10))
+                        background = NeonTheme.card(true)
+                        setOnClickListener { onTap() }
+                    }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)).apply {
+                        bottomMargin = dp(8)
+                    })
+                }
+                option("Voltar ao painel do Controlador") { page = 0; render() }
+                option("Permissão de sobreposição") { permission() }
+                option("Desconectar conta") {
+                    ControllerRuntime.signedIn = false
+                    stopService(Intent(this, OverlayService::class.java))
+                    LiveNexusApi.logout()
+                    panel?.dispose()
+                    showLogin()
+                }
+            }
+        }
+
+        bodyScroll.addView(bodyWrapper)
+        contentArea.addView(bodyScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // No modo Retrato (Vertical): Barra Inferior com 5 itens
+        if (!isLandscape) {
+            val nav = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = shape(Color.rgb(8, 10, 28), Color.rgb(48, 38, 92), 18)
+                setPadding(dp(4), dp(4), dp(4), dp(4))
+            }
+
+            navTabs.forEach { tab ->
+                val active = page == tab.id
+                val tabView = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER
+                    setPadding(dp(4), dp(4), dp(4), dp(4))
+                    if (active) {
+                        background = GradientDrawable(
+                            GradientDrawable.Orientation.TL_BR,
+                            intArrayOf(Color.rgb(104, 24, 168), Color.rgb(45, 12, 92))
+                        ).apply {
+                            cornerRadius = dp(14).toFloat()
+                            setStroke(dp(1), NeonTheme.purple)
+                        }
+                    }
+                    val iconView = ImageView(this@MainActivity).apply {
+                        setImageDrawable(NeonIcon(tab.iconSymbol, if (active) Color.WHITE else Color.rgb(205, 205, 230)))
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                    }
+                    val iconDim = dp(20)
+                    addView(iconView, LinearLayout.LayoutParams(iconDim, iconDim).apply {
+                        bottomMargin = dp(2)
+                    })
+                    addView(text(tab.title, 10.5f, Color.WHITE).apply {
+                        gravity = Gravity.CENTER
+                        maxLines = 1
+                        typeface = Typeface.create("sans-serif", if (active) Typeface.BOLD else Typeface.NORMAL)
+                    })
+                    setOnClickListener {
+                        page = tab.id
+                        render()
+                    }
+                }
+                nav.addView(tabView, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+            }
+
+            contentArea.addView(nav, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(56)
+            ).apply { topMargin = dp(4) })
+        }
+
+        if (isLandscape) {
+            root.addView(contentArea, LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f
+            ))
+        } else {
+            root.addView(contentArea, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT
+            ))
+        }
+
         setContentView(root)
         prepareOverlay()
     }
 }
-
