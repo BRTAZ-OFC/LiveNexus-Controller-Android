@@ -50,8 +50,11 @@ class MainActivity : Activity() {
 
     companion object {
         private const val CAPTURE_REQUEST = 7820
+        private const val AUDIO_PERMISSION_REQUEST = 7821
     }
 
+    private var lastMediaProjectionResultCode: Int = 0
+    private var lastMediaProjectionData: Intent? = null
     private var pendingStreamingPlatform: String? = null
     private var pendingStartTransmissionAfterCapture = false
     private var transmissionStartTime = 0L
@@ -387,32 +390,38 @@ class MainActivity : Activity() {
                 pendingStartTransmissionAfterCapture = false
                 return
             }
-            try {
-                val size = capturePrefs.getInt("max_dimension", 1280)
-                val fps = capturePrefs.getInt("capture_fps", 30)
-                val bitrate = capturePrefs.getInt("capture_bitrate_kbps", 4500)
-                val intent = Intent(this, ScreenCaptureService::class.java).apply {
-                    action = ScreenCaptureService.ACTION_START
-                    putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
-                    putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
-                    putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
-                    putExtra(ScreenCaptureService.EXTRA_FPS, fps)
-                    putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
-                }
-                startService(intent)
-                Toast.makeText(this, "Captura de tela iniciada com sucesso.", Toast.LENGTH_SHORT).show()
-                if (pendingStartTransmissionAfterCapture) {
-                    pendingStartTransmissionAfterCapture = false
-                    startLiveTransmission()
-                }
-            } catch (e: Throwable) {
-                ScreenCaptureService.reportError("Captura de tela indisponível neste ambiente")
-                Toast.makeText(this, "Captura de tela indisponível neste ambiente.", Toast.LENGTH_SHORT).show()
-                if (pendingStartTransmissionAfterCapture) {
-                    pendingStartTransmissionAfterCapture = false
-                    startLiveTransmission()
+            lastMediaProjectionResultCode = resultCode
+            lastMediaProjectionData = data
+            if (pendingStartTransmissionAfterCapture) {
+                pendingStartTransmissionAfterCapture = false
+                launchStreamingServiceWithConsent(resultCode, data)
+            } else {
+                try {
+                    val size = capturePrefs.getInt("max_dimension", 1280)
+                    val fps = capturePrefs.getInt("capture_fps", 30)
+                    val bitrate = capturePrefs.getInt("capture_bitrate_kbps", 4500)
+                    val intent = Intent(this, ScreenCaptureService::class.java).apply {
+                        action = ScreenCaptureService.ACTION_START
+                        putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
+                        putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
+                        putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
+                        putExtra(ScreenCaptureService.EXTRA_FPS, fps)
+                        putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
+                    }
+                    startService(intent)
+                    Toast.makeText(this, "Captura de tela iniciada.", Toast.LENGTH_SHORT).show()
+                } catch (e: Throwable) {
+                    ScreenCaptureService.reportError("Captura de tela indisponível")
+                    Toast.makeText(this, "Captura de tela indisponível.", Toast.LENGTH_SHORT).show()
                 }
             }
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == AUDIO_PERMISSION_REQUEST) {
+            initiateScreenCaptureAndStream()
         }
     }
 
@@ -579,7 +588,6 @@ class MainActivity : Activity() {
                 }
 
                 capturePrefs.edit()
-                    .putString("key_twitch", token)
                     .putString("twitch_username", displayName)
                     .putString("twitch_login", loginName)
                     .putString("twitch_token", token)
@@ -594,18 +602,29 @@ class MainActivity : Activity() {
 
                 runOnUiThread {
                     progress.dismiss()
-                    AlertDialog.Builder(this@MainActivity)
-                        .setTitle("Twitch Autenticada!")
-                        .setMessage("Conta @$displayName conectada e autorizada para transmissões ao vivo.")
-                        .setPositiveButton("OK") { _, _ -> render() }
-                        .show()
+                    val hasKey = capturePrefs.getString("key_twitch", "")?.isNotBlank() == true
+                    if (!hasKey) {
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Twitch Conectada (@$displayName)")
+                            .setMessage("Login OAuth realizado com sucesso! Para transmitir, insira a sua Chave de Transmissão (Stream Key) da Twitch:")
+                            .setPositiveButton("Inserir Stream Key") { _, _ ->
+                                openStreamKeyDialog("twitch", "Twitch")
+                            }
+                            .setNegativeButton("Mais tarde") { _, _ -> render() }
+                            .show()
+                    } else {
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Twitch Autenticada!")
+                            .setMessage("Conta @$displayName conectada e pronta para transmissões ao vivo.")
+                            .setPositiveButton("OK") { _, _ -> render() }
+                            .show()
+                    }
                     render()
                 }
             } catch (e: Exception) {
                 runOnUiThread {
                     progress.dismiss()
                     capturePrefs.edit()
-                        .putString("key_twitch", token)
                         .putString("twitch_token", token)
                         .putBoolean("stream_twitch", true)
                         .apply()
@@ -908,7 +927,6 @@ class MainActivity : Activity() {
                 } catch (_: Exception) {}
 
                 capturePrefs.edit()
-                    .putString("key_kick", accessToken)
                     .putString("kick_token", accessToken)
                     .putString("kick_username", username)
                     .putBoolean("stream_kick", true)
@@ -917,11 +935,23 @@ class MainActivity : Activity() {
 
                 runOnUiThread {
                     progress.dismiss()
-                    AlertDialog.Builder(this@MainActivity)
-                        .setTitle("Kick Autenticada!")
-                        .setMessage("Streamer @$username autenticado via OAuth 2.1 com sucesso!")
-                        .setPositiveButton("OK") { _, _ -> render() }
-                        .show()
+                    val hasKey = capturePrefs.getString("key_kick", "")?.isNotBlank() == true
+                    if (!hasKey) {
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Kick Conectada (@$username)")
+                            .setMessage("Login OAuth 2.1 concluído! Para transmitir, insira sua Chave de Transmissão RTMP da Kick:")
+                            .setPositiveButton("Inserir Chave RTMP") { _, _ ->
+                                openKickRtmpDialog()
+                            }
+                            .setNegativeButton("Mais tarde") { _, _ -> render() }
+                            .show()
+                    } else {
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Kick Autenticada!")
+                            .setMessage("Streamer @$username autenticado via OAuth 2.1 com sucesso!")
+                            .setPositiveButton("OK") { _, _ -> render() }
+                            .show()
+                    }
                     render()
                 }
             } catch (e: Exception) {
@@ -1118,26 +1148,106 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun startLiveTransmission() {
-        val selectedPlatforms = mutableListOf<String>()
-        if (capturePrefs.getBoolean("stream_youtube", false)) selectedPlatforms.add("YouTube")
-        if (capturePrefs.getBoolean("stream_twitch", false)) selectedPlatforms.add("Twitch")
-        if (capturePrefs.getBoolean("stream_kick", false)) selectedPlatforms.add("Kick")
+    private fun buildActiveTargetsJson(): String {
+        val array = JSONArray()
+        if (capturePrefs.getBoolean("stream_youtube", false)) {
+            val key = capturePrefs.getString("key_youtube", "")?.trim() ?: ""
+            if (key.isNotEmpty()) {
+                array.put(JSONObject().apply {
+                    put("platform", "YouTube")
+                    put("url", StreamingConfig.RTMP_YOUTUBE)
+                    put("key", key)
+                })
+            }
+        }
+        if (capturePrefs.getBoolean("stream_twitch", false)) {
+            val key = capturePrefs.getString("key_twitch", "")?.trim() ?: ""
+            if (key.isNotEmpty()) {
+                array.put(JSONObject().apply {
+                    put("platform", "Twitch")
+                    put("url", StreamingConfig.RTMP_TWITCH)
+                    put("key", key)
+                })
+            }
+        }
+        if (capturePrefs.getBoolean("stream_kick", false)) {
+            val key = capturePrefs.getString("key_kick", "")?.trim() ?: ""
+            if (key.isNotEmpty()) {
+                array.put(JSONObject().apply {
+                    put("platform", "Kick")
+                    put("url", StreamingConfig.RTMP_KICK)
+                    put("key", key)
+                })
+            }
+        }
+        return array.toString()
+    }
 
-        if (selectedPlatforms.isEmpty()) {
-            Toast.makeText(this, "Selecione ao menos uma plataforma de transmissão.", Toast.LENGTH_SHORT).show()
+    private fun launchStreamingServiceWithConsent(resultCode: Int, data: Intent) {
+        val targetsJson = buildActiveTargetsJson()
+        if (targetsJson == "[]") {
+            Toast.makeText(this, "Nenhuma plataforma com chave de transmissão válida.", Toast.LENGTH_SHORT).show()
             return
         }
 
-        isTransmitting = true
-        transmissionStartTime = System.currentTimeMillis()
-        ControllerRuntime.isTransmitting = true
-        ControllerRuntime.transmissionStartTime = transmissionStartTime
-        OverlayService.refreshVisibility()
-        uiHandler.removeCallbacks(transmissionTimerRunnable)
-        uiHandler.post(transmissionTimerRunnable)
-        Toast.makeText(this, "Transmissão de tela iniciada para: ${selectedPlatforms.joinToString(", ")}!", Toast.LENGTH_LONG).show()
-        render()
+        val progress = AlertDialog.Builder(this)
+            .setTitle("Iniciando Transmissão")
+            .setMessage("Estabelecendo conexão RTMP/RTMPS e codificando vídeo H.264 e áudio AAC...")
+            .setCancelable(false)
+            .create()
+        progress.show()
+
+        try {
+            val size = capturePrefs.getInt("max_dimension", 1280)
+            val fps = capturePrefs.getInt("capture_fps", 30)
+            val bitrate = capturePrefs.getInt("capture_bitrate_kbps", 4500)
+            val intent = Intent(this, ScreenCaptureService::class.java).apply {
+                action = ScreenCaptureService.ACTION_START
+                putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
+                putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
+                putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
+                putExtra(ScreenCaptureService.EXTRA_FPS, fps)
+                putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
+                putExtra(ScreenCaptureService.EXTRA_TARGETS_JSON, targetsJson)
+            }
+            startService(intent)
+
+            uiHandler.postDelayed({
+                progress.dismiss()
+                if (ScreenCaptureService.isLiveStreaming) {
+                    isTransmitting = true
+                    transmissionStartTime = System.currentTimeMillis()
+                    ControllerRuntime.isTransmitting = true
+                    ControllerRuntime.transmissionStartTime = transmissionStartTime
+                    OverlayService.refreshVisibility()
+                    uiHandler.removeCallbacks(transmissionTimerRunnable)
+                    uiHandler.post(transmissionTimerRunnable)
+                    val activeNames = ScreenCaptureService.activePlatforms.joinToString(", ")
+                    Toast.makeText(this, "Transmissão ao vivo iniciada para: $activeNames!", Toast.LENGTH_LONG).show()
+                } else {
+                    isTransmitting = false
+                    val errMsg = ScreenCaptureService.lastError ?: "Falha ao conectar com servidor RTMP"
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Falha na Transmissão")
+                        .setMessage("Não foi possível publicar ao vivo:\n\n$errMsg\n\nVerifique sua conexão e a chave de transmissão.")
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
+                render()
+            }, 1800L)
+        } catch (e: Throwable) {
+            progress.dismiss()
+            ScreenCaptureService.reportError(e.message ?: "Falha ao iniciar transmissão")
+            Toast.makeText(this, "Erro: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun startLiveTransmission() {
+        if (lastMediaProjectionResultCode == RESULT_OK && lastMediaProjectionData != null) {
+            launchStreamingServiceWithConsent(lastMediaProjectionResultCode, lastMediaProjectionData!!)
+        } else {
+            initiateScreenCaptureAndStream()
+        }
     }
 
     private fun stopLiveTransmission() {
@@ -1147,7 +1257,13 @@ class MainActivity : Activity() {
         ControllerRuntime.transmissionStartTime = 0L
         OverlayService.refreshVisibility()
         uiHandler.removeCallbacks(transmissionTimerRunnable)
-        Toast.makeText(this, "Transmissão encerrada.", Toast.LENGTH_SHORT).show()
+
+        val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
+            action = ScreenCaptureService.ACTION_STOP
+        }
+        startService(stopIntent)
+
+        Toast.makeText(this, "Transmissão encerrada com sucesso.", Toast.LENGTH_SHORT).show()
         render()
     }
 
@@ -1163,21 +1279,25 @@ class MainActivity : Activity() {
             return
         }
 
-        // Verifica se alguma plataforma selecionada não possui autorização ou chave
-        val disconnected = selectedPlatforms.filter {
-            platformConnected[it.third] != true && capturePrefs.getString("key_${it.third}", "").isNullOrBlank()
+        // Verifica se todas as plataformas marcadas possuem Stream Key real cadastrada
+        val missingKey = selectedPlatforms.firstOrNull {
+            capturePrefs.getString("key_${it.third}", "")?.trim().isNullOrBlank()
         }
-
-        if (disconnected.isNotEmpty()) {
-            val names = disconnected.joinToString(", ") { it.second }
+        if (missingKey != null) {
             AlertDialog.Builder(this)
-                .setTitle("Autenticação Necessária")
-                .setMessage("As seguintes plataformas selecionadas precisam de autenticação de login ou chave de transmissão: $names.\n\nPor favor, faça login ou autentique a conta antes de transmitir.")
-                .setPositiveButton("Fazer Login (${disconnected.first().second})") { _, _ ->
-                    openPlatformAuthDialog(disconnected.first().third)
+                .setTitle("Chave Necessária - ${missingKey.second}")
+                .setMessage("A plataforma ${missingKey.second} está selecionada, mas não possui chave de transmissão (Stream Key) configurada.\n\nPor favor, insira a chave RTMP da ${missingKey.second} para transmitir.")
+                .setPositiveButton("Inserir Chave") { _, _ ->
+                    openStreamKeyDialog(missingKey.third, missingKey.second)
                 }
                 .setNegativeButton("Cancelar", null)
                 .show()
+            return
+        }
+
+        // Solicita permissão de áudio do microfone antes de capturar a tela
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), AUDIO_PERMISSION_REQUEST)
             return
         }
 

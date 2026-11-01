@@ -7,8 +7,9 @@ import android.view.Surface
 import java.nio.ByteBuffer
 
 /**
- * Encoder H.264 local. Recebe frames por Surface e entrega amostras codificadas
- * ao consumidor; não abre conexões de rede nem armazena chaves.
+ * Encoder H.264 local por hardware via MediaCodec.
+ * Recebe frames por Surface e entrega amostras codificadas e cabeçalhos SPS/PPS
+ * para transmissão RTMP em tempo real.
  */
 class LocalVideoEncoder(
     private val width: Int,
@@ -16,7 +17,8 @@ class LocalVideoEncoder(
     private val fps: Int,
     private val bitrateKbps: Int,
     private val onSample: (ByteArray, MediaCodec.BufferInfo) -> Unit,
-    private val onFormat: (MediaFormat) -> Unit
+    private val onFormat: (MediaFormat) -> Unit,
+    private val onSpsPps: ((sps: ByteArray, pps: ByteArray) -> Unit)? = null
 ) : AutoCloseable {
     private var codec: MediaCodec? = null
     private var input: Surface? = null
@@ -24,6 +26,9 @@ class LocalVideoEncoder(
     @Volatile private var running = false
     @Volatile var lastError: String? = null
         private set
+
+    private var spsFound: ByteArray? = null
+    private var ppsFound: ByteArray? = null
 
     val surface: Surface
         get() = input ?: throw IllegalStateException("Encoder não iniciado.")
@@ -59,7 +64,11 @@ class LocalVideoEncoder(
                 try {
                     while (running) {
                         when (val index = created.dequeueOutputBuffer(info, 10000L)) {
-                            MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> onFormat(created.outputFormat)
+                            MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                                val outFmt = created.outputFormat
+                                onFormat(outFmt)
+                                extractSpsPpsFromFormat(outFmt)
+                            }
                             MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
                             else -> if (index >= 0) {
                                 try {
@@ -69,10 +78,15 @@ class LocalVideoEncoder(
                                         buffer.limit(info.offset + info.size)
                                         val bytes = ByteArray(info.size)
                                         buffer.get(bytes)
-                                        val copy = MediaCodec.BufferInfo().apply {
-                                            set(0, bytes.size, info.presentationTimeUs, info.flags)
+
+                                        if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                                            extractSpsPpsFromBytes(bytes)
+                                        } else {
+                                            val copy = MediaCodec.BufferInfo().apply {
+                                                set(0, bytes.size, info.presentationTimeUs, info.flags)
+                                            }
+                                            onSample(bytes, copy)
                                         }
-                                        onSample(bytes, copy)
                                     }
                                 } finally {
                                     created.releaseOutputBuffer(index, false)
@@ -91,6 +105,81 @@ class LocalVideoEncoder(
             created.release()
             throw error
         }
+    }
+
+    private fun extractSpsPpsFromFormat(format: MediaFormat) {
+        val csd0 = format.getByteBuffer("csd-0")
+        val csd1 = format.getByteBuffer("csd-1")
+        if (csd0 != null && csd1 != null) {
+            val sps = ByteArray(csd0.remaining())
+            csd0.get(sps)
+            csd0.rewind()
+            val pps = ByteArray(csd1.remaining())
+            csd1.get(pps)
+            csd1.rewind()
+            spsFound = cleanStartCode(sps)
+            ppsFound = cleanStartCode(pps)
+            onSpsPps?.invoke(spsFound!!, ppsFound!!)
+        }
+    }
+
+    private fun extractSpsPpsFromBytes(data: ByteArray) {
+        val spsList = mutableListOf<ByteArray>()
+        var i = 0
+        var lastStart = -1
+        while (i < data.size - 3) {
+            val isStart4 = data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
+                    data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()
+            val isStart3 = data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte()
+            if (isStart4 || isStart3) {
+                val startCodeLen = if (isStart4) 4 else 3
+                if (lastStart >= 0) {
+                    val len = i - lastStart
+                    if (len > 0) {
+                        val nalu = ByteArray(len)
+                        System.arraycopy(data, lastStart, nalu, 0, len)
+                        spsList.add(nalu)
+                    }
+                }
+                lastStart = i + startCodeLen
+                i += startCodeLen
+                continue
+            }
+            i++
+        }
+        if (lastStart >= 0 && lastStart < data.size) {
+            val len = data.size - lastStart
+            val nalu = ByteArray(len)
+            System.arraycopy(data, lastStart, nalu, 0, len)
+            spsList.add(nalu)
+        }
+
+        var sps: ByteArray? = null
+        var pps: ByteArray? = null
+        for (nalu in spsList) {
+            val type = nalu[0].toInt() and 0x1F
+            if (type == 7) sps = nalu
+            if (type == 8) pps = nalu
+        }
+        if (sps != null && pps != null) {
+            spsFound = sps
+            ppsFound = pps
+            onSpsPps?.invoke(sps, pps)
+        }
+    }
+
+    private fun cleanStartCode(bytes: ByteArray): ByteArray {
+        var start = 0
+        if (bytes.size > 4 && bytes[0] == 0.toByte() && bytes[1] == 0.toByte() &&
+            bytes[2] == 0.toByte() && bytes[3] == 1.toByte()) {
+            start = 4
+        } else if (bytes.size > 3 && bytes[0] == 0.toByte() && bytes[1] == 0.toByte() && bytes[2] == 1.toByte()) {
+            start = 3
+        }
+        if (start == 0) return bytes
+        val clean = ByteArray(bytes.size - start)
+        System.arraycopy(bytes, start, clean, 0, clean.size)
+        return clean
     }
 
     @Synchronized

@@ -1,9 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-    <application android:icon="@drawable/livenexus_launcher" android:roundIcon="@drawable/livenexus_launcher" android:allowBackup="false" android:label="LiveNexus Controller" android:theme="@style/LiveNexusTheme" android:supportsRtl="true">
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <application android:icon="@drawable/livenexus_launcher" android:roundIcon="@drawable/livenexus_launcher" android:allowBackup="false" android:label="LiveNexus Controller" android:theme="@style/LiveNexusTheme" android:supportsRtl="true" android:usesCleartextTraffic="true">
         <activity android:name=".ScreenCaptureEditorActivity" android:exported="false" />
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
@@ -12,6 +14,6 @@
             </intent-filter>
         </activity>
         <service android:name=".OverlayService" android:exported="false" />
-        <service android:name=".ScreenCaptureService" android:exported="false" android:foregroundServiceType="mediaProjection" />
+        <service android:name=".ScreenCaptureService" android:exported="false" android:foregroundServiceType="mediaProjection|microphone" />
     </application>
 </manifest>
