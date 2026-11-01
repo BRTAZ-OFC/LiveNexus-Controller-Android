@@ -48,6 +48,11 @@ class ScreenCaptureService : Service() {
             private set
         @Volatile var activePlatforms: List<String> = emptyList()
             private set
+        @Volatile var activeSceneLayers: List<CaptureLayer>? = null
+
+        fun updateActiveSceneLayers(layers: List<CaptureLayer>?) {
+            activeSceneLayers = layers?.toList()
+        }
 
         fun reportError(message: String?) {
             lastError = message
@@ -59,13 +64,15 @@ class ScreenCaptureService : Service() {
 
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
-    private var encoderDisplay: VirtualDisplay? = null
+    private var compositor: SceneCompositor? = null
     private var videoEncoder: LocalVideoEncoder? = null
     private var audioEncoder: LocalAudioEncoder? = null
     private var publisher: StreamPublisher? = null
     private var reader: ImageReader? = null
     private var captureThread: HandlerThread? = null
     private var projectionCallback: MediaProjection.Callback? = null
+    private var latestCapturedScreenFrame: Bitmap? = null
+    private var screenBufferBitmap: Bitmap? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -181,38 +188,43 @@ class ScreenCaptureService : Service() {
                 val image = try { source.acquireLatestImage() } catch (_: RuntimeException) { null }
                 if (image != null) {
                     try {
-                        val now = android.os.SystemClock.elapsedRealtime()
-                        if (now - lastPreviewAt >= 750L) {
-                            lastPreviewAt = now
-                            val plane = image.planes.firstOrNull()
-                            if (plane != null && plane.pixelStride == 4) {
-                                val paddedWidth = plane.rowStride / plane.pixelStride
-                                if (paddedWidth >= image.width) {
-                                    val bitmap = Bitmap.createBitmap(
-                                        paddedWidth, image.height, Bitmap.Config.ARGB_8888
-                                    )
-                                    plane.buffer.rewind()
-                                    bitmap.copyPixelsFromBuffer(plane.buffer)
-                                    val trimmed = if (paddedWidth == image.width) bitmap else {
-                                        Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
+                        val plane = image.planes.firstOrNull()
+                        if (plane != null && plane.pixelStride == 4) {
+                            val paddedWidth = plane.rowStride / plane.pixelStride
+                            if (paddedWidth >= image.width) {
+                                var buffer = screenBufferBitmap
+                                if (buffer == null || buffer.width != paddedWidth || buffer.height != image.height) {
+                                    buffer = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
+                                    screenBufferBitmap = buffer
+                                }
+                                plane.buffer.rewind()
+                                buffer.copyPixelsFromBuffer(plane.buffer)
+                                val trimmed = if (paddedWidth == image.width) buffer else {
+                                    Bitmap.createBitmap(buffer, 0, 0, image.width, image.height)
+                                }
+                                latestCapturedScreenFrame = trimmed
+
+                                // Atualiza prévia local quando a transmissão não estiver ativa
+                                if (compositor == null) {
+                                    val now = android.os.SystemClock.elapsedRealtime()
+                                    if (now - lastPreviewAt >= 500L) {
+                                        lastPreviewAt = now
+                                        val maxPreviewWidth = 480
+                                        val ratio = minOf(1f, maxPreviewWidth.toFloat() / trimmed.width.toFloat())
+                                        previewFrame = if (ratio < 1f) {
+                                            Bitmap.createScaledBitmap(
+                                                trimmed,
+                                                (trimmed.width * ratio).toInt().coerceAtLeast(1),
+                                                (trimmed.height * ratio).toInt().coerceAtLeast(1),
+                                                true
+                                            )
+                                        } else trimmed
                                     }
-                                    val maxPreviewWidth = 480
-                                    val ratio = minOf(
-                                        1f, maxPreviewWidth.toFloat() / trimmed.width.toFloat()
-                                    )
-                                    previewFrame = if (ratio < 1f) {
-                                        Bitmap.createScaledBitmap(
-                                            trimmed,
-                                            (trimmed.width * ratio).toInt().coerceAtLeast(1),
-                                            (trimmed.height * ratio).toInt().coerceAtLeast(1),
-                                            true
-                                        )
-                                    } else trimmed
                                 }
                             }
                         }
                     } catch (error: Exception) {
-                        Log.w(TAG, "Prévia indisponível", error)
+                        Log.w(TAG, "Falha ao processar frame de tela", error)
                     } finally {
                         image.close()
                     }
@@ -280,12 +292,41 @@ class ScreenCaptureService : Service() {
                 )
                 encoder.start()
                 videoEncoder = encoder
-                encoderDisplay = activeProjection.createVirtualDisplay(
-                    "LiveNEXUS H264 Encoder",
-                    evenWidth, evenHeight, metrics.densityDpi,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    encoder.surface, null, null
+
+                // Compositor de Cenário do LiveNEXUS: transmite o canvas renderizado (tela, texto, overlays)
+                val initialLayers = activeSceneLayers ?: loadPersistedSceneLayers(this)
+                val sceneComp = SceneCompositor(
+                    outputSurface = encoder.surface,
+                    width = evenWidth,
+                    height = evenHeight,
+                    fps = fps,
+                    onFrameRendered = { liveBitmap ->
+                        val maxPreviewWidth = 480
+                        val ratio = minOf(1f, maxPreviewWidth.toFloat() / liveBitmap.width.toFloat())
+                        previewFrame = if (ratio < 1f) {
+                            Bitmap.createScaledBitmap(
+                                liveBitmap,
+                                (liveBitmap.width * ratio).toInt().coerceAtLeast(1),
+                                (liveBitmap.height * ratio).toInt().coerceAtLeast(1),
+                                true
+                            )
+                        } else {
+                            Bitmap.createBitmap(liveBitmap)
+                        }
+                    }
                 )
+                sceneComp.start { canvas, w, h ->
+                    val layers = activeSceneLayers ?: initialLayers
+                    SceneRenderer.render(
+                        canvas = canvas,
+                        width = w,
+                        height = h,
+                        layers = layers,
+                        screenFrame = latestCapturedScreenFrame,
+                        isLiveStream = true
+                    )
+                }
+                compositor = sceneComp
 
                 // Encoder de Áudio AAC (Microfone)
                 try {
@@ -333,10 +374,53 @@ class ScreenCaptureService : Service() {
         return result
     }
 
+    private fun loadPersistedSceneLayers(context: Context): List<CaptureLayer> {
+        try {
+            val prefs = context.getSharedPreferences("livenexus_capture_settings", Context.MODE_PRIVATE)
+            val saved = JSONArray(prefs.getString("capture_scenes", "[]"))
+            val activeId = prefs.getString("active_capture_scene", "") ?: ""
+            for (i in 0 until saved.length()) {
+                val item = saved.optJSONObject(i) ?: continue
+                val id = item.optString("id").trim()
+                if (activeId.isNotBlank() && id != activeId && saved.length() > 1 && i < saved.length() - 1) continue
+                val sources = mutableListOf<CaptureLayer>()
+                val list = item.optJSONArray("sources")
+                for (j in 0 until (list?.length() ?: 0)) {
+                    val raw = list?.opt(j)
+                    if (raw is org.json.JSONObject) {
+                        val type = raw.optString("type")
+                        if (type != "screen" && type != "text" && type != "browser") continue
+                        sources.add(CaptureLayer(
+                            raw.optString("id").ifBlank { java.util.UUID.randomUUID().toString() },
+                            type,
+                            raw.optString("name").ifBlank { if (type == "screen") "Captura de tela" else "Texto" },
+                            raw.optDouble("x", 0.0).toFloat().coerceIn(-2f, 2f),
+                            raw.optDouble("y", 0.0).toFloat().coerceIn(-2f, 2f),
+                            raw.optDouble("width", 1.0).toFloat().coerceIn(0.08f, 3f),
+                            raw.optDouble("height", 1.0).toFloat().coerceIn(0.08f, 3f),
+                            raw.optBoolean("visible", true),
+                            raw.optBoolean("locked", false),
+                            raw.optString("url", "")
+                        ))
+                    }
+                }
+                if (sources.isNotEmpty()) return sources
+            }
+        } catch (_: Exception) {}
+        return listOf(CaptureLayer("default-screen", "screen", "Captura de tela", 0f, 0f, 1f, 1f))
+    }
+
     override fun onDestroy() {
         isCapturing = false
         isLiveStreaming = false
         activePlatforms = emptyList()
+
+        try {
+            compositor?.close()
+        } catch (_: Exception) {}
+        compositor = null
+        latestCapturedScreenFrame = null
+        screenBufferBitmap = null
 
         try {
             audioEncoder?.close()
@@ -353,8 +437,6 @@ class ScreenCaptureService : Service() {
         } catch (_: Exception) {}
         publisher = null
 
-        encoderDisplay?.release()
-        encoderDisplay = null
         virtualDisplay?.release()
         virtualDisplay = null
 

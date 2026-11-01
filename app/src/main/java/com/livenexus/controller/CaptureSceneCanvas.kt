@@ -98,79 +98,27 @@ class CaptureSceneCanvas(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        canvas.drawColor(Color.rgb(4, 8, 28))
         val availableWidth = width - paddingLeft - paddingRight
         val availableHeight = height - paddingTop - paddingBottom
-        // O editor usa toda a area disponivel, sem letterbox 16:9.
-        // As coordenadas das camadas continuam normalizadas entre 0 e 1.
         area.set(
             paddingLeft.toFloat(),
             paddingTop.toFloat(),
             (paddingLeft + availableWidth).toFloat(),
             (paddingTop + availableHeight).toFloat()
         )
-        paint.color = Color.rgb(11, 17, 40)
-        paint.style = Paint.Style.FILL
-        canvas.drawRect(area, paint)
-
-        paint.color = Color.rgb(35, 50, 81)
-        paint.strokeWidth = resources.displayMetrics.density
-        for (step in 1..3) {
-            val x = area.left + area.width() * step / 4f
-            val y = area.top + area.height() * step / 4f
-            canvas.drawLine(x, area.top, x, area.bottom, paint)
-            canvas.drawLine(area.left, y, area.right, y, paint)
-        }
-
         canvas.save()
-        canvas.clipRect(area)
-        layers.forEach { layer ->
-            if (!layer.visible) return@forEach
-            val box = bounds(layer)
-            if (layer.type == "screen" && frame != null) {
-                paint.style = Paint.Style.FILL
-                paint.alpha = 255
-                paint.color = Color.WHITE
-                val bitmap = frame!!
-                // CENTER_CROP / COVER: removes empty borders from mismatched aspect ratios.
-                val region = previewContentRect(bitmap)
-                val ratio = max(box.width() / region.width(), box.height() / region.height())
-                val sourceWidth = (box.width() / ratio).toInt().coerceIn(1, region.width())
-                val sourceHeight = (box.height() / ratio).toInt().coerceIn(1, region.height())
-                val sourceLeft = region.left + (region.width() - sourceWidth) / 2
-                val sourceTop = region.top + (region.height() - sourceHeight) / 2
-                canvas.drawBitmap(
-                    bitmap,
-                    android.graphics.Rect(sourceLeft, sourceTop, sourceLeft + sourceWidth, sourceTop + sourceHeight),
-                    box, paint
-                )
-            } else if (layer.type == "browser") {
-                // A pagina WebView e desenhada em uma camada Android acima deste canvas.
-            } else {
-                paint.style = Paint.Style.FILL
-                paint.color = if (layer.type == "text") Color.rgb(32, 16, 63) else Color.rgb(17, 52, 75)
-                canvas.drawRoundRect(box, 7f, 7f, paint)
-                paint.color = Color.WHITE
-                paint.textSize = (area.height() * .065f).coerceIn(12f, 28f)
-                val label = if (layer.type == "screen") "TELA - INICIE A CAPTURA" else layer.name
-                canvas.drawText(label.take(40), box.left + 8f, box.centerY(), paint)
-            }
-            if (layer.id == selectedLayerId) {
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = resources.displayMetrics.density * 2f
-                paint.color = NeonTheme.cyan
-                canvas.drawRect(box, paint)
-                paint.style = Paint.Style.FILL
-                paint.color = NeonTheme.purple
-                canvas.drawCircle(box.right, box.bottom, handleSize * .55f, paint)
-            }
-        }
+        canvas.translate(paddingLeft.toFloat(), paddingTop.toFloat())
+        SceneRenderer.render(
+            canvas = canvas,
+            width = availableWidth,
+            height = availableHeight,
+            layers = layers,
+            screenFrame = frame,
+            isLiveStream = false,
+            selectedLayerId = selectedLayerId,
+            handleSize = handleSize
+        )
         canvas.restore()
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = resources.displayMetrics.density * 2f
-        paint.color = NeonTheme.purple
-        canvas.drawRect(area, paint)
-        paint.style = Paint.Style.FILL
     }
 
     private fun rememberPinch(event: MotionEvent, target: CaptureLayer) {

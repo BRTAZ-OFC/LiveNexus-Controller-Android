@@ -1198,6 +1198,7 @@ class MainActivity : Activity() {
         progress.show()
 
         try {
+            ScreenCaptureService.updateActiveSceneLayers(activeCaptureScene()?.sources)
             val size = capturePrefs.getInt("max_dimension", 1280)
             val fps = capturePrefs.getInt("capture_fps", 30)
             val bitrate = capturePrefs.getInt("capture_bitrate_kbps", 4500)
@@ -1405,6 +1406,7 @@ class MainActivity : Activity() {
             .putString("capture_scenes", array.toString())
             .putString("active_capture_scene", activeCaptureSceneId)
             .apply()
+        ScreenCaptureService.updateActiveSceneLayers(activeCaptureScene()?.sources)
     }
 
     private fun refreshCaptureCanvas() {
@@ -1412,6 +1414,7 @@ class MainActivity : Activity() {
         captureCanvas?.layers = scene?.sources ?: emptyList()
         captureCanvas?.selectedLayerId = activeCaptureLayerId
         captureCanvas?.invalidate()
+        ScreenCaptureService.updateActiveSceneLayers(scene?.sources)
         updateCaptureBrowserSource()
     }
 
