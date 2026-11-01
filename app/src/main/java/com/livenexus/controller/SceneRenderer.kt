@@ -100,26 +100,53 @@ object SceneRenderer {
                         canvas.clipRect(box)
                         paint.style = Paint.Style.FILL
                         paint.alpha = 255
+                        paint.color = Color.rgb(6, 10, 24)
+                        canvas.drawRect(box, paint)
                         paint.color = Color.WHITE
                         val region = previewContentRect(screenFrame)
-                        val ratio = max(box.width() / region.width(), box.height() / region.height())
-                        val sourceWidth = (box.width() / ratio).toInt().coerceIn(1, region.width())
-                        val sourceHeight = (box.height() / ratio).toInt().coerceIn(1, region.height())
-                        val sourceLeft = region.left + (region.width() - sourceWidth) / 2
-                        val sourceTop = region.top + (region.height() - sourceHeight) / 2
-                        canvas.drawBitmap(
-                            screenFrame,
-                            Rect(sourceLeft, sourceTop, sourceLeft + sourceWidth, sourceTop + sourceHeight),
-                            box, paint
-                        )
+                        val srcW = region.width().toFloat().coerceAtLeast(1f)
+                        val srcH = region.height().toFloat().coerceAtLeast(1f)
+                        val sameOrientation = (box.width() >= box.height()) == (srcW >= srcH)
+                        if (sameOrientation) {
+                            val ratio = max(box.width() / srcW, box.height() / srcH)
+                            val sourceWidth = (box.width() / ratio).toInt().coerceIn(1, region.width())
+                            val sourceHeight = (box.height() / ratio).toInt().coerceIn(1, region.height())
+                            val sourceLeft = region.left + (region.width() - sourceWidth) / 2
+                            val sourceTop = region.top + (region.height() - sourceHeight) / 2
+                            canvas.drawBitmap(
+                                screenFrame,
+                                Rect(sourceLeft, sourceTop, sourceLeft + sourceWidth, sourceTop + sourceHeight),
+                                box, paint
+                            )
+                        } else {
+                            val scale = minOf(box.width() / srcW, box.height() / srcH)
+                            val drawW = srcW * scale
+                            val drawH = srcH * scale
+                            val dstLeft = box.left + (box.width() - drawW) / 2f
+                            val dstTop = box.top + (box.height() - drawH) / 2f
+                            canvas.drawBitmap(
+                                screenFrame,
+                                region,
+                                RectF(dstLeft, dstTop, dstLeft + drawW, dstTop + drawH),
+                                paint
+                            )
+                        }
                         canvas.restore()
                     } else if (!isLiveStream) {
                         paint.style = Paint.Style.FILL
                         paint.color = Color.rgb(17, 24, 56)
                         canvas.drawRoundRect(box, 12f, 12f, paint)
                         paint.color = Color.rgb(140, 150, 190)
-                        paint.textSize = (area.height() * .05f).coerceIn(14f, 28f)
-                        canvas.drawText("CAPTURA DE TELA - TOQUE PARA INICIAR", box.left + 16f, box.centerY(), paint)
+                        val prevAlign = paint.textAlign
+                        paint.textAlign = Paint.Align.CENTER
+                        paint.textSize = (minOf(box.width(), box.height()) * 0.085f).coerceIn(11f, 22f)
+                        val label = if (box.width() < box.height() * 0.85f) "CAPTURA DE TELA" else "CAPTURA DE TELA - TOQUE PARA INICIAR"
+                        canvas.drawText(label, box.centerX(), box.centerY(), paint)
+                        if (box.width() < box.height() * 0.85f) {
+                            paint.textSize = (minOf(box.width(), box.height()) * 0.07f).coerceIn(10f, 18f)
+                            canvas.drawText("TOQUE PARA INICIAR", box.centerX(), box.centerY() + paint.textSize * 1.4f, paint)
+                        }
+                        paint.textAlign = prevAlign
                     }
                 }
                 "text" -> {

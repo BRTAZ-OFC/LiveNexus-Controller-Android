@@ -127,6 +127,7 @@ class MainActivity : Activity() {
         authenticated = true
         ControllerRuntime.signedIn = true
         loadCaptureScenes()
+        ScreenCaptureService.updateCaptureOrientation(isVerticalCaptureMode())
         render()
     }
 
@@ -431,6 +432,7 @@ class MainActivity : Activity() {
                     putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
                     putExtra(ScreenCaptureService.EXTRA_FPS, fps)
                     putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
+                    putExtra(ScreenCaptureService.EXTRA_VERTICAL_MODE, isVerticalCaptureMode())
                 }
                 startService(intent)
                 Toast.makeText(this, "Fonte Captura de tela ativada no Editor de Cena.", Toast.LENGTH_SHORT).show()
@@ -1240,6 +1242,7 @@ class MainActivity : Activity() {
                 putExtra(ScreenCaptureService.EXTRA_FPS, fps)
                 putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
                 putExtra(ScreenCaptureService.EXTRA_TARGETS_JSON, targetsJson)
+                putExtra(ScreenCaptureService.EXTRA_VERTICAL_MODE, isVerticalCaptureMode())
             }
             startService(intent)
 
@@ -1461,8 +1464,24 @@ class MainActivity : Activity() {
         ScreenCaptureService.updateActiveSceneLayers(activeCaptureScene()?.sources)
     }
 
+    private fun isVerticalCaptureMode(): Boolean =
+        capturePrefs.getString("capture_orientation", "horizontal") == "vertical"
+
+    private fun toggleCaptureOrientationMode() {
+        val nextVertical = !isVerticalCaptureMode()
+        val nextValue = if (nextVertical) "vertical" else "horizontal"
+        capturePrefs.edit().putString("capture_orientation", nextValue).apply()
+        ScreenCaptureService.updateCaptureOrientation(nextVertical)
+        captureCanvas?.isVertical = nextVertical
+        updateCaptureBrowserSource()
+        val label = if (nextVertical) "Vertical (9:16)" else "Horizontal (16:9)"
+        Toast.makeText(this, "Modelo de captura alterado para: $label", Toast.LENGTH_SHORT).show()
+        if (page == 1) render()
+    }
+
     private fun refreshCaptureCanvas() {
         val scene = activeCaptureScene()
+        captureCanvas?.isVertical = isVerticalCaptureMode()
         captureCanvas?.layers = scene?.sources ?: emptyList()
         captureCanvas?.selectedLayerId = activeCaptureLayerId
         captureCanvas?.invalidate()
@@ -1498,11 +1517,16 @@ class MainActivity : Activity() {
         val width = host.width
         val height = host.height
         if (width > 0 && height > 0) {
-            val w = (width * layer.width).toInt().coerceAtLeast(1)
-            val h = (height * layer.height).toInt().coerceAtLeast(1)
+            val stage = captureCanvas?.computeStageRect(width, height)
+            val stageLeft = stage?.left ?: 0f
+            val stageTop = stage?.top ?: 0f
+            val stageW = stage?.width() ?: width.toFloat()
+            val stageH = stage?.height() ?: height.toFloat()
+            val w = (stageW * layer.width).toInt().coerceAtLeast(1)
+            val h = (stageH * layer.height).toInt().coerceAtLeast(1)
             web.layoutParams = FrameLayout.LayoutParams(w, h).apply {
-                leftMargin = (width * layer.x).toInt()
-                topMargin = (height * layer.y).toInt()
+                leftMargin = (stageLeft + stageW * layer.x).toInt()
+                topMargin = (stageTop + stageH * layer.y).toInt()
             }
         }
         if (captureBrowserUrl != layer.url) {
@@ -1768,15 +1792,16 @@ class MainActivity : Activity() {
                 titleBlock.addView(titleTexts)
                 bar.addView(titleBlock, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
-                // Botão Fullscreen [ ]
+                // Botão Alternar Modelo Vertical / Horizontal na barra superior do Editor de Cena
+                val isVertTop = isVerticalCaptureMode()
                 val fullBtn = ImageView(this).apply {
-                    setImageDrawable(NeonIcon("fullscreen", Color.WHITE))
+                    setImageDrawable(NeonIcon(if (isVertTop) "mode_vertical" else "mode_horizontal", NeonTheme.cyan))
                     scaleType = ImageView.ScaleType.FIT_CENTER
                     setPadding(dp(7), dp(7), dp(7), dp(7))
-                    background = shape(Color.rgb(14, 18, 42), Color.rgb(55, 65, 110), 16)
-                    contentDescription = "Editor de Cena"
+                    background = shape(Color.rgb(14, 18, 42), NeonTheme.cyan, 16)
+                    contentDescription = "Alternar modelo de captura Vertical / Horizontal"
                     setOnClickListener {
-                        Toast.makeText(this@MainActivity, "Modo de edição integrado na tela.", Toast.LENGTH_SHORT).show()
+                        toggleCaptureOrientationMode()
                     }
                 }
                 bar.addView(fullBtn, LinearLayout.LayoutParams(dp(36), dp(36)).apply {
@@ -1877,7 +1902,9 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_HORIZONTAL
         }
 
-        // 1. Preview Card (16:9) contendo o CaptureSceneCanvas real
+        val isVerticalCapture = isVerticalCaptureMode()
+
+        // 1. Preview Card contendo o CaptureSceneCanvas real (Vertical 9:16 ou Horizontal 16:9)
         val previewCard = FrameLayout(this).apply {
             background = NeonTheme.previewCardBackground()
             contentDescription = "Prévia da Captura"
@@ -1885,6 +1912,7 @@ class MainActivity : Activity() {
 
         val canvas = CaptureSceneCanvas(this).apply {
             contentDescription = "Prévia do cenário: mover com um dedo; redimensionar com dois."
+            isVertical = isVerticalCapture
             layers = activeCaptureScene()?.sources ?: emptyList()
             selectedLayerId = activeCaptureLayerId
             frame = if (ScreenCaptureService.isCapturing) ScreenCaptureService.previewFrame else null
@@ -1945,18 +1973,37 @@ class MainActivity : Activity() {
             setMargins(dp(12), dp(12), 0, 0)
         })
 
-        // Ícone indicador no canto superior direito do Preview
-        val cornerFull = ImageView(this).apply {
-            setImageDrawable(NeonIcon("fullscreen", Color.WHITE))
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            setPadding(dp(6), dp(6), dp(6), dp(6))
-            contentDescription = "Editor de Cena"
+        // Botão no Editor de Cena (canto superior direito) para alternar o modelo de captura Vertical (9:16) / Horizontal (16:9)
+        val orientationBtn = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = shape(Color.argb(225, 18, 12, 48), NeonTheme.cyan, 12)
+            setPadding(dp(9), dp(5), dp(10), dp(5))
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Alternar modelo de captura entre Vertical e Horizontal"
             setOnClickListener {
-                Toast.makeText(this@MainActivity, "Prévia interativa: arraste para mover, use dois dedos para dimensionar.", Toast.LENGTH_SHORT).show()
+                toggleCaptureOrientationMode()
             }
         }
-        previewCard.addView(cornerFull, FrameLayout.LayoutParams(
-            dp(32), dp(32),
+        val orientationIcon = ImageView(this).apply {
+            setImageDrawable(NeonIcon(if (isVerticalCapture) "mode_vertical" else "mode_horizontal", NeonTheme.cyan))
+            scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+        orientationBtn.addView(orientationIcon, LinearLayout.LayoutParams(dp(16), dp(16)).apply {
+            rightMargin = dp(6)
+        })
+        val orientationLabel = text(
+            if (isVerticalCapture) "Vertical 9:16" else "Horizontal 16:9",
+            11f,
+            Color.WHITE
+        ).apply {
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        }
+        orientationBtn.addView(orientationLabel)
+        previewCard.addView(orientationBtn, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.TOP or Gravity.END
         ).apply {
             setMargins(0, dp(10), dp(10), 0)
@@ -2009,7 +2056,7 @@ class MainActivity : Activity() {
             })
             container.addView(buttonsGrid, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         } else {
-            val previewHeight = dp(200)
+            val previewHeight = dp(if (isVerticalCapture) 240 else 200)
             container.addView(previewCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, previewHeight).apply {
                 bottomMargin = dp(14)
             })
@@ -2707,16 +2754,23 @@ class MainActivity : Activity() {
     }
 
     private fun openCaptureMoreDialog() {
-        val options = arrayOf("Recarregar prévia", "Sobre o editor")
+        val currentMode = if (isVerticalCaptureMode()) "Vertical (9:16)" else "Horizontal (16:9)"
+        val nextMode = if (isVerticalCaptureMode()) "Horizontal (16:9)" else "Vertical (9:16)"
+        val options = arrayOf(
+            "Mudar modelo para $nextMode (Atual: $currentMode)",
+            "Recarregar prévia",
+            "Sobre o editor"
+        )
         AlertDialog.Builder(this)
             .setTitle("Opções de Captura")
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> {
+                    0 -> toggleCaptureOrientationMode()
+                    1 -> {
                         refreshCaptureCanvas()
                         Toast.makeText(this, "Prévia atualizada.", Toast.LENGTH_SHORT).show()
                     }
-                    1 -> Toast.makeText(this, "Prévia interativa: arraste para mover ou redimensionar camadas.", Toast.LENGTH_LONG).show()
+                    2 -> Toast.makeText(this, "Prévia interativa: arraste para mover ou redimensionar camadas.", Toast.LENGTH_LONG).show()
                 }
             }
             .setNegativeButton("Fechar", null)

@@ -40,6 +40,7 @@ class ScreenCaptureService : Service() {
         const val EXTRA_FPS = "capture_fps"
         const val EXTRA_BITRATE_KBPS = "capture_bitrate_kbps"
         const val EXTRA_TARGETS_JSON = "capture_targets_json"
+        const val EXTRA_VERTICAL_MODE = "capture_vertical_mode"
 
         @Volatile var previewFrame: Bitmap? = null
             private set
@@ -54,9 +55,14 @@ class ScreenCaptureService : Service() {
         @Volatile var activePlatforms: List<String> = emptyList()
             private set
         @Volatile var activeSceneLayers: List<CaptureLayer>? = null
+        @Volatile var isVerticalMode: Boolean = false
 
         fun updateActiveSceneLayers(layers: List<CaptureLayer>?) {
             activeSceneLayers = layers?.toList()
+        }
+
+        fun updateCaptureOrientation(vertical: Boolean) {
+            isVerticalMode = vertical
         }
 
         fun reportError(message: String?) {
@@ -321,16 +327,13 @@ class ScreenCaptureService : Service() {
         val fps = intent.getIntExtra(EXTRA_FPS, 30)
         val bitrate = intent.getIntExtra(EXTRA_BITRATE_KBPS, 4500)
         val maxDimension = intent.getIntExtra(EXTRA_MAX_DIMENSION, 1280).coerceIn(480, 1920)
-
-        val metrics = DisplayMetrics()
-        val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        @Suppress("DEPRECATION")
-        windowManager.defaultDisplay.getRealMetrics(metrics)
-        val sourceWidth = metrics.widthPixels.coerceAtLeast(2)
-        val sourceHeight = metrics.heightPixels.coerceAtLeast(2)
-        val scale = minOf(1.0, maxDimension.toDouble() / maxOf(sourceWidth, sourceHeight))
-        val targetW = if (isCapturing && captureWidth > 2) captureWidth else (sourceWidth * scale).toInt().coerceAtLeast(2)
-        val targetH = if (isCapturing && captureHeight > 2) captureHeight else (sourceHeight * scale).toInt().coerceAtLeast(2)
+        if (intent.hasExtra(EXTRA_VERTICAL_MODE)) {
+            isVerticalMode = intent.getBooleanExtra(EXTRA_VERTICAL_MODE, isVerticalMode)
+        }
+        val longSide = maxDimension
+        val shortSide = ((longSide * 9) / 16).coerceAtLeast(2)
+        val targetW = if (isVerticalMode) shortSide else longSide
+        val targetH = if (isVerticalMode) longSide else shortSide
         val evenWidth = (targetW - targetW % 2).coerceAtLeast(2)
         val evenHeight = (targetH - targetH % 2).coerceAtLeast(2)
 

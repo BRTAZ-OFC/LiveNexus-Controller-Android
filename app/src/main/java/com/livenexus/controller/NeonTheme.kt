@@ -653,6 +653,24 @@ class NeonIcon(private val symbol: String, private val accent: Int = NeonTheme.c
                 canvas.drawLine(w * 0.64f, h * 0.82f, w * 0.82f, h * 0.82f, p)
                 canvas.drawLine(w * 0.82f, h * 0.82f, w * 0.82f, h * 0.64f, p)
             }
+            "mode_vertical" -> {
+                // Retângulo vertical (9:16)
+                p.style = Paint.Style.STROKE
+                p.strokeWidth = w * 0.085f
+                val rect = RectF(w * 0.26f, h * 0.12f, w * 0.74f, h * 0.88f)
+                canvas.drawRoundRect(rect, w * 0.08f, w * 0.08f, p)
+                p.style = Paint.Style.FILL
+                canvas.drawCircle(w * 0.50f, h * 0.78f, w * 0.045f, p)
+            }
+            "mode_horizontal" -> {
+                // Retângulo horizontal (16:9)
+                p.style = Paint.Style.STROKE
+                p.strokeWidth = w * 0.085f
+                val rect = RectF(w * 0.12f, h * 0.26f, w * 0.88f, h * 0.74f)
+                canvas.drawRoundRect(rect, w * 0.08f, w * 0.08f, p)
+                p.style = Paint.Style.FILL
+                canvas.drawCircle(w * 0.78f, h * 0.50f, w * 0.045f, p)
+            }
             "back", "arrow_back" -> {
                 // Seta para voltar ←
                 p.style = Paint.Style.STROKE
