@@ -36,6 +36,7 @@ class CaptureSceneCanvas(context: Context) : View(context) {
         set(value) { field = value; invalidate() }
     var onSelection: ((String?) -> Unit)? = null
     var onChange: (() -> Unit)? = null
+    var onScreenSourceTap: (() -> Unit)? = null
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val area = RectF()
@@ -217,7 +218,10 @@ class CaptureSceneCanvas(context: Context) : View(context) {
                         target.y = (originY + dy).coerceIn(-3f, 3f)
                     }
                 }
-                touched = true
+                val movedDist = hypot(event.x - downX, event.y - downY)
+                if (multiTouch || movedDist > resources.displayMetrics.density * 5f) {
+                    touched = true
+                }
                 invalidate()
                 return true
             }
@@ -232,7 +236,12 @@ class CaptureSceneCanvas(context: Context) : View(context) {
                 return true
             }
             MotionEvent.ACTION_UP -> {
-                if (moving != null && touched) onChange?.invoke()
+                val tappedLayer = moving
+                if (tappedLayer != null && touched) {
+                    onChange?.invoke()
+                } else if (tappedLayer != null && !touched && tappedLayer.type == "screen" && frame == null) {
+                    onScreenSourceTap?.invoke()
+                }
                 moving = null
                 multiTouch = false
                 touched = false

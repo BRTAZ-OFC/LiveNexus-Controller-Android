@@ -56,7 +56,6 @@ class MainActivity : Activity() {
     private var lastMediaProjectionResultCode: Int = 0
     private var lastMediaProjectionData: Intent? = null
     private var pendingStreamingPlatform: String? = null
-    private var pendingStartTransmissionAfterCapture = false
     private var transmissionStartTime = 0L
 
     private val platformConnected = mutableMapOf(
@@ -416,33 +415,29 @@ class MainActivity : Activity() {
             if (resultCode != RESULT_OK || data == null) {
                 ScreenCaptureService.reportError("Captura de tela não autorizada")
                 Toast.makeText(this, "Captura de tela não autorizada.", Toast.LENGTH_SHORT).show()
-                pendingStartTransmissionAfterCapture = false
                 return
             }
             lastMediaProjectionResultCode = resultCode
             lastMediaProjectionData = data
-            if (pendingStartTransmissionAfterCapture) {
-                pendingStartTransmissionAfterCapture = false
-                launchStreamingServiceWithConsent(resultCode, data)
-            } else {
-                try {
-                    val size = capturePrefs.getInt("max_dimension", 1280)
-                    val fps = capturePrefs.getInt("capture_fps", 30)
-                    val bitrate = capturePrefs.getInt("capture_bitrate_kbps", 4500)
-                    val intent = Intent(this, ScreenCaptureService::class.java).apply {
-                        action = ScreenCaptureService.ACTION_START
-                        putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
-                        putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
-                        putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
-                        putExtra(ScreenCaptureService.EXTRA_FPS, fps)
-                        putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
-                    }
-                    startService(intent)
-                    Toast.makeText(this, "Captura de tela iniciada.", Toast.LENGTH_SHORT).show()
-                } catch (e: Throwable) {
-                    ScreenCaptureService.reportError("Captura de tela indisponível")
-                    Toast.makeText(this, "Captura de tela indisponível.", Toast.LENGTH_SHORT).show()
+            try {
+                ScreenCaptureService.updateActiveSceneLayers(activeCaptureScene()?.sources)
+                val size = capturePrefs.getInt("max_dimension", 1280)
+                val fps = capturePrefs.getInt("capture_fps", 30)
+                val bitrate = capturePrefs.getInt("capture_bitrate_kbps", 4500)
+                val intent = Intent(this, ScreenCaptureService::class.java).apply {
+                    action = ScreenCaptureService.ACTION_START
+                    putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
+                    putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
+                    putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
+                    putExtra(ScreenCaptureService.EXTRA_FPS, fps)
+                    putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
                 }
+                startService(intent)
+                Toast.makeText(this, "Fonte Captura de tela ativada no Editor de Cena.", Toast.LENGTH_SHORT).show()
+                refreshCaptureCanvas()
+            } catch (e: Throwable) {
+                ScreenCaptureService.reportError("Captura de tela indisponível")
+                Toast.makeText(this, "Captura de tela indisponível.", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -450,7 +445,7 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == AUDIO_PERMISSION_REQUEST) {
-            initiateScreenCaptureAndStream()
+            startLiveTransmission()
         }
     }
 
@@ -1220,7 +1215,7 @@ class MainActivity : Activity() {
         return array.toString()
     }
 
-    private fun launchStreamingServiceWithConsent(resultCode: Int, data: Intent?) {
+    private fun startLiveTransmission() {
         val targetsJson = buildActiveTargetsJson()
         if (targetsJson == "[]") {
             Toast.makeText(this, "Nenhuma plataforma com chave de transmissão válida.", Toast.LENGTH_SHORT).show()
@@ -1240,11 +1235,7 @@ class MainActivity : Activity() {
             val fps = capturePrefs.getInt("capture_fps", 30)
             val bitrate = capturePrefs.getInt("capture_bitrate_kbps", 4500)
             val intent = Intent(this, ScreenCaptureService::class.java).apply {
-                action = ScreenCaptureService.ACTION_START
-                if (data != null) {
-                    putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
-                    putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
-                }
+                action = ScreenCaptureService.ACTION_START_STREAM
                 putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
                 putExtra(ScreenCaptureService.EXTRA_FPS, fps)
                 putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
@@ -1297,26 +1288,16 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun startLiveTransmission() {
-        if (ScreenCaptureService.isCapturing) {
-            launchStreamingServiceWithConsent(0, null)
-        } else {
-            initiateScreenCaptureAndStream()
-        }
-    }
-
     private fun stopLiveTransmission() {
         isTransmitting = false
         transmissionStartTime = 0L
-        lastMediaProjectionResultCode = 0
-        lastMediaProjectionData = null
         ControllerRuntime.isTransmitting = false
         ControllerRuntime.transmissionStartTime = 0L
         OverlayService.refreshVisibility()
         uiHandler.removeCallbacks(transmissionTimerRunnable)
 
         val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
-            action = ScreenCaptureService.ACTION_STOP
+            action = ScreenCaptureService.ACTION_STOP_STREAM
         }
         startService(stopIntent)
 
@@ -1353,30 +1334,42 @@ class MainActivity : Activity() {
             return
         }
 
-        // Solicita permissão de áudio do microfone antes de capturar a tela
+        // Solicita permissão de áudio do microfone antes de transmitir a cena
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), AUDIO_PERMISSION_REQUEST)
             return
         }
 
-        initiateScreenCaptureAndStream()
+        startLiveTransmission()
     }
 
-    private fun initiateScreenCaptureAndStream() {
-        if (ScreenCaptureService.isCapturing) {
-            launchStreamingServiceWithConsent(0, null)
-            return
-        }
+    private fun requestScreenCaptureForSource() {
+        if (page != 1) return
+        val hasScreenSource = activeCaptureScene()?.sources?.any { it.type == "screen" } == true
+        if (!hasScreenSource) return
+        if (ScreenCaptureService.isCapturing) return
         try {
             val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
             val captureIntent = manager?.createScreenCaptureIntent()
             if (captureIntent != null && captureIntent.resolveActivity(packageManager) != null) {
-                pendingStartTransmissionAfterCapture = true
                 startActivityForResult(captureIntent, CAPTURE_REQUEST)
                 return
             }
         } catch (_: Throwable) {}
         Toast.makeText(this, "Não foi possível solicitar permissão de captura de tela.", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun stopScreenCaptureForSource() {
+        lastMediaProjectionResultCode = 0
+        lastMediaProjectionData = null
+        try {
+            val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                action = ScreenCaptureService.ACTION_STOP_CAPTURE
+            }
+            startService(stopIntent)
+        } catch (_: Throwable) {}
+        captureCanvas?.frame = null
+        refreshCaptureCanvas()
     }
 
     // ==========================================
@@ -1903,6 +1896,11 @@ class MainActivity : Activity() {
                 persistCaptureScenes()
                 refreshCaptureCanvas()
             }
+            onScreenSourceTap = {
+                if (page == 1 && !ScreenCaptureService.isCapturing) {
+                    requestScreenCaptureForSource()
+                }
+            }
         }
         captureCanvas = canvas
 
@@ -2273,8 +2271,16 @@ class MainActivity : Activity() {
                             .setItems(types) { _, which ->
                                 when (which) {
                                     0 -> {
-                                        if (scene.sources.any { it.type == "screen" }) {
-                                            Toast.makeText(this@MainActivity, "A cena já possui captura de tela.", Toast.LENGTH_SHORT).show()
+                                        val existingScreen = scene.sources.firstOrNull { it.type == "screen" }
+                                        if (existingScreen != null) {
+                                            activeCaptureLayerId = existingScreen.id
+                                            refreshCaptureCanvas()
+                                            populate()
+                                            if (!ScreenCaptureService.isCapturing) {
+                                                requestScreenCaptureForSource()
+                                            } else {
+                                                Toast.makeText(this@MainActivity, "A cena já possui captura de tela ativa.", Toast.LENGTH_SHORT).show()
+                                            }
                                         } else {
                                             val layer = CaptureLayer(java.util.UUID.randomUUID().toString(), "screen", "Captura de tela", 0f, 0f, 1f, 1f)
                                             scene.sources.add(layer)
@@ -2282,6 +2288,9 @@ class MainActivity : Activity() {
                                             persistCaptureScenes()
                                             refreshCaptureCanvas()
                                             populate()
+                                            if (!ScreenCaptureService.isCapturing) {
+                                                requestScreenCaptureForSource()
+                                            }
                                         }
                                     }
                                     1 -> {
@@ -2392,6 +2401,9 @@ class MainActivity : Activity() {
                                 activeCaptureLayerId = layer.id
                                 refreshCaptureCanvas()
                                 populate()
+                                if (layer.type == "screen" && !ScreenCaptureService.isCapturing) {
+                                    requestScreenCaptureForSource()
+                                }
                             }
                         }
                         item.addView(nameLabel, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
@@ -2461,12 +2473,17 @@ class MainActivity : Activity() {
                             gravity = Gravity.CENTER
                             setPadding(dp(6), dp(4), dp(6), dp(4))
                             setOnClickListener {
+                                val removedType = layer.type
                                 sources.remove(layer)
                                 if (activeCaptureLayerId == layer.id) {
                                     activeCaptureLayerId = sources.lastOrNull()?.id
                                 }
                                 persistCaptureScenes()
-                                refreshCaptureCanvas()
+                                if (removedType == "screen" && captureScenes.none { s -> s.sources.any { it.type == "screen" } }) {
+                                    stopScreenCaptureForSource()
+                                } else {
+                                    refreshCaptureCanvas()
+                                }
                                 populate()
                             }
                         }

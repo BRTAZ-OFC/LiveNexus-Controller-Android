@@ -96,6 +96,8 @@ object SceneRenderer {
             when (layer.type) {
                 "screen" -> {
                     if (screenFrame != null && !screenFrame.isRecycled) {
+                        canvas.save()
+                        canvas.clipRect(box)
                         paint.style = Paint.Style.FILL
                         paint.alpha = 255
                         paint.color = Color.WHITE
@@ -110,14 +112,14 @@ object SceneRenderer {
                             Rect(sourceLeft, sourceTop, sourceLeft + sourceWidth, sourceTop + sourceHeight),
                             box, paint
                         )
-                    } else {
+                        canvas.restore()
+                    } else if (!isLiveStream) {
                         paint.style = Paint.Style.FILL
                         paint.color = Color.rgb(17, 24, 56)
                         canvas.drawRoundRect(box, 12f, 12f, paint)
                         paint.color = Color.rgb(140, 150, 190)
-                        paint.textSize = (area.height() * .05f).coerceIn(16f, 32f)
-                        val label = if (isLiveStream) "CONECTANDO CAPTURA..." else "TELA - INICIE A CAPTURA"
-                        canvas.drawText(label, box.left + 16f, box.centerY(), paint)
+                        paint.textSize = (area.height() * .05f).coerceIn(14f, 28f)
+                        canvas.drawText("CAPTURA DE TELA - TOQUE PARA INICIAR", box.left + 16f, box.centerY(), paint)
                     }
                 }
                 "text" -> {

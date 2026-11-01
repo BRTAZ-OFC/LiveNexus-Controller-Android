@@ -24,12 +24,15 @@ import android.view.WindowManager
 import org.json.JSONArray
 
 /**
- * Serviço de captura de tela e áudio com transmissão ao vivo multiplexada em RTMP/RTMPS.
+ * Serviço de captura da fonte "Captura de tela" (Editor de Cena) e transmissão ao vivo do cenário em RTMP/RTMPS.
  */
 class ScreenCaptureService : Service() {
     companion object {
         private const val TAG = "LiveNexusCapture"
         const val ACTION_START = "com.livenexus.controller.capture.START"
+        const val ACTION_STOP_CAPTURE = "com.livenexus.controller.capture.STOP_CAPTURE"
+        const val ACTION_START_STREAM = "com.livenexus.controller.capture.START_STREAM"
+        const val ACTION_STOP_STREAM = "com.livenexus.controller.capture.STOP_STREAM"
         const val ACTION_STOP = "com.livenexus.controller.capture.STOP"
         const val EXTRA_RESULT_CODE = "capture_result_code"
         const val EXTRA_RESULT_DATA = "capture_result_data"
@@ -93,89 +96,109 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_STOP_CAPTURE -> {
+                stopCaptureOnly()
+                if (!isLiveStreaming && !isConnecting) {
+                    stopSelf()
+                }
+                return START_NOT_STICKY
+            }
+            ACTION_STOP_STREAM -> {
+                stopStreamingOnly()
+                if (!isCapturing) {
+                    stopSelf()
+                } else {
+                    updateForegroundNotification()
+                }
+                return START_NOT_STICKY
+            }
+            ACTION_START_STREAM -> {
+                handleStartStream(intent)
+                return START_NOT_STICKY
+            }
+            ACTION_START -> {
+                handleStartCapture(intent)
+                return START_NOT_STICKY
+            }
+            else -> {
+                stopSelf()
+                return START_NOT_STICKY
+            }
         }
-        if (intent?.action != ACTION_START) {
-            stopSelf()
-            return START_NOT_STICKY
-        }
+    }
 
-        val targetsJson = intent.getStringExtra(EXTRA_TARGETS_JSON)
-        val streamTargets = parseTargets(targetsJson)
-        val fps = intent.getIntExtra(EXTRA_FPS, 30)
-        val bitrate = intent.getIntExtra(EXTRA_BITRATE_KBPS, 4500)
-
+    private fun buildStopPendingIntent(): PendingIntent {
         val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
             action = ACTION_STOP
         }
-        val stopPendingIntent = PendingIntent.getService(
+        return PendingIntent.getService(
             this, 0, stopIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+    }
 
-        // Se a captura de tela já estiver ativa (ex.: iniciada na aba Captura), reutiliza a sessão atual
+    private fun updateForegroundNotification() {
+        val title = if (isLiveStreaming || isConnecting) {
+            "LiveNEXUS - Transmissão Ao Vivo"
+        } else {
+            "LiveNEXUS - Fonte: Captura de Tela"
+        }
+        val text = when {
+            isLiveStreaming -> "Transmitindo cenário para: ${activePlatforms.joinToString(", ")}"
+            isConnecting -> "Conectando transmissão ao vivo..."
+            isCapturing -> "Fonte 'Captura de tela' ativa no Editor de Cena."
+            else -> "Serviço ativo."
+        }
+        val notif = Notification.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setOngoing(true)
+            .addAction(android.R.drawable.ic_media_pause, "Parar", buildStopPendingIntent())
+            .build()
+        val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        mgr.notify(NOTIFICATION_ID, notif)
+    }
+
+    /**
+     * Inicia exclusivamente a fonte "Captura de tela" (solicitada no menu Captura -> Editor de Cena).
+     */
+    private fun handleStartCapture(intent: Intent) {
         if (isCapturing && projection != null && virtualDisplay != null) {
-            if (streamTargets.isNotEmpty()) {
-                val evenW = (captureWidth - captureWidth % 2).coerceAtLeast(2)
-                val evenH = (captureHeight - captureHeight % 2).coerceAtLeast(2)
-                startStreamingPipelineAsync(
-                    streamTargets = streamTargets,
-                    evenWidth = evenW,
-                    evenHeight = evenH,
-                    fps = fps,
-                    bitrate = bitrate,
-                    stopPendingIntent = stopPendingIntent,
-                    stopServiceOnFailure = false
-                )
-            }
-            return START_NOT_STICKY
+            return
         }
 
         val consent = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
         if (resultCode != android.app.Activity.RESULT_OK || consent == null) {
             lastError = "Captura de tela indisponível neste ambiente"
-            isConnecting = false
-            stopSelf()
-            return START_NOT_STICKY
+            if (!isLiveStreaming) stopSelf()
+            return
         }
 
         try {
             lastError = null
             previewFrame = null
-            isLiveStreaming = false
-            activePlatforms = emptyList()
-            isConnecting = streamTargets.isNotEmpty()
 
-            val notificationTitle = if (streamTargets.isNotEmpty()) {
-                "LiveNEXUS - Transmissão Ao Vivo"
-            } else {
-                "LiveNEXUS - Captura de Tela"
-            }
-
-            val notificationText = if (streamTargets.isNotEmpty()) {
-                "Transmissão ao vivo conectando..."
-            } else {
-                "Captura local ativa. Nenhuma transmissão iniciada."
-            }
-
-            val notification = Notification.Builder(this, CHANNEL_ID)
+            val notif = Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_menu_camera)
-                .setContentTitle(notificationTitle)
-                .setContentText(notificationText)
+                .setContentTitle("LiveNEXUS - Fonte: Captura de Tela")
+                .setContentText("Fonte 'Captura de tela' ativa no Editor de Cena.")
                 .setOngoing(true)
-                .addAction(android.R.drawable.ic_media_pause, "Parar transmissão", stopPendingIntent)
+                .addAction(android.R.drawable.ic_media_pause, "Parar", buildStopPendingIntent())
                 .build()
 
-            val fgType = if (streamTargets.isNotEmpty()) {
+            val fgType = if (isLiveStreaming || isConnecting) {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             } else {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             }
-
-            startForeground(NOTIFICATION_ID, notification, fgType)
+            startForeground(NOTIFICATION_ID, notif, fgType)
 
             val projectionManager =
                 getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -185,10 +208,10 @@ class ScreenCaptureService : Service() {
 
             val callback = object : MediaProjection.Callback() {
                 override fun onStop() {
-                    isCapturing = false
-                    isConnecting = false
-                    isLiveStreaming = false
-                    stopSelf()
+                    stopCaptureOnly()
+                    if (!isLiveStreaming && !isConnecting) {
+                        stopSelf()
+                    }
                 }
             }
             projectionCallback = callback
@@ -207,7 +230,6 @@ class ScreenCaptureService : Service() {
             captureWidth = width
             captureHeight = height
 
-            // Prévia local na UI do editor de cenas
             val captureReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
             reader = captureReader
             val worker = HandlerThread("LiveNexusCapturePreview").also { it.start() }
@@ -234,22 +256,20 @@ class ScreenCaptureService : Service() {
                                 }
                                 latestCapturedScreenFrame = trimmed
 
-                                // Atualiza prévia local quando a transmissão não estiver ativa
-                                if (compositor == null) {
-                                    val now = android.os.SystemClock.elapsedRealtime()
-                                    if (now - lastPreviewAt >= 500L) {
-                                        lastPreviewAt = now
-                                        val maxPreviewWidth = 480
-                                        val ratio = minOf(1f, maxPreviewWidth.toFloat() / trimmed.width.toFloat())
-                                        previewFrame = if (ratio < 1f) {
-                                            Bitmap.createScaledBitmap(
-                                                trimmed,
-                                                (trimmed.width * ratio).toInt().coerceAtLeast(1),
-                                                (trimmed.height * ratio).toInt().coerceAtLeast(1),
-                                                true
-                                            )
-                                        } else trimmed
-                                    }
+                                // Atualiza o frame exclusivo da fonte "Captura de tela" para o Editor de Cena
+                                val now = android.os.SystemClock.elapsedRealtime()
+                                if (now - lastPreviewAt >= 250L) {
+                                    lastPreviewAt = now
+                                    val maxPreviewWidth = 480
+                                    val ratio = minOf(1f, maxPreviewWidth.toFloat() / trimmed.width.toFloat())
+                                    previewFrame = if (ratio < 1f) {
+                                        Bitmap.createScaledBitmap(
+                                            trimmed,
+                                            (trimmed.width * ratio).toInt().coerceAtLeast(1),
+                                            (trimmed.height * ratio).toInt().coerceAtLeast(1),
+                                            true
+                                        )
+                                    } else trimmed
                                 }
                             }
                         }
@@ -274,28 +294,73 @@ class ScreenCaptureService : Service() {
             if (virtualDisplay == null) throw IllegalStateException("Captura de tela indisponível neste ambiente")
 
             isCapturing = true
-            val evenWidth = (width - width % 2).coerceAtLeast(2)
-            val evenHeight = (height - height % 2).coerceAtLeast(2)
-
-            if (streamTargets.isNotEmpty()) {
-                startStreamingPipelineAsync(
-                    streamTargets = streamTargets,
-                    evenWidth = evenWidth,
-                    evenHeight = evenHeight,
-                    fps = fps,
-                    bitrate = bitrate,
-                    stopPendingIntent = stopPendingIntent,
-                    stopServiceOnFailure = true
-                )
-            }
+            updateForegroundNotification()
         } catch (error: Throwable) {
-            val msg = error.message ?: "Falha ao iniciar transmissão"
-            lastError = msg
-            isConnecting = false
-            Log.e(TAG, "Falha ao iniciar captura/transmissão", error)
-            stopSelf()
+            lastError = error.message ?: "Falha ao iniciar fonte de captura de tela"
+            Log.e(TAG, "Falha ao iniciar captura de tela", error)
+            stopCaptureOnly()
+            if (!isLiveStreaming && !isConnecting) stopSelf()
         }
-        return START_NOT_STICKY
+    }
+
+    /**
+     * Inicia a transmissão ao vivo do cenário do Editor de Cena (sem abrir diálogo de captura de tela).
+     * Se a fonte "Captura de tela" estiver ativa na cena, ela será composta; caso contrário,
+     * apenas as demais camadas do cenário são transmitidas.
+     */
+    private fun handleStartStream(intent: Intent) {
+        val targetsJson = intent.getStringExtra(EXTRA_TARGETS_JSON)
+        val streamTargets = parseTargets(targetsJson)
+        if (streamTargets.isEmpty()) {
+            lastError = "Nenhuma plataforma configurada para transmissão."
+            isConnecting = false
+            if (!isCapturing) stopSelf()
+            return
+        }
+
+        val fps = intent.getIntExtra(EXTRA_FPS, 30)
+        val bitrate = intent.getIntExtra(EXTRA_BITRATE_KBPS, 4500)
+        val maxDimension = intent.getIntExtra(EXTRA_MAX_DIMENSION, 1280).coerceIn(480, 1920)
+
+        val metrics = DisplayMetrics()
+        val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        @Suppress("DEPRECATION")
+        windowManager.defaultDisplay.getRealMetrics(metrics)
+        val sourceWidth = metrics.widthPixels.coerceAtLeast(2)
+        val sourceHeight = metrics.heightPixels.coerceAtLeast(2)
+        val scale = minOf(1.0, maxDimension.toDouble() / maxOf(sourceWidth, sourceHeight))
+        val targetW = if (isCapturing && captureWidth > 2) captureWidth else (sourceWidth * scale).toInt().coerceAtLeast(2)
+        val targetH = if (isCapturing && captureHeight > 2) captureHeight else (sourceHeight * scale).toInt().coerceAtLeast(2)
+        val evenWidth = (targetW - targetW % 2).coerceAtLeast(2)
+        val evenHeight = (targetH - targetH % 2).coerceAtLeast(2)
+
+        try {
+            val notif = Notification.Builder(this, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_menu_camera)
+                .setContentTitle("LiveNEXUS - Transmissão Ao Vivo")
+                .setContentText("Conectando transmissão ao vivo...")
+                .setOngoing(true)
+                .addAction(android.R.drawable.ic_media_pause, "Parar", buildStopPendingIntent())
+                .build()
+
+            val fgType = if (isCapturing) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            }
+            startForeground(NOTIFICATION_ID, notif, fgType)
+        } catch (e: Throwable) {
+            Log.w(TAG, "Aviso ao atualizar foreground service", e)
+        }
+
+        startStreamingPipelineAsync(
+            streamTargets = streamTargets,
+            evenWidth = evenWidth,
+            evenHeight = evenHeight,
+            fps = fps,
+            bitrate = bitrate,
+            stopServiceOnFailure = !isCapturing
+        )
     }
 
     private fun startStreamingPipelineAsync(
@@ -304,7 +369,6 @@ class ScreenCaptureService : Service() {
         evenHeight: Int,
         fps: Int,
         bitrate: Int,
-        stopPendingIntent: PendingIntent,
         stopServiceOnFailure: Boolean
     ) {
         stopStreamingOnly()
@@ -334,17 +398,7 @@ class ScreenCaptureService : Service() {
                 publisher = streamPub
                 isLiveStreaming = true
                 activePlatforms = streamPub.connectedPlatforms
-
-                // Atualiza notificação com as plataformas conectadas
-                val updatedNotif = Notification.Builder(this, CHANNEL_ID)
-                    .setSmallIcon(android.R.drawable.ic_menu_camera)
-                    .setContentTitle("LiveNEXUS - Transmissão Ao Vivo")
-                    .setContentText("Transmitindo ao vivo para: ${activePlatforms.joinToString(", ")}")
-                    .setOngoing(true)
-                    .addAction(android.R.drawable.ic_media_pause, "Parar transmissão", stopPendingIntent)
-                    .build()
-                val notificationsMgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                notificationsMgr.notify(NOTIFICATION_ID, updatedNotif)
+                updateForegroundNotification()
 
                 // Encoder de Vídeo H.264
                 val encoder = LocalVideoEncoder(
@@ -359,36 +413,25 @@ class ScreenCaptureService : Service() {
                 encoder.start()
                 videoEncoder = encoder
 
-                // Compositor de Cenário do LiveNEXUS: transmite o canvas renderizado (tela, texto, overlays)
+                // Compositor de Cenário do LiveNEXUS: transmite o canvas do Editor de Cena.
+                // A captura de tela só é desenhada na camada de tipo "screen" ("Captura de tela") se isCapturing estiver ativo.
                 val initialLayers = activeSceneLayers ?: loadPersistedSceneLayers(this)
                 val sceneComp = SceneCompositor(
                     outputSurface = encoder.surface,
                     width = evenWidth,
                     height = evenHeight,
                     fps = fps,
-                    onFrameRendered = { liveBitmap ->
-                        val maxPreviewWidth = 480
-                        val ratio = minOf(1f, maxPreviewWidth.toFloat() / liveBitmap.width.toFloat())
-                        previewFrame = if (ratio < 1f) {
-                            Bitmap.createScaledBitmap(
-                                liveBitmap,
-                                (liveBitmap.width * ratio).toInt().coerceAtLeast(1),
-                                (liveBitmap.height * ratio).toInt().coerceAtLeast(1),
-                                true
-                            )
-                        } else {
-                            Bitmap.createBitmap(liveBitmap)
-                        }
-                    }
+                    onFrameRendered = null
                 )
                 sceneComp.start { canvas, w, h ->
                     val layers = activeSceneLayers ?: initialLayers
+                    val screenSourceBitmap = if (isCapturing) latestCapturedScreenFrame else null
                     SceneRenderer.render(
                         canvas = canvas,
                         width = w,
                         height = h,
                         layers = layers,
-                        screenFrame = latestCapturedScreenFrame,
+                        screenFrame = screenSourceBitmap,
                         isLiveStream = true
                     )
                 }
@@ -415,13 +458,47 @@ class ScreenCaptureService : Service() {
                 activePlatforms = emptyList()
                 Log.e(TAG, "Falha ao iniciar pipeline de transmissão RTMP", error)
                 stopStreamingOnly()
-                if (stopServiceOnFailure) {
+                if (stopServiceOnFailure && !isCapturing) {
                     stopSelf()
                 }
             } finally {
                 isConnecting = false
             }
         }, "LiveNexusStreamStarter").start()
+    }
+
+    private fun stopCaptureOnly() {
+        isCapturing = false
+        latestCapturedScreenFrame = null
+        screenBufferBitmap = null
+        previewFrame = null
+
+        try {
+            virtualDisplay?.release()
+        } catch (_: Exception) {}
+        virtualDisplay = null
+
+        try {
+            reader?.setOnImageAvailableListener(null, null)
+            reader?.close()
+        } catch (_: Exception) {}
+        reader = null
+
+        try {
+            captureThread?.quitSafely()
+        } catch (_: Exception) {}
+        captureThread = null
+
+        val currentProjection = projection
+        val callback = projectionCallback
+        projectionCallback = null
+        projection = null
+        if (currentProjection != null) {
+            try {
+                if (callback != null) currentProjection.unregisterCallback(callback)
+                currentProjection.stop()
+            } catch (_: Exception) {}
+        }
     }
 
     private fun stopStreamingOnly() {
@@ -501,35 +578,13 @@ class ScreenCaptureService : Service() {
                 if (sources.isNotEmpty()) return sources
             }
         } catch (_: Exception) {}
-        return listOf(CaptureLayer("default-screen", "screen", "Captura de tela", 0f, 0f, 1f, 1f))
+        return emptyList()
     }
 
     override fun onDestroy() {
-        isCapturing = false
         isConnecting = false
         stopStreamingOnly()
-        latestCapturedScreenFrame = null
-        screenBufferBitmap = null
-
-        virtualDisplay?.release()
-        virtualDisplay = null
-
-        reader?.setOnImageAvailableListener(null, null)
-        reader?.close()
-        reader = null
-
-        captureThread?.quitSafely()
-        captureThread = null
-        previewFrame = null
-
-        val currentProjection = projection
-        val callback = projectionCallback
-        projectionCallback = null
-        projection = null
-        if (currentProjection != null) {
-            if (callback != null) currentProjection.unregisterCallback(callback)
-            currentProjection.stop()
-        }
+        stopCaptureOnly()
         super.onDestroy()
     }
 }
