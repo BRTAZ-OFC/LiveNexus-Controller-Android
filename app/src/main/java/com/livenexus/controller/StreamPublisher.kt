@@ -1,6 +1,7 @@
 package com.livenexus.controller
 
 import android.media.MediaCodec
+import android.os.SystemClock
 import android.util.Log
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
@@ -32,12 +33,20 @@ class StreamPublisher(
     private val threadPool = Executors.newCachedThreadPool()
     private val sendExecutor = Executors.newSingleThreadExecutor()
 
-    @Volatile private var baseTimestampUs: Long = -1L
+    @Volatile private var publisherStartMs: Long = -1L
+    @Volatile private var baseVideoTimestampUs: Long = -1L
+    @Volatile private var baseVideoOffsetMs: Long = 0L
+    @Volatile private var lastVideoTimestampMs: Long = 0L
+
+    @Volatile private var baseAudioTimestampUs: Long = -1L
+    @Volatile private var baseAudioOffsetMs: Long = 0L
+    @Volatile private var lastAudioTimestampMs: Long = 0L
+
     @Volatile private var active = false
 
-    private var cachedSps: ByteArray? = null
-    private var cachedPps: ByteArray? = null
-    private var cachedAsc: ByteArray? = null
+    @Volatile private var cachedSps: ByteArray? = null
+    @Volatile private var cachedPps: ByteArray? = null
+    @Volatile private var cachedAsc: ByteArray? = null
 
     val connectedPlatforms: List<String>
         get() = clients.filter { it.second.isPublishing }.map { it.first.platformName }
@@ -87,6 +96,7 @@ class StreamPublisher(
             }
         }
 
+        publisherStartMs = SystemClock.elapsedRealtime()
         active = clients.any { it.second.isPublishing }
         return errors
     }
@@ -114,10 +124,15 @@ class StreamPublisher(
     fun onVideoSample(naluBytes: ByteArray, info: MediaCodec.BufferInfo) {
         if (!active) return
 
-        if (baseTimestampUs < 0) {
-            baseTimestampUs = info.presentationTimeUs
+        if (baseVideoTimestampUs < 0) {
+            baseVideoTimestampUs = info.presentationTimeUs
+            val start = publisherStartMs
+            baseVideoOffsetMs = if (start > 0) (SystemClock.elapsedRealtime() - start).coerceAtLeast(0L) else 0L
         }
-        val timestampMs = ((info.presentationTimeUs - baseTimestampUs) / 1000L).coerceAtLeast(0L)
+        val rawMs = baseVideoOffsetMs + ((info.presentationTimeUs - baseVideoTimestampUs) / 1000L).coerceAtLeast(0L)
+        val timestampMs = maxOf(rawMs, lastVideoTimestampMs)
+        lastVideoTimestampMs = timestampMs
+
         val isKeyFrame = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
 
         sendExecutor.execute {
@@ -153,10 +168,14 @@ class StreamPublisher(
     fun onAudioSample(aacBytes: ByteArray, info: MediaCodec.BufferInfo) {
         if (!active) return
 
-        if (baseTimestampUs < 0) {
-            baseTimestampUs = info.presentationTimeUs
+        if (baseAudioTimestampUs < 0) {
+            baseAudioTimestampUs = info.presentationTimeUs
+            val start = publisherStartMs
+            baseAudioOffsetMs = if (start > 0) (SystemClock.elapsedRealtime() - start).coerceAtLeast(0L) else 0L
         }
-        val timestampMs = ((info.presentationTimeUs - baseTimestampUs) / 1000L).coerceAtLeast(0L)
+        val rawMs = baseAudioOffsetMs + ((info.presentationTimeUs - baseAudioTimestampUs) / 1000L).coerceAtLeast(0L)
+        val timestampMs = maxOf(rawMs, lastAudioTimestampMs)
+        lastAudioTimestampMs = timestampMs
 
         sendExecutor.execute {
             for ((target, client) in clients) {

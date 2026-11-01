@@ -44,6 +44,8 @@ class ScreenCaptureService : Service() {
             private set
         @Volatile var isCapturing: Boolean = false
             private set
+        @Volatile var isConnecting: Boolean = false
+            private set
         @Volatile var isLiveStreaming: Boolean = false
             private set
         @Volatile var activePlatforms: List<String> = emptyList()
@@ -73,6 +75,8 @@ class ScreenCaptureService : Service() {
     private var projectionCallback: MediaProjection.Callback? = null
     private var latestCapturedScreenFrame: Bitmap? = null
     private var screenBufferBitmap: Bitmap? = null
+    private var captureWidth: Int = 1280
+    private var captureHeight: Int = 720
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -93,14 +97,47 @@ class ScreenCaptureService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (intent?.action != ACTION_START || isCapturing) {
+        if (intent?.action != ACTION_START) {
             stopSelf()
             return START_NOT_STICKY
         }
+
+        val targetsJson = intent.getStringExtra(EXTRA_TARGETS_JSON)
+        val streamTargets = parseTargets(targetsJson)
+        val fps = intent.getIntExtra(EXTRA_FPS, 30)
+        val bitrate = intent.getIntExtra(EXTRA_BITRATE_KBPS, 4500)
+
+        val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
+            action = ACTION_STOP
+        }
+        val stopPendingIntent = PendingIntent.getService(
+            this, 0, stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // Se a captura de tela já estiver ativa (ex.: iniciada na aba Captura), reutiliza a sessão atual
+        if (isCapturing && projection != null && virtualDisplay != null) {
+            if (streamTargets.isNotEmpty()) {
+                val evenW = (captureWidth - captureWidth % 2).coerceAtLeast(2)
+                val evenH = (captureHeight - captureHeight % 2).coerceAtLeast(2)
+                startStreamingPipelineAsync(
+                    streamTargets = streamTargets,
+                    evenWidth = evenW,
+                    evenHeight = evenH,
+                    fps = fps,
+                    bitrate = bitrate,
+                    stopPendingIntent = stopPendingIntent,
+                    stopServiceOnFailure = false
+                )
+            }
+            return START_NOT_STICKY
+        }
+
         val consent = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
         if (resultCode != android.app.Activity.RESULT_OK || consent == null) {
             lastError = "Captura de tela indisponível neste ambiente"
+            isConnecting = false
             stopSelf()
             return START_NOT_STICKY
         }
@@ -110,17 +147,7 @@ class ScreenCaptureService : Service() {
             previewFrame = null
             isLiveStreaming = false
             activePlatforms = emptyList()
-
-            val targetsJson = intent.getStringExtra(EXTRA_TARGETS_JSON)
-            val streamTargets = parseTargets(targetsJson)
-
-            val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
-                action = ACTION_STOP
-            }
-            val stopPendingIntent = PendingIntent.getService(
-                this, 0, stopIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
+            isConnecting = streamTargets.isNotEmpty()
 
             val notificationTitle = if (streamTargets.isNotEmpty()) {
                 "LiveNEXUS - Transmissão Ao Vivo"
@@ -159,6 +186,7 @@ class ScreenCaptureService : Service() {
             val callback = object : MediaProjection.Callback() {
                 override fun onStop() {
                     isCapturing = false
+                    isConnecting = false
                     isLiveStreaming = false
                     stopSelf()
                 }
@@ -176,6 +204,8 @@ class ScreenCaptureService : Service() {
             val scale = minOf(1.0, maxDimension.toDouble() / maxOf(sourceWidth, sourceHeight))
             val width = (sourceWidth * scale).toInt().coerceAtLeast(2)
             val height = (sourceHeight * scale).toInt().coerceAtLeast(2)
+            captureWidth = width
+            captureHeight = height
 
             // Prévia local na UI do editor de cenas
             val captureReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
@@ -243,13 +273,48 @@ class ScreenCaptureService : Service() {
             )
             if (virtualDisplay == null) throw IllegalStateException("Captura de tela indisponível neste ambiente")
 
-            val fps = intent.getIntExtra(EXTRA_FPS, 30)
-            val bitrate = intent.getIntExtra(EXTRA_BITRATE_KBPS, 4500)
-            val evenWidth = width - width % 2
-            val evenHeight = height - height % 2
+            isCapturing = true
+            val evenWidth = (width - width % 2).coerceAtLeast(2)
+            val evenHeight = (height - height % 2).coerceAtLeast(2)
 
-            // Se destinos RTMP foram informados, inicia o transmissor e os encoders de vídeo e áudio
             if (streamTargets.isNotEmpty()) {
+                startStreamingPipelineAsync(
+                    streamTargets = streamTargets,
+                    evenWidth = evenWidth,
+                    evenHeight = evenHeight,
+                    fps = fps,
+                    bitrate = bitrate,
+                    stopPendingIntent = stopPendingIntent,
+                    stopServiceOnFailure = true
+                )
+            }
+        } catch (error: Throwable) {
+            val msg = error.message ?: "Falha ao iniciar transmissão"
+            lastError = msg
+            isConnecting = false
+            Log.e(TAG, "Falha ao iniciar captura/transmissão", error)
+            stopSelf()
+        }
+        return START_NOT_STICKY
+    }
+
+    private fun startStreamingPipelineAsync(
+        streamTargets: List<StreamPublisher.StreamTarget>,
+        evenWidth: Int,
+        evenHeight: Int,
+        fps: Int,
+        bitrate: Int,
+        stopPendingIntent: PendingIntent,
+        stopServiceOnFailure: Boolean
+    ) {
+        stopStreamingOnly()
+        lastError = null
+        isLiveStreaming = false
+        activePlatforms = emptyList()
+        isConnecting = true
+
+        Thread({
+            try {
                 val streamPub = StreamPublisher(
                     targets = streamTargets,
                     width = evenWidth,
@@ -259,7 +324,8 @@ class ScreenCaptureService : Service() {
                 )
                 val connErrors = streamPub.start()
                 if (!streamPub.hasActivePublishing) {
-                    val errMsg = connErrors.values.firstOrNull() ?: "Falha ao conectar aos servidores RTMP"
+                    val errMsg = connErrors.entries.firstOrNull()?.let { "${it.key}: ${it.value}" }
+                        ?: "Falha ao conectar aos servidores RTMP"
                     lastError = errMsg
                     streamPub.close()
                     throw IllegalStateException(errMsg)
@@ -342,16 +408,44 @@ class ScreenCaptureService : Service() {
                 } catch (audioErr: Throwable) {
                     Log.w(TAG, "Falha ao iniciar captura de áudio", audioErr)
                 }
+            } catch (error: Throwable) {
+                val msg = error.message ?: "Falha ao conectar ao servidor RTMP"
+                lastError = msg
+                isLiveStreaming = false
+                activePlatforms = emptyList()
+                Log.e(TAG, "Falha ao iniciar pipeline de transmissão RTMP", error)
+                stopStreamingOnly()
+                if (stopServiceOnFailure) {
+                    stopSelf()
+                }
+            } finally {
+                isConnecting = false
             }
+        }, "LiveNexusStreamStarter").start()
+    }
 
-            isCapturing = true
-        } catch (error: Throwable) {
-            val msg = error.message ?: "Falha ao iniciar transmissão"
-            lastError = msg
-            Log.e(TAG, "Falha ao iniciar captura/transmissão", error)
-            stopSelf()
-        }
-        return START_NOT_STICKY
+    private fun stopStreamingOnly() {
+        isLiveStreaming = false
+        activePlatforms = emptyList()
+        try {
+            compositor?.close()
+        } catch (_: Exception) {}
+        compositor = null
+
+        try {
+            audioEncoder?.close()
+        } catch (_: Exception) {}
+        audioEncoder = null
+
+        try {
+            videoEncoder?.close()
+        } catch (_: Exception) {}
+        videoEncoder = null
+
+        try {
+            publisher?.close()
+        } catch (_: Exception) {}
+        publisher = null
     }
 
     private fun parseTargets(json: String?): List<StreamPublisher.StreamTarget> {
@@ -412,30 +506,10 @@ class ScreenCaptureService : Service() {
 
     override fun onDestroy() {
         isCapturing = false
-        isLiveStreaming = false
-        activePlatforms = emptyList()
-
-        try {
-            compositor?.close()
-        } catch (_: Exception) {}
-        compositor = null
+        isConnecting = false
+        stopStreamingOnly()
         latestCapturedScreenFrame = null
         screenBufferBitmap = null
-
-        try {
-            audioEncoder?.close()
-        } catch (_: Exception) {}
-        audioEncoder = null
-
-        try {
-            videoEncoder?.close()
-        } catch (_: Exception) {}
-        videoEncoder = null
-
-        try {
-            publisher?.close()
-        } catch (_: Exception) {}
-        publisher = null
 
         virtualDisplay?.release()
         virtualDisplay = null

@@ -293,15 +293,40 @@ class MainActivity : Activity() {
                     connected = LiveNexusApi.streamingConnected(platform)
                 } catch (_: Exception) {}
                 platformConnected[platform] = connected
-                if (connected) capturePrefs.edit().putBoolean("stream_$platform", true).apply()
+                if (connected) {
+                    val existingName = capturePrefs.getString("${platform}_username", "") ?: ""
+                    val editor = capturePrefs.edit().putBoolean("stream_$platform", true)
+                    if (existingName.isBlank()) {
+                        val defaultLabel = when (platform) {
+                            "youtube" -> "Canal YouTube"
+                            "twitch" -> "Twitch Streamer"
+                            else -> "Kick Streamer"
+                        }
+                        editor.putString("${platform}_username", defaultLabel)
+                    }
+                    editor.apply()
+                }
                 runOnUiThread {
                     if (!isFinishing && !isDestroyed) {
                         if (connected) {
-                            AlertDialog.Builder(this@MainActivity)
-                                .setTitle("Conta Conectada")
-                                .setMessage("A conta do ${platform.uppercase()} foi conectada e autorizada com sucesso!")
-                                .setPositiveButton("OK") { _, _ -> render() }
-                                .show()
+                            val hasKey = !capturePrefs.getString("key_$platform", "").isNullOrBlank()
+                            if (!hasKey) {
+                                AlertDialog.Builder(this@MainActivity)
+                                    .setTitle("Conta Conectada (${platform.uppercase()})")
+                                    .setMessage("Login OAuth concluído! Para transmitir ao vivo via RTMP, insira a sua Chave de Transmissão (Stream Key):")
+                                    .setPositiveButton("Inserir Chave RTMP") { _, _ ->
+                                        if (platform == "youtube") openYouTubeStudioDialog()
+                                        else openStreamKeyDialog(platform, platform.replaceFirstChar { it.uppercase() })
+                                    }
+                                    .setNegativeButton("Mais tarde") { _, _ -> render() }
+                                    .show()
+                            } else {
+                                AlertDialog.Builder(this@MainActivity)
+                                    .setTitle("Conta Conectada")
+                                    .setMessage("A conta do ${platform.uppercase()} foi conectada e autorizada com sucesso!")
+                                    .setPositiveButton("OK") { _, _ -> render() }
+                                    .show()
+                            }
                             render()
                         } else {
                             val pName = when (platform) {
@@ -331,6 +356,10 @@ class MainActivity : Activity() {
                                         platformConnected[platform] = true
                                         Toast.makeText(this@MainActivity, "$pName vinculado com sucesso!", Toast.LENGTH_SHORT).show()
                                         render()
+                                        if (capturePrefs.getString("key_$platform", "").isNullOrBlank()) {
+                                            if (platform == "youtube") openYouTubeStudioDialog()
+                                            else openStreamKeyDialog(platform, pName)
+                                        }
                                     }
                                 }
                                 .setNegativeButton("Cancelar", null)
@@ -1115,7 +1144,7 @@ class MainActivity : Activity() {
     private fun openStreamKeyDialog(platform: String, platformName: String) {
         val currentKey = capturePrefs.getString("key_$platform", "") ?: ""
         val input = EditText(this).apply {
-            hint = "Ex: live_123456789_xxxxxx"
+            hint = if (platform == "youtube") "Ex: xxxx-xxxx-xxxx-xxxx-xxxx" else "Ex: live_123456789_xxxxxx"
             setSingleLine(true)
             setText(currentKey)
             selectAll()
@@ -1125,7 +1154,7 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(10), dp(12), dp(10))
         }
         val defaultRtmp = when (platform) {
-            "youtube" -> "rtmp://a.rtmp.youtube.com/live2"
+            "youtube" -> "rtmp://a.rtmp.youtube.com/live2\n(Fallback automático RTMPS 443 ativo)"
             "twitch" -> "rtmp://live.twitch.tv/app/"
             "kick" -> "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
             else -> "rtmp://"
@@ -1136,10 +1165,18 @@ class MainActivity : Activity() {
             .setView(input)
             .setPositiveButton("Salvar") { _, _ ->
                 val keyVal = input.text.toString().trim()
-                capturePrefs.edit()
+                if (keyVal.isBlank()) {
+                    Toast.makeText(this, "A Chave de Transmissão é obrigatória.", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val existingUser = capturePrefs.getString("${platform}_username", "") ?: ""
+                val editor = capturePrefs.edit()
                     .putString("key_$platform", keyVal)
                     .putBoolean("stream_$platform", true)
-                    .apply()
+                if (existingUser.isBlank()) {
+                    editor.putString("${platform}_username", "Canal $platformName")
+                }
+                editor.apply()
                 platformConnected[platform] = true
                 Toast.makeText(this, "$platformName salvo e autenticado!", Toast.LENGTH_SHORT).show()
                 render()
@@ -1183,7 +1220,7 @@ class MainActivity : Activity() {
         return array.toString()
     }
 
-    private fun launchStreamingServiceWithConsent(resultCode: Int, data: Intent) {
+    private fun launchStreamingServiceWithConsent(resultCode: Int, data: Intent?) {
         val targetsJson = buildActiveTargetsJson()
         if (targetsJson == "[]") {
             Toast.makeText(this, "Nenhuma plataforma com chave de transmissão válida.", Toast.LENGTH_SHORT).show()
@@ -1204,8 +1241,10 @@ class MainActivity : Activity() {
             val bitrate = capturePrefs.getInt("capture_bitrate_kbps", 4500)
             val intent = Intent(this, ScreenCaptureService::class.java).apply {
                 action = ScreenCaptureService.ACTION_START
-                putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
-                putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
+                if (data != null) {
+                    putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
+                    putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
+                }
                 putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
                 putExtra(ScreenCaptureService.EXTRA_FPS, fps)
                 putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
@@ -1213,39 +1252,54 @@ class MainActivity : Activity() {
             }
             startService(intent)
 
-            uiHandler.postDelayed({
-                progress.dismiss()
-                if (ScreenCaptureService.isLiveStreaming) {
-                    isTransmitting = true
-                    transmissionStartTime = System.currentTimeMillis()
-                    ControllerRuntime.isTransmitting = true
-                    ControllerRuntime.transmissionStartTime = transmissionStartTime
-                    OverlayService.refreshVisibility()
-                    uiHandler.removeCallbacks(transmissionTimerRunnable)
-                    uiHandler.post(transmissionTimerRunnable)
-                    val activeNames = ScreenCaptureService.activePlatforms.joinToString(", ")
-                    Toast.makeText(this, "Transmissão ao vivo iniciada para: $activeNames!", Toast.LENGTH_LONG).show()
-                } else {
-                    isTransmitting = false
-                    val errMsg = ScreenCaptureService.lastError ?: "Falha ao conectar com servidor RTMP"
-                    AlertDialog.Builder(this@MainActivity)
-                        .setTitle("Falha na Transmissão")
-                        .setMessage("Não foi possível publicar ao vivo:\n\n$errMsg\n\nVerifique sua conexão e a chave de transmissão.")
-                        .setPositiveButton("OK", null)
-                        .show()
+            val pollStart = System.currentTimeMillis()
+            val pollRunnable = object : Runnable {
+                override fun run() {
+                    if (isFinishing || isDestroyed) {
+                        try { progress.dismiss() } catch (_: Exception) {}
+                        return
+                    }
+                    val elapsed = System.currentTimeMillis() - pollStart
+                    // Aguarda pelo menos 400ms para o Service iniciar e enquanto isConnecting for true (até 18s)
+                    if ((elapsed < 400L || ScreenCaptureService.isConnecting) && elapsed < 18000L) {
+                        uiHandler.postDelayed(this, 250L)
+                        return
+                    }
+
+                    try { progress.dismiss() } catch (_: Exception) {}
+                    if (ScreenCaptureService.isLiveStreaming) {
+                        isTransmitting = true
+                        transmissionStartTime = System.currentTimeMillis()
+                        ControllerRuntime.isTransmitting = true
+                        ControllerRuntime.transmissionStartTime = transmissionStartTime
+                        OverlayService.refreshVisibility()
+                        uiHandler.removeCallbacks(transmissionTimerRunnable)
+                        uiHandler.post(transmissionTimerRunnable)
+                        val activeNames = ScreenCaptureService.activePlatforms.joinToString(", ")
+                        Toast.makeText(this@MainActivity, "Transmissão ao vivo iniciada para: $activeNames!", Toast.LENGTH_LONG).show()
+                    } else {
+                        isTransmitting = false
+                        val errMsg = ScreenCaptureService.lastError ?: "Falha ao conectar com servidor RTMP"
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Falha na Transmissão")
+                            .setMessage("Não foi possível publicar ao vivo:\n\n$errMsg\n\nVerifique sua conexão e a chave de transmissão.")
+                            .setPositiveButton("OK", null)
+                            .show()
+                    }
+                    render()
                 }
-                render()
-            }, 1800L)
+            }
+            uiHandler.postDelayed(pollRunnable, 300L)
         } catch (e: Throwable) {
-            progress.dismiss()
+            try { progress.dismiss() } catch (_: Exception) {}
             ScreenCaptureService.reportError(e.message ?: "Falha ao iniciar transmissão")
             Toast.makeText(this, "Erro: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun startLiveTransmission() {
-        if (lastMediaProjectionResultCode == RESULT_OK && lastMediaProjectionData != null) {
-            launchStreamingServiceWithConsent(lastMediaProjectionResultCode, lastMediaProjectionData!!)
+        if (ScreenCaptureService.isCapturing) {
+            launchStreamingServiceWithConsent(0, null)
         } else {
             initiateScreenCaptureAndStream()
         }
@@ -1254,6 +1308,8 @@ class MainActivity : Activity() {
     private fun stopLiveTransmission() {
         isTransmitting = false
         transmissionStartTime = 0L
+        lastMediaProjectionResultCode = 0
+        lastMediaProjectionData = null
         ControllerRuntime.isTransmitting = false
         ControllerRuntime.transmissionStartTime = 0L
         OverlayService.refreshVisibility()
@@ -1289,7 +1345,8 @@ class MainActivity : Activity() {
                 .setTitle("Chave Necessária - ${missingKey.second}")
                 .setMessage("A plataforma ${missingKey.second} está selecionada, mas não possui chave de transmissão (Stream Key) configurada.\n\nPor favor, insira a chave RTMP da ${missingKey.second} para transmitir.")
                 .setPositiveButton("Inserir Chave") { _, _ ->
-                    openStreamKeyDialog(missingKey.third, missingKey.second)
+                    if (missingKey.third == "youtube") openYouTubeStudioDialog()
+                    else openStreamKeyDialog(missingKey.third, missingKey.second)
                 }
                 .setNegativeButton("Cancelar", null)
                 .show()
@@ -1306,18 +1363,20 @@ class MainActivity : Activity() {
     }
 
     private fun initiateScreenCaptureAndStream() {
-        if (!ScreenCaptureService.isCapturing) {
-            try {
-                val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
-                val captureIntent = manager?.createScreenCaptureIntent()
-                if (captureIntent != null && captureIntent.resolveActivity(packageManager) != null) {
-                    pendingStartTransmissionAfterCapture = true
-                    startActivityForResult(captureIntent, CAPTURE_REQUEST)
-                    return
-                }
-            } catch (_: Throwable) {}
+        if (ScreenCaptureService.isCapturing) {
+            launchStreamingServiceWithConsent(0, null)
+            return
         }
-        startLiveTransmission()
+        try {
+            val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+            val captureIntent = manager?.createScreenCaptureIntent()
+            if (captureIntent != null && captureIntent.resolveActivity(packageManager) != null) {
+                pendingStartTransmissionAfterCapture = true
+                startActivityForResult(captureIntent, CAPTURE_REQUEST)
+                return
+            }
+        } catch (_: Throwable) {}
+        Toast.makeText(this, "Não foi possível solicitar permissão de captura de tela.", Toast.LENGTH_SHORT).show()
     }
 
     // ==========================================
