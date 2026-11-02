@@ -36,7 +36,7 @@ class RtmpClient(
 
     companion object {
         private const val TAG = "LiveNexusRtmp"
-        private const val OUT_CHUNK_SIZE = 4096
+        private const val OUT_CHUNK_SIZE = 65536
         private const val CONNECT_TIMEOUT_MS = 6000
         private const val HANDSHAKE_TIMEOUT_MS = 10000
 
@@ -271,10 +271,13 @@ class RtmpClient(
         rawSocket.soTimeout = HANDSHAKE_TIMEOUT_MS
         rawSocket.tcpNoDelay = true
         rawSocket.keepAlive = true
+        try {
+            rawSocket.sendBufferSize = 524288
+        } catch (_: Exception) {}
         socket = rawSocket
 
         val bis = BufferedInputStream(rawSocket.getInputStream(), 65536)
-        val bos = BufferedOutputStream(rawSocket.getOutputStream(), 65536)
+        val bos = BufferedOutputStream(rawSocket.getOutputStream(), 131072)
         inStream = bis
         outStream = bos
 

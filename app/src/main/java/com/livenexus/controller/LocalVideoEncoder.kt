@@ -57,13 +57,11 @@ class LocalVideoEncoder(
                     MediaFormat.KEY_BITRATE_MODE,
                     MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
                 )
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
+                setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
                 }
-                // YouTube e RTMP exigem AVC Baseline ou Main sem B-frames (CTS == PTS)
-                try {
-                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
-                } catch (_: Exception) {}
             }
         }
     }
@@ -75,8 +73,8 @@ class LocalVideoEncoder(
             "Dimensões H.264 devem ser positivas e pares."
         }
         require(fps == 30 || fps == 60) { "FPS deve ser 30 ou 60." }
-        require(bitrateKbps in 2000..10000 && bitrateKbps % 500 == 0) {
-            "Bitrate deve estar entre 2000 e 10000 Kbps, em passos de 500."
+        require(bitrateKbps in 1000..15000) {
+            "Bitrate deve estar entre 1000 e 15000 Kbps."
         }
 
         var created = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
@@ -99,17 +97,13 @@ class LocalVideoEncoder(
 
             val activeCodec = created
             worker = Thread({
+                try {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
+                } catch (_: Exception) {}
                 val info = MediaCodec.BufferInfo()
-                var lastSyncRequestMs = SystemClock.elapsedRealtime()
                 var emittedFrames = 0L
                 try {
                     while (running) {
-                        val now = SystemClock.elapsedRealtime()
-                        if (now - lastSyncRequestMs >= SYNC_FRAME_INTERVAL_MS) {
-                            lastSyncRequestMs = now
-                            requestKeyFrameInternal(activeCodec)
-                        }
-
                         when (val index = activeCodec.dequeueOutputBuffer(info, 10000L)) {
                             MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                                 val outFmt = activeCodec.outputFormat

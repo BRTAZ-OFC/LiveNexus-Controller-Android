@@ -55,7 +55,12 @@ class SceneCompositor(
         isRunning = true
 
         renderThread = Thread({
+            try {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY)
+            } catch (_: Throwable) {}
+
             var useEgl = false
+            var textureInitialized = false
             try {
                 try {
                     initEGL()
@@ -68,32 +73,35 @@ class SceneCompositor(
                     useEgl = false
                 }
 
-                val frameIntervalMs = (1000L / fps).coerceAtLeast(10L)
+                val safeFps = fps.coerceIn(15, 60)
+                val frameIntervalNs = 1_000_000_000L / safeFps
                 val startNs = System.nanoTime()
+                var nextFrameTargetNs = startNs
                 var frameIndex = 0L
 
                 while (isRunning) {
-                    val frameStart = System.currentTimeMillis()
-
                     // Renderiza o cenário no Canvas
                     renderAction(compositedCanvas, width, height)
 
                     // Notifica prévia local se solicitado (a cada meio segundo)
-                    if (frameIndex % (fps / 2).coerceAtLeast(1) == 0L) {
+                    if (onFrameRendered != null && frameIndex % (safeFps / 2).coerceAtLeast(1) == 0L) {
                         try {
-                            onFrameRendered?.invoke(compositedBitmap)
+                            onFrameRendered.invoke(compositedBitmap)
                         } catch (_: Exception) {}
                     }
 
                     if (useEgl) {
-                        // Envia o frame renderizado para a textura OpenGL
                         GLES20.glViewport(0, 0, width, height)
-                        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                         GLES20.glUseProgram(program)
 
                         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
-                        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, compositedBitmap, 0)
+                        if (!textureInitialized) {
+                            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, compositedBitmap, 0)
+                            textureInitialized = true
+                        } else {
+                            GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, compositedBitmap)
+                        }
                         GLES20.glUniform1i(uTextureLoc, 0)
 
                         vertexBuffer?.position(0)
@@ -106,8 +114,8 @@ class SceneCompositor(
 
                         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
-                        // Define o timestamp de apresentação para o MediaCodec (em nanos)
-                        val ptsNs = System.nanoTime() - startNs
+                        // Define o timestamp de apresentação cadenciado para o MediaCodec (em nanos)
+                        val ptsNs = (System.nanoTime() - startNs).coerceAtLeast(frameIndex * frameIntervalNs)
                         EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, ptsNs)
                         EGL14.eglSwapBuffers(eglDisplay, eglSurface)
                     } else if (outputSurface.isValid) {
@@ -126,15 +134,18 @@ class SceneCompositor(
                     }
 
                     frameIndex++
-
-                    val elapsed = System.currentTimeMillis() - frameStart
-                    val waitTime = frameIntervalMs - elapsed
-                    if (waitTime > 0) {
+                    nextFrameTargetNs += frameIntervalNs
+                    val nowNs = System.nanoTime()
+                    val sleepNs = nextFrameTargetNs - nowNs
+                    if (sleepNs > 1_000_000L) {
                         try {
-                            Thread.sleep(waitTime)
+                            Thread.sleep(sleepNs / 1_000_000L, (sleepNs % 1_000_000L).toInt())
                         } catch (_: InterruptedException) {
                             break
                         }
+                    } else if (sleepNs < -frameIntervalNs * 2) {
+                        // Evita rajada de frames caso a CPU atrase momentaneamente
+                        nextFrameTargetNs = nowNs
                     }
                 }
             } catch (e: Throwable) {

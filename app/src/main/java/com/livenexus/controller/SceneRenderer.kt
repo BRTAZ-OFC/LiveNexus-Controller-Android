@@ -13,81 +13,23 @@ import kotlin.math.max
  * Usado tanto na prévia interativa (CaptureSceneCanvas) quanto na transmissão ao vivo (SceneCompositor).
  */
 object SceneRenderer {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textAlign = Paint.Align.LEFT
+    private val paintLocal = object : ThreadLocal<Paint>() {
+        override fun initialValue() = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
     }
-    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
+    private val textPaintLocal = object : ThreadLocal<Paint>() {
+        override fun initialValue() = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textAlign = Paint.Align.LEFT
+        }
     }
-
-    /**
-     * Remove barras escuras ou claras uniformes de letterboxing/pillarboxing sem cortar conteúdo legítimo.
-     */
-    fun previewContentRect(bitmap: Bitmap): Rect {
-        val w = bitmap.width
-        val h = bitmap.height
-        val full = Rect(0, 0, w, h)
-        if (w < 80 || h < 80) return full
-
-        fun isUniformBorderPixel(color: Int, refColor: Int): Boolean {
-            val dr = kotlin.math.abs(Color.red(color) - Color.red(refColor))
-            val dg = kotlin.math.abs(Color.green(color) - Color.green(refColor))
-            val db = kotlin.math.abs(Color.blue(color) - Color.blue(refColor))
-            if (dr > 10 || dg > 10 || db > 10) return false
-            val r = Color.red(color)
-            val g = Color.green(color)
-            val b = Color.blue(color)
-            val isDark = maxOf(r, g, b) <= 16
-            val isLight = minOf(r, g, b) >= 180 && (maxOf(r, g, b) - minOf(r, g, b) <= 20)
-            return isDark || isLight
+    private val borderPaintLocal = object : ThreadLocal<Paint>() {
+        override fun initialValue() = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
         }
-
-        val samples = floatArrayOf(0.2f, 0.35f, 0.5f, 0.65f, 0.8f)
-
-        fun blankCol(x: Int): Boolean {
-            val cx = x.coerceIn(0, w - 1)
-            val ref = bitmap.getPixel(cx, h / 2)
-            for (f in samples) {
-                val y = (h * f).toInt().coerceIn(0, h - 1)
-                if (!isUniformBorderPixel(bitmap.getPixel(cx, y), ref)) return false
-            }
-            return true
-        }
-
-        fun blankRow(y: Int): Boolean {
-            val cy = y.coerceIn(0, h - 1)
-            val ref = bitmap.getPixel(w / 2, cy)
-            for (f in samples) {
-                val x = (w * f).toInt().coerceIn(0, w - 1)
-                if (!isUniformBorderPixel(bitmap.getPixel(x, cy), ref)) return false
-            }
-            return true
-        }
-
-        var left = 0
-        var right = w - 1
-        if (blankCol(1) && blankCol(w - 2) && !blankCol(w / 2)) {
-            val maxCropX = w * 38 / 100
-            while (left < maxCropX && blankCol(left)) left += 2
-            while (right > w - 1 - maxCropX && blankCol(right)) right -= 2
-        }
-
-        var top = 0
-        var bottom = h - 1
-        if (blankRow(1) && blankRow(h - 2) && !blankRow(h / 2)) {
-            val maxCropY = h * 38 / 100
-            while (top < maxCropY && blankRow(top)) top += 2
-            while (bottom > h - 1 - maxCropY && blankRow(bottom)) bottom -= 2
-        }
-
-        if (right - left < w / 4 || bottom - top < h / 4) return full
-        return Rect(left, top, right + 1, bottom + 1)
     }
 
     /**
-     * Renderiza o cenário completo nas dimensões especificadas.
+     * Renderiza o cenário completo nas dimensões especificadas de forma determinística e estável.
      */
     fun render(
         canvas: Canvas,
@@ -99,6 +41,9 @@ object SceneRenderer {
         selectedLayerId: String? = null,
         handleSize: Float = 0f
     ) {
+        val paint = paintLocal.get()!!
+        val textPaint = textPaintLocal.get()!!
+        val borderPaint = borderPaintLocal.get()!!
         val area = RectF(0f, 0f, width.toFloat(), height.toFloat())
 
         // 1. Fundo do estúdio
@@ -141,28 +86,21 @@ object SceneRenderer {
                         paint.color = Color.rgb(6, 10, 24)
                         canvas.drawRect(box, paint)
                         paint.color = Color.WHITE
-                        val region = previewContentRect(screenFrame)
-                        val srcW = region.width().toFloat().coerceAtLeast(1f)
-                        val srcH = region.height().toFloat().coerceAtLeast(1f)
+                        val srcW = screenFrame.width.toFloat().coerceAtLeast(1f)
+                        val srcH = screenFrame.height.toFloat().coerceAtLeast(1f)
                         val boxW = box.width().coerceAtLeast(1f)
                         val boxH = box.height().coerceAtLeast(1f)
-                        val srcAspect = srcW / srcH
-                        val boxAspect = boxW / boxH
-                        if (kotlin.math.abs(srcAspect - boxAspect) / boxAspect <= 0.08f) {
-                            canvas.drawBitmap(screenFrame, region, box, paint)
-                        } else {
-                            val scale = minOf(boxW / srcW, boxH / srcH)
-                            val drawW = srcW * scale
-                            val drawH = srcH * scale
-                            val dstLeft = box.left + (boxW - drawW) / 2f
-                            val dstTop = box.top + (boxH - drawH) / 2f
-                            canvas.drawBitmap(
-                                screenFrame,
-                                region,
-                                RectF(dstLeft, dstTop, dstLeft + drawW, dstTop + drawH),
-                                paint
-                            )
-                        }
+                        val scale = minOf(boxW / srcW, boxH / srcH)
+                        val drawW = srcW * scale
+                        val drawH = srcH * scale
+                        val dstLeft = box.left + (boxW - drawW) / 2f
+                        val dstTop = box.top + (boxH - drawH) / 2f
+                        canvas.drawBitmap(
+                            screenFrame,
+                            null,
+                            RectF(dstLeft, dstTop, dstLeft + drawW, dstTop + drawH),
+                            paint
+                        )
                         canvas.restore()
                     } else if (!isLiveStream) {
                         paint.style = Paint.Style.FILL

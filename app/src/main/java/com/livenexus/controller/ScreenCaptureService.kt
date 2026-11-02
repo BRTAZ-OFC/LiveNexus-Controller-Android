@@ -111,9 +111,10 @@ class ScreenCaptureService : Service() {
     private var displayListener: DisplayManager.DisplayListener? = null
     @Volatile private var latestCapturedScreenFrame: Bitmap? = null
     private var screenBufferBitmap: Bitmap? = null
-    private var transformedFrameBitmapA: Bitmap? = null
-    private var transformedFrameBitmapB: Bitmap? = null
-    private var useBufferA: Boolean = true
+    private val ringBitmaps = arrayOfNulls<Bitmap>(3)
+    private var ringIndex: Int = 0
+    private val previewBitmaps = arrayOfNulls<Bitmap>(2)
+    private var previewIndex: Int = 0
     private val transformPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
 
     private var captureWidth: Int = 1280
@@ -404,6 +405,23 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    private fun computePhysicalCaptureDimensions(dispW: Int, dispH: Int, maxDimension: Int): Pair<Int, Int> {
+        val safeW = dispW.coerceAtLeast(2)
+        val safeH = dispH.coerceAtLeast(2)
+        val maxDim = maxDimension.coerceIn(720, 1920)
+        return if (safeW >= safeH) {
+            val w = (maxDim - (maxDim % 2)).coerceAtLeast(480)
+            val rawH = ((w.toLong() * safeH) / safeW).toInt()
+            val h = (rawH - (rawH % 2)).coerceAtLeast(270)
+            Pair(w, h)
+        } else {
+            val h = (maxDim - (maxDim % 2)).coerceAtLeast(480)
+            val rawW = ((h.toLong() * safeW) / safeH).toInt()
+            val w = (rawW - (rawW % 2)).coerceAtLeast(270)
+            Pair(w, h)
+        }
+    }
+
     private fun setupOrResizeVirtualDisplay(activeProjection: MediaProjection, workerHandler: Handler) {
         synchronized(captureLock) {
             val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -415,13 +433,17 @@ class ScreenCaptureService : Service() {
             @Suppress("DEPRECATION")
             lastDisplayRotation = display.rotation
 
-            val (targetW, targetH) = computeTargetDimensions(configuredMaxDimension, isVerticalMode)
+            val (targetW, targetH) = computePhysicalCaptureDimensions(
+                metrics.widthPixels,
+                metrics.heightPixels,
+                configuredMaxDimension
+            )
             captureWidth = targetW
             captureHeight = targetH
 
-            val newReader = ImageReader.newInstance(targetW, targetH, PixelFormat.RGBA_8888, 2)
+            val newReader = ImageReader.newInstance(targetW, targetH, PixelFormat.RGBA_8888, 3)
             newReader.setOnImageAvailableListener({ source ->
-                processCapturedImage(source, targetW, targetH)
+                processCapturedImage(source)
             }, workerHandler)
 
             val oldReader = reader
@@ -470,7 +492,7 @@ class ScreenCaptureService : Service() {
                 } catch (_: Exception) {}
             }
 
-            Log.i(TAG, "Captura configurada em ${targetW}x${targetH} (vertical=$isVerticalMode, display=${metrics.widthPixels}x${metrics.heightPixels})")
+            Log.i(TAG, "Captura nativa configurada em ${targetW}x${targetH} (display=${metrics.widthPixels}x${metrics.heightPixels})")
         }
     }
 
@@ -480,9 +502,18 @@ class ScreenCaptureService : Service() {
         if (!isCapturing) return
 
         val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val metrics = DisplayMetrics()
         @Suppress("DEPRECATION")
-        val currentRotation = windowManager.defaultDisplay.rotation
-        val (targetW, targetH) = computeTargetDimensions(configuredMaxDimension, isVerticalMode)
+        val display = windowManager.defaultDisplay
+        @Suppress("DEPRECATION")
+        display.getRealMetrics(metrics)
+        @Suppress("DEPRECATION")
+        val currentRotation = display.rotation
+        val (targetW, targetH) = computePhysicalCaptureDimensions(
+            metrics.widthPixels,
+            metrics.heightPixels,
+            configuredMaxDimension
+        )
 
         if (!force && currentRotation == lastDisplayRotation && captureWidth == targetW && captureHeight == targetH) {
             return
@@ -495,45 +526,67 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun processCapturedImage(source: ImageReader, targetW: Int, targetH: Int) {
+    private fun processCapturedImage(source: ImageReader) {
         val image = try { source.acquireLatestImage() } catch (_: RuntimeException) { null } ?: return
         try {
             val plane = image.planes.firstOrNull()
             if (plane != null && plane.pixelStride == 4) {
+                val imgW = image.width
+                val imgH = image.height
                 val paddedWidth = plane.rowStride / plane.pixelStride
-                if (paddedWidth >= image.width) {
-                    var buffer = screenBufferBitmap
-                    if (buffer == null || buffer.width != paddedWidth || buffer.height != image.height) {
-                        buffer = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
-                        screenBufferBitmap = buffer
-                    }
-                    plane.buffer.rewind()
-                    buffer.copyPixelsFromBuffer(plane.buffer)
-                    val rawFrame = if (paddedWidth == image.width) buffer else {
-                        Bitmap.createBitmap(buffer, 0, 0, image.width, image.height)
+                if (paddedWidth >= imgW && imgW > 0 && imgH > 0) {
+                    val idx = ringIndex
+                    ringIndex = (ringIndex + 1) % ringBitmaps.size
+                    var dstBitmap = ringBitmaps[idx]
+                    if (dstBitmap == null || dstBitmap.width != imgW || dstBitmap.height != imgH || dstBitmap.isRecycled) {
+                        dstBitmap = Bitmap.createBitmap(imgW, imgH, Bitmap.Config.ARGB_8888)
+                        ringBitmaps[idx] = dstBitmap
                     }
 
-                    // Extrai a região útil real da tela removendo barras de letterbox/pillarbox do SurfaceFlinger
-                    // e formata exatamente na proporção selecionada (16:9 Horizontal ou 9:16 Vertical)
-                    val contentRect = extractActiveContentRect(rawFrame)
-                    val formattedFrame = transformToTargetAspect(rawFrame, contentRect, targetW, targetH)
-                    latestCapturedScreenFrame = formattedFrame
+                    plane.buffer.rewind()
+                    if (paddedWidth == imgW) {
+                        dstBitmap.copyPixelsFromBuffer(plane.buffer)
+                    } else {
+                        var strideBuf = screenBufferBitmap
+                        if (strideBuf == null || strideBuf.width != paddedWidth || strideBuf.height != imgH || strideBuf.isRecycled) {
+                            strideBuf = Bitmap.createBitmap(paddedWidth, imgH, Bitmap.Config.ARGB_8888)
+                            screenBufferBitmap = strideBuf
+                        }
+                        strideBuf.copyPixelsFromBuffer(plane.buffer)
+                        val canvas = Canvas(dstBitmap)
+                        val srcRect = Rect(0, 0, imgW, imgH)
+                        val dstRect = Rect(0, 0, imgW, imgH)
+                        canvas.drawBitmap(strideBuf, srcRect, dstRect, null)
+                    }
+
+                    latestCapturedScreenFrame = dstBitmap
 
                     val now = android.os.SystemClock.elapsedRealtime()
-                    if (now - lastPreviewAt >= 120L || previewFrame == null) {
+                    if (now - lastPreviewAt >= 180L || previewFrame == null) {
                         lastPreviewAt = now
                         val maxPreviewSide = 640
-                        val maxSrcSide = maxOf(formattedFrame.width, formattedFrame.height).toFloat().coerceAtLeast(1f)
+                        val maxSrcSide = maxOf(imgW, imgH).toFloat().coerceAtLeast(1f)
                         val ratio = minOf(1f, maxPreviewSide.toFloat() / maxSrcSide)
-                        previewFrame = if (ratio < 1f) {
-                            Bitmap.createScaledBitmap(
-                                formattedFrame,
-                                (formattedFrame.width * ratio).toInt().coerceAtLeast(2),
-                                (formattedFrame.height * ratio).toInt().coerceAtLeast(2),
-                                true
+                        if (ratio < 1f) {
+                            val pw = (imgW * ratio).toInt().coerceAtLeast(2)
+                            val ph = (imgH * ratio).toInt().coerceAtLeast(2)
+                            val pIdx = previewIndex
+                            previewIndex = (previewIndex + 1) % previewBitmaps.size
+                            var pBmp = previewBitmaps[pIdx]
+                            if (pBmp == null || pBmp.width != pw || pBmp.height != ph || pBmp.isRecycled) {
+                                pBmp = Bitmap.createBitmap(pw, ph, Bitmap.Config.ARGB_8888)
+                                previewBitmaps[pIdx] = pBmp
+                            }
+                            val pCanvas = Canvas(pBmp)
+                            pCanvas.drawBitmap(
+                                dstBitmap,
+                                null,
+                                RectF(0f, 0f, pw.toFloat(), ph.toFloat()),
+                                transformPaint
                             )
+                            previewFrame = pBmp
                         } else {
-                            formattedFrame
+                            previewFrame = dstBitmap
                         }
                     }
                 }
@@ -543,128 +596,6 @@ class ScreenCaptureService : Service() {
         } finally {
             image.close()
         }
-    }
-
-    /**
-     * Detecta e remove barras pretas ou claras uniformes (pillarbox / letterbox) inseridas pelo SurfaceFlinger
-     * quando a orientação física da tela difere do VirtualDisplay, preservando 100% da área útil.
-     */
-    private fun extractActiveContentRect(bitmap: Bitmap): Rect {
-        val w = bitmap.width
-        val h = bitmap.height
-        val full = Rect(0, 0, w, h)
-        if (w < 64 || h < 64) return full
-
-        fun isUniformBorderPixel(color: Int, refColor: Int): Boolean {
-            val dr = abs(Color.red(color) - Color.red(refColor))
-            val dg = abs(Color.green(color) - Color.green(refColor))
-            val db = abs(Color.blue(color) - Color.blue(refColor))
-            if (dr > 8 || dg > 8 || db > 8) return false
-            val r = Color.red(color)
-            val g = Color.green(color)
-            val b = Color.blue(color)
-            val isDarkBar = maxOf(r, g, b) <= 14
-            val isLightBar = minOf(r, g, b) >= 240 && (maxOf(r, g, b) - minOf(r, g, b) <= 12)
-            return isDarkBar || isLightBar
-        }
-
-        val sampleFractions = floatArrayOf(0.18f, 0.35f, 0.50f, 0.65f, 0.82f)
-
-        fun isColumnUniformBorder(x: Int): Boolean {
-            val clampedX = x.coerceIn(0, w - 1)
-            val ref = bitmap.getPixel(clampedX, (h * 0.5f).toInt())
-            for (f in sampleFractions) {
-                val y = (h * f).toInt().coerceIn(0, h - 1)
-                if (!isUniformBorderPixel(bitmap.getPixel(clampedX, y), ref)) return false
-            }
-            return true
-        }
-
-        fun isRowUniformBorder(y: Int): Boolean {
-            val clampedY = y.coerceIn(0, h - 1)
-            val ref = bitmap.getPixel((w * 0.5f).toInt(), clampedY)
-            for (f in sampleFractions) {
-                val x = (w * f).toInt().coerceIn(0, w - 1)
-                if (!isUniformBorderPixel(bitmap.getPixel(x, clampedY), ref)) return false
-            }
-            return true
-        }
-
-        var left = 0
-        var right = w - 1
-        if (isColumnUniformBorder(1) && isColumnUniformBorder(w - 2) && !isColumnUniformBorder(w / 2)) {
-            val maxCropX = (w * 0.38f).toInt()
-            while (left < maxCropX && isColumnUniformBorder(left)) left += 2
-            while (right > w - 1 - maxCropX && isColumnUniformBorder(right)) right -= 2
-        }
-
-        var top = 0
-        var bottom = h - 1
-        if (isRowUniformBorder(1) && isRowUniformBorder(h - 2) && !isRowUniformBorder(h / 2)) {
-            val maxCropY = (h * 0.38f).toInt()
-            while (top < maxCropY && isRowUniformBorder(top)) top += 2
-            while (bottom > h - 1 - maxCropY && isRowUniformBorder(bottom)) bottom -= 2
-        }
-
-        val rectW = right - left + 1
-        val rectH = bottom - top + 1
-        if (rectW < w / 4 || rectH < h / 4) return full
-        return Rect(left, top, right + 1, bottom + 1)
-    }
-
-    /**
-     * Compõe o conteúdo capturado para um Bitmap nas dimensões exatas de destino (16:9 ou 9:16),
-     * sem distorcer, esticar, girar ou cortar o conteúdo.
-     */
-    private fun transformToTargetAspect(source: Bitmap, srcRect: Rect, targetW: Int, targetH: Int): Bitmap {
-        if (srcRect.left == 0 && srcRect.top == 0 &&
-            srcRect.width() == source.width && srcRect.height() == source.height &&
-            source.width == targetW && source.height == targetH
-        ) {
-            return source
-        }
-
-        val dstBitmap = if (useBufferA) {
-            var b = transformedFrameBitmapA
-            if (b == null || b.width != targetW || b.height != targetH || b.isRecycled) {
-                b = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-                transformedFrameBitmapA = b
-            }
-            b
-        } else {
-            var b = transformedFrameBitmapB
-            if (b == null || b.width != targetW || b.height != targetH || b.isRecycled) {
-                b = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-                transformedFrameBitmapB = b
-            }
-            b
-        }
-        useBufferA = !useBufferA
-
-        val canvas = Canvas(dstBitmap)
-        canvas.drawColor(Color.rgb(6, 10, 24))
-
-        val srcW = srcRect.width().toFloat().coerceAtLeast(1f)
-        val srcH = srcRect.height().toFloat().coerceAtLeast(1f)
-        val dstW = targetW.toFloat()
-        val dstH = targetH.toFloat()
-
-        val srcAspect = srcW / srcH
-        val dstAspect = dstW / dstH
-
-        val dstRect = if (abs(srcAspect - dstAspect) / dstAspect <= 0.06f) {
-            RectF(0f, 0f, dstW, dstH)
-        } else {
-            val scale = minOf(dstW / srcW, dstH / srcH)
-            val drawW = srcW * scale
-            val drawH = srcH * scale
-            val left = (dstW - drawW) / 2f
-            val top = (dstH - drawH) / 2f
-            RectF(left, top, left + drawW, top + drawH)
-        }
-
-        canvas.drawBitmap(source, srcRect, dstRect, transformPaint)
-        return dstBitmap
     }
 
     /**
@@ -853,8 +784,8 @@ class ScreenCaptureService : Service() {
         isCapturing = false
         latestCapturedScreenFrame = null
         screenBufferBitmap = null
-        transformedFrameBitmapA = null
-        transformedFrameBitmapB = null
+        for (i in ringBitmaps.indices) ringBitmaps[i] = null
+        for (i in previewBitmaps.indices) previewBitmaps[i] = null
         previewFrame = null
         captureHandler = null
 
