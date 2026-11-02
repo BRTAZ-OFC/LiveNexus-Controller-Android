@@ -23,29 +23,67 @@ object SceneRenderer {
     }
 
     /**
-     * Remove barras claras uniformes de letterboxing sem cortar conteúdo legítimo.
+     * Remove barras escuras ou claras uniformes de letterboxing/pillarboxing sem cortar conteúdo legítimo.
      */
     fun previewContentRect(bitmap: Bitmap): Rect {
-        val full = Rect(0, 0, bitmap.width, bitmap.height)
-        if (bitmap.width < 100 || bitmap.height < 100) return full
-        fun blankAt(x: Int): Boolean {
-            for (fraction in floatArrayOf(.25f, .5f, .75f)) {
-                val y = (bitmap.height * fraction).toInt().coerceIn(0, bitmap.height - 1)
-                val color = bitmap.getPixel(x.coerceIn(0, bitmap.width - 1), y)
-                val r = Color.red(color)
-                val g = Color.green(color)
-                val b = Color.blue(color)
-                if (minOf(r, g, b) < 170 || maxOf(r, g, b) - minOf(r, g, b) > 24) return false
+        val w = bitmap.width
+        val h = bitmap.height
+        val full = Rect(0, 0, w, h)
+        if (w < 80 || h < 80) return full
+
+        fun isUniformBorderPixel(color: Int, refColor: Int): Boolean {
+            val dr = kotlin.math.abs(Color.red(color) - Color.red(refColor))
+            val dg = kotlin.math.abs(Color.green(color) - Color.green(refColor))
+            val db = kotlin.math.abs(Color.blue(color) - Color.blue(refColor))
+            if (dr > 10 || dg > 10 || db > 10) return false
+            val r = Color.red(color)
+            val g = Color.green(color)
+            val b = Color.blue(color)
+            val isDark = maxOf(r, g, b) <= 16
+            val isLight = minOf(r, g, b) >= 180 && (maxOf(r, g, b) - minOf(r, g, b) <= 20)
+            return isDark || isLight
+        }
+
+        val samples = floatArrayOf(0.2f, 0.35f, 0.5f, 0.65f, 0.8f)
+
+        fun blankCol(x: Int): Boolean {
+            val cx = x.coerceIn(0, w - 1)
+            val ref = bitmap.getPixel(cx, h / 2)
+            for (f in samples) {
+                val y = (h * f).toInt().coerceIn(0, h - 1)
+                if (!isUniformBorderPixel(bitmap.getPixel(cx, y), ref)) return false
             }
             return true
         }
-        if (!blankAt(1) || !blankAt(bitmap.width - 2) || blankAt(bitmap.width / 2)) return full
-        var left = 1
-        while (left < bitmap.width / 3 && blankAt(left)) left += 3
-        var right = bitmap.width - 2
-        while (right > bitmap.width * 2 / 3 && blankAt(right)) right -= 3
-        if (left < bitmap.width / 12 || bitmap.width - 1 - right < bitmap.width / 12) return full
-        return Rect(left, 0, right + 1, bitmap.height)
+
+        fun blankRow(y: Int): Boolean {
+            val cy = y.coerceIn(0, h - 1)
+            val ref = bitmap.getPixel(w / 2, cy)
+            for (f in samples) {
+                val x = (w * f).toInt().coerceIn(0, w - 1)
+                if (!isUniformBorderPixel(bitmap.getPixel(x, cy), ref)) return false
+            }
+            return true
+        }
+
+        var left = 0
+        var right = w - 1
+        if (blankCol(1) && blankCol(w - 2) && !blankCol(w / 2)) {
+            val maxCropX = w * 38 / 100
+            while (left < maxCropX && blankCol(left)) left += 2
+            while (right > w - 1 - maxCropX && blankCol(right)) right -= 2
+        }
+
+        var top = 0
+        var bottom = h - 1
+        if (blankRow(1) && blankRow(h - 2) && !blankRow(h / 2)) {
+            val maxCropY = h * 38 / 100
+            while (top < maxCropY && blankRow(top)) top += 2
+            while (bottom > h - 1 - maxCropY && blankRow(bottom)) bottom -= 2
+        }
+
+        if (right - left < w / 4 || bottom - top < h / 4) return full
+        return Rect(left, top, right + 1, bottom + 1)
     }
 
     /**
@@ -106,24 +144,18 @@ object SceneRenderer {
                         val region = previewContentRect(screenFrame)
                         val srcW = region.width().toFloat().coerceAtLeast(1f)
                         val srcH = region.height().toFloat().coerceAtLeast(1f)
-                        val sameOrientation = (box.width() >= box.height()) == (srcW >= srcH)
-                        if (sameOrientation) {
-                            val ratio = max(box.width() / srcW, box.height() / srcH)
-                            val sourceWidth = (box.width() / ratio).toInt().coerceIn(1, region.width())
-                            val sourceHeight = (box.height() / ratio).toInt().coerceIn(1, region.height())
-                            val sourceLeft = region.left + (region.width() - sourceWidth) / 2
-                            val sourceTop = region.top + (region.height() - sourceHeight) / 2
-                            canvas.drawBitmap(
-                                screenFrame,
-                                Rect(sourceLeft, sourceTop, sourceLeft + sourceWidth, sourceTop + sourceHeight),
-                                box, paint
-                            )
+                        val boxW = box.width().coerceAtLeast(1f)
+                        val boxH = box.height().coerceAtLeast(1f)
+                        val srcAspect = srcW / srcH
+                        val boxAspect = boxW / boxH
+                        if (kotlin.math.abs(srcAspect - boxAspect) / boxAspect <= 0.08f) {
+                            canvas.drawBitmap(screenFrame, region, box, paint)
                         } else {
-                            val scale = minOf(box.width() / srcW, box.height() / srcH)
+                            val scale = minOf(boxW / srcW, boxH / srcH)
                             val drawW = srcW * scale
                             val drawH = srcH * scale
-                            val dstLeft = box.left + (box.width() - drawW) / 2f
-                            val dstTop = box.top + (box.height() - drawH) / 2f
+                            val dstLeft = box.left + (boxW - drawW) / 2f
+                            val dstTop = box.top + (boxH - drawH) / 2f
                             canvas.drawBitmap(
                                 screenFrame,
                                 region,
@@ -140,12 +172,7 @@ object SceneRenderer {
                         val prevAlign = paint.textAlign
                         paint.textAlign = Paint.Align.CENTER
                         paint.textSize = (minOf(box.width(), box.height()) * 0.085f).coerceIn(11f, 22f)
-                        val label = if (box.width() < box.height() * 0.85f) "CAPTURA DE TELA" else "CAPTURA DE TELA - TOQUE PARA INICIAR"
-                        canvas.drawText(label, box.centerX(), box.centerY(), paint)
-                        if (box.width() < box.height() * 0.85f) {
-                            paint.textSize = (minOf(box.width(), box.height()) * 0.07f).coerceIn(10f, 18f)
-                            canvas.drawText("TOQUE PARA INICIAR", box.centerX(), box.centerY() + paint.textSize * 1.4f, paint)
-                        }
+                        canvas.drawText("CAPTURA DE TELA", box.centerX(), box.centerY(), paint)
                         paint.textAlign = prevAlign
                     }
                 }

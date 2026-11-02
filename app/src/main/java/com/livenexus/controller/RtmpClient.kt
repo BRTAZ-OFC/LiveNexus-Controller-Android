@@ -26,8 +26,8 @@ import javax.net.ssl.SSLSocketFactory
 class RtmpClient(
     private val rtmpUrl: String,
     private val streamKey: String,
-    private val width: Int,
-    private val height: Int,
+    @Volatile var width: Int,
+    @Volatile var height: Int,
     private val fps: Int,
     private val videoBitrateKbps: Int,
     private val sampleRate: Int = 44100,
@@ -84,6 +84,10 @@ class RtmpClient(
     var isPublishing: Boolean = false
         private set
 
+    @Volatile
+    var lastError: String? = null
+        private set
+
     private var streamId: Int = 1
     private var inChunkSize: Int = 128
     private var windowAckSize: Int = 2500000
@@ -91,8 +95,25 @@ class RtmpClient(
     private var lastAckSentAtBytes: Long = 0L
     private val chunkStates = HashMap<Int, ChunkStreamState>()
 
-    private var videoHeaderSent = false
-    private var audioHeaderSent = false
+    @Volatile
+    var hasVideoHeaderSent = false
+        private set
+
+    @Volatile
+    var hasAudioHeaderSent = false
+        private set
+
+    @Volatile
+    private var firstKeyFrameSent = false
+
+    @Volatile
+    private var cachedSps: ByteArray? = null
+
+    @Volatile
+    private var cachedPps: ByteArray? = null
+
+    private var videoFramesSentCount: Long = 0L
+    private var audioFramesSentCount: Long = 0L
 
     private val writeLock = Any()
 
@@ -107,7 +128,7 @@ class RtmpClient(
         }
 
         val candidateUrls = buildCandidateUrls(rtmpUrl, streamKey)
-        var lastError: Throwable? = null
+        var lastConnectError: Throwable? = null
 
         for (candidateUrl in candidateUrls) {
             try {
@@ -115,7 +136,8 @@ class RtmpClient(
                 return
             } catch (e: Throwable) {
                 Log.w(TAG, "Tentativa falhou em $candidateUrl: ${e.message}")
-                lastError = e
+                lastConnectError = e
+                lastError = e.message
                 closeQuietly()
                 // Se o servidor recusou explicitamente a Stream Key, não precisa testar outro endpoint
                 val msg = e.message ?: ""
@@ -126,7 +148,7 @@ class RtmpClient(
         }
 
         throw IllegalStateException(
-            lastError?.message ?: "Não foi possível conectar ao servidor RTMP ($rtmpUrl)."
+            lastConnectError?.message ?: "Não foi possível conectar ao servidor RTMP ($rtmpUrl)."
         )
     }
 
@@ -202,8 +224,12 @@ class RtmpClient(
         totalBytesRead = 0L
         lastAckSentAtBytes = 0L
         chunkStates.clear()
-        videoHeaderSent = false
-        audioHeaderSent = false
+        hasVideoHeaderSent = false
+        hasAudioHeaderSent = false
+        firstKeyFrameSent = false
+        videoFramesSentCount = 0L
+        audioFramesSentCount = 0L
+        lastError = null
 
         val parsed = parseUrl(targetUrl)
         val host = parsed.host
@@ -259,8 +285,8 @@ class RtmpClient(
         streamId = activeStreamId
         Log.i(TAG, "Stream criado com ID: $streamId")
 
-        val publishAppType = if (app.contains("backup=1")) "backup" else "live"
-        sendPublish(bos, streamId, cleanKey, publishAppType)
+        // O modo de publicação RTMP deve ser sempre "live" (mesmo em endpoints backup=1)
+        sendPublish(bos, streamId, cleanKey, "live")
 
         // Aguarda confirmação real do servidor (NetStream.Publish.Start)
         verifyPublishStatus(bis, bos, rawSocket)
@@ -270,7 +296,26 @@ class RtmpClient(
         isConnected = true
         isPublishing = true
         startBackgroundReader(bis, bos, rawSocket)
-        Log.i(TAG, "Transmissão RTMP publicada e ativa em $host:$port/$app!")
+        Log.i(TAG, "Transmissão RTMP publicada e ativa em $host:$port/$app (streamId=$streamId)!")
+    }
+
+    /**
+     * Atualiza as dimensões anunciadas nos metadados RTMP quando a orientação muda.
+     */
+    fun updateDimensions(newWidth: Int, newHeight: Int) {
+        if (newWidth <= 0 || newHeight <= 0) return
+        val changed = (width != newWidth || height != newHeight)
+        width = newWidth
+        height = newHeight
+        if (changed && isPublishing) {
+            val out = outStream ?: return
+            try {
+                sendMetadata(out, streamId)
+                Log.i(TAG, "Metadados RTMP atualizados para ${newWidth}x${newHeight}")
+            } catch (e: Exception) {
+                Log.w(TAG, "Falha ao atualizar metadados RTMP", e)
+            }
+        }
     }
 
     private data class ParsedUrl(
@@ -465,10 +510,13 @@ class RtmpClient(
             val packet = readNextMessage(input, output)
             if (packet.type == TYPE_COMMAND_AMF0) {
                 val str = String(packet.payload, Charsets.ISO_8859_1)
-                if (str.contains("NetConnection.Connect.Success") || str.contains("_result")) {
+                val items = parseAmf0TopLevel(packet.payload)
+                val cmd = items.getOrNull(0) as? String
+                val transId = (items.getOrNull(1) as? Double)?.toInt()
+                if (str.contains("NetConnection.Connect.Success") || (cmd == "_result" && (transId == null || transId == 1))) {
                     return true
                 }
-                if (str.contains("_error") || str.contains("NetConnection.Connect.Rejected") || str.contains("NetConnection.Connect.Failed")) {
+                if (cmd == "_error" || str.contains("NetConnection.Connect.Rejected") || str.contains("NetConnection.Connect.Failed")) {
                     throw IllegalStateException("Servidor rejeitou conexão RTMP.")
                 }
             }
@@ -478,28 +526,116 @@ class RtmpClient(
 
     private fun readCreateStreamResult(input: InputStream, output: OutputStream, expectedTransId: Double): Int {
         val startTime = System.currentTimeMillis()
+        val targetTrans = expectedTransId.toInt()
         while (System.currentTimeMillis() - startTime < 10000) {
             val packet = readNextMessage(input, output)
             if (packet.type == TYPE_COMMAND_AMF0) {
-                val str = String(packet.payload, Charsets.ISO_8859_1)
-                if (str.contains("_result")) {
-                    // Extrai o número AMF0 final que representa o streamId (geralmente 1.0)
-                    val payload = packet.payload
-                    if (payload.size >= 9 && payload[payload.size - 9].toInt() == 0x00) {
-                        val idDouble = ByteBuffer.wrap(payload, payload.size - 8, 8)
-                            .order(ByteOrder.BIG_ENDIAN)
-                            .double
-                        val parsedId = idDouble.toInt()
-                        if (parsedId > 0) return parsedId
+                val items = parseAmf0TopLevel(packet.payload)
+                val cmd = items.getOrNull(0) as? String
+                val transId = (items.getOrNull(1) as? Double)?.toInt()
+
+                if (cmd == "_result") {
+                    // Ignora respostas _result de releaseStream (transId=2) ou FCPublish (transId=3)
+                    if (transId != null && transId != targetTrans) {
+                        continue
+                    }
+                    val streamNum = (items.getOrNull(3) as? Double)?.toInt()
+                        ?: (items.lastOrNull { it is Double && it != expectedTransId } as? Double)?.toInt()
+                    if (streamNum != null && streamNum > 0) {
+                        return streamNum
                     }
                     return 1
                 }
-                if (str.contains("_error")) {
+                if (cmd == "_error" && (transId == null || transId == targetTrans)) {
                     throw IllegalStateException("Erro ao criar stream no servidor RTMP.")
                 }
             }
         }
         return 1
+    }
+
+    /**
+     * Decodifica os valores AMF0 de nível superior de um comando RTMP (nome do comando, transactionId, etc.).
+     */
+    private fun parseAmf0TopLevel(payload: ByteArray): List<Any?> {
+        val result = mutableListOf<Any?>()
+        var pos = 0
+
+        fun skipAmfValue(): Any? {
+            if (pos >= payload.size) return null
+            val marker = payload[pos++].toInt() and 0xFF
+            return when (marker) {
+                0x00 -> { // Number (8 bytes IEEE-754)
+                    if (pos + 8 > payload.size) {
+                        pos = payload.size
+                        null
+                    } else {
+                        val d = ByteBuffer.wrap(payload, pos, 8).order(ByteOrder.BIG_ENDIAN).double
+                        pos += 8
+                        d
+                    }
+                }
+                0x01 -> { // Boolean (1 byte)
+                    if (pos >= payload.size) null else (payload[pos++].toInt() != 0)
+                }
+                0x02 -> { // String (2 bytes len + UTF-8)
+                    if (pos + 2 > payload.size) {
+                        pos = payload.size
+                        null
+                    } else {
+                        val len = ((payload[pos].toInt() and 0xFF) shl 8) or (payload[pos + 1].toInt() and 0xFF)
+                        pos += 2
+                        if (pos + len > payload.size) {
+                            pos = payload.size
+                            null
+                        } else {
+                            val s = String(payload, pos, len, Charsets.UTF_8)
+                            pos += len
+                            s
+                        }
+                    }
+                }
+                0x03 -> { // Object
+                    while (pos + 3 <= payload.size) {
+                        val kLen = ((payload[pos].toInt() and 0xFF) shl 8) or (payload[pos + 1].toInt() and 0xFF)
+                        if (kLen == 0 && (payload[pos + 2].toInt() and 0xFF) == 0x09) {
+                            pos += 3
+                            break
+                        }
+                        pos += 2 + kLen
+                        skipAmfValue()
+                    }
+                    "object"
+                }
+                0x05, 0x06 -> null // Null / Undefined
+                0x08 -> { // ECMA Array
+                    if (pos + 4 <= payload.size) {
+                        pos += 4
+                        while (pos + 3 <= payload.size) {
+                            val kLen = ((payload[pos].toInt() and 0xFF) shl 8) or (payload[pos + 1].toInt() and 0xFF)
+                            if (kLen == 0 && (payload[pos + 2].toInt() and 0xFF) == 0x09) {
+                                pos += 3
+                                break
+                            }
+                            pos += 2 + kLen
+                            skipAmfValue()
+                        }
+                    } else {
+                        pos = payload.size
+                    }
+                    "ecma_array"
+                }
+                else -> {
+                    pos = payload.size
+                    null
+                }
+            }
+        }
+
+        while (pos < payload.size && result.size < 6) {
+            result.add(skipAmfValue())
+        }
+        return result
     }
 
     private fun verifyPublishStatus(input: InputStream, output: OutputStream, sock: Socket) {
@@ -515,7 +651,7 @@ class RtmpClient(
                         str.contains("NetStream.Publish.Rejected") ||
                         str.contains("NetStream.Publish.Failed") ||
                         str.contains("NetStream.Publish.Unauthorized") ||
-                        str.contains("_error")
+                        (str.contains("_error") && str.contains("publish", ignoreCase = true))
                     ) {
                         throw IllegalStateException("Chave de transmissão (Stream Key) recusada pelo servidor RTMP.")
                     }
@@ -551,9 +687,11 @@ class RtmpClient(
                         val str = String(packet.payload, Charsets.ISO_8859_1)
                         if (str.contains("NetStream.Publish.BadName") ||
                             str.contains("NetStream.Publish.Rejected") ||
-                            str.contains("NetStream.Publish.Failed")
+                            str.contains("NetStream.Publish.Failed") ||
+                            str.contains("NetStream.Publish.Unauthorized")
                         ) {
-                            Log.e(TAG, "Servidor encerrou publicação RTMP: $str")
+                            lastError = "Publicação RTMP recusada pelo servidor: $str"
+                            Log.e(TAG, lastError!!)
                             isPublishing = false
                             break
                         }
@@ -561,7 +699,9 @@ class RtmpClient(
                 }
             } catch (e: Exception) {
                 if (isPublishing) {
+                    lastError = e.message ?: "Conexão RTMP interrompida pelo servidor"
                     Log.w(TAG, "Leitor RTMP encerrado: ${e.message}")
+                    isPublishing = false
                 }
             }
         }, "LiveNexusRtmpReader").apply {
@@ -750,41 +890,67 @@ class RtmpClient(
 
         val hasExtendedTimestamp = timestampMs >= 0xFFFFFFL
 
-        synchronized(writeLock) {
-            out.write(fmt0Header)
-            if (hasExtendedTimestamp) {
-                val ext = ByteArray(4)
-                ByteBuffer.wrap(ext).order(ByteOrder.BIG_ENDIAN).putInt(timestampMs.toInt())
-                out.write(ext)
-            }
-
-            var offset = 0
-            val chunkSize = OUT_CHUNK_SIZE
-            val firstChunk = minOf(chunkSize, length)
-            out.write(payload, 0, firstChunk)
-            offset += firstChunk
-
-            val fmt3Header = byteArrayOf((0xC0 or (csid and 0x3F)).toByte())
-            while (offset < length) {
-                out.write(fmt3Header)
+        try {
+            synchronized(writeLock) {
+                out.write(fmt0Header)
                 if (hasExtendedTimestamp) {
                     val ext = ByteArray(4)
                     ByteBuffer.wrap(ext).order(ByteOrder.BIG_ENDIAN).putInt(timestampMs.toInt())
                     out.write(ext)
                 }
-                val chunk = minOf(chunkSize, length - offset)
-                out.write(payload, offset, chunk)
-                offset += chunk
+
+                var offset = 0
+                val chunkSize = OUT_CHUNK_SIZE
+                val firstChunk = minOf(chunkSize, length)
+                out.write(payload, 0, firstChunk)
+                offset += firstChunk
+
+                val fmt3Header = byteArrayOf((0xC0 or (csid and 0x3F)).toByte())
+                while (offset < length) {
+                    out.write(fmt3Header)
+                    if (hasExtendedTimestamp) {
+                        val ext = ByteArray(4)
+                        ByteBuffer.wrap(ext).order(ByteOrder.BIG_ENDIAN).putInt(timestampMs.toInt())
+                        out.write(ext)
+                    }
+                    val chunk = minOf(chunkSize, length - offset)
+                    out.write(payload, offset, chunk)
+                    offset += chunk
+                }
+                out.flush()
             }
-            out.flush()
+        } catch (e: Exception) {
+            if (isPublishing) {
+                lastError = e.message ?: "Erro de escrita no socket RTMP"
+                Log.e(TAG, "Erro ao enviar pacote RTMP (type=$type, size=$length): ${e.message}")
+                isPublishing = false
+            }
+            throw e
         }
+    }
+
+    private fun stripAnnexBPrefix(nalu: ByteArray): ByteArray {
+        if (nalu.size >= 4 && nalu[0] == 0.toByte() && nalu[1] == 0.toByte() && nalu[2] == 0.toByte() && nalu[3] == 1.toByte()) {
+            return nalu.copyOfRange(4, nalu.size)
+        }
+        if (nalu.size >= 3 && nalu[0] == 0.toByte() && nalu[1] == 0.toByte() && nalu[2] == 1.toByte()) {
+            return nalu.copyOfRange(3, nalu.size)
+        }
+        return nalu
     }
 
     /**
      * Envia o cabeçalho de configuração AVC (SPS e PPS).
      * Deve ser enviado antes de qualquer frame de vídeo.
      */
-    fun sendVideoHeader(sps: ByteArray, pps: ByteArray) {
+    fun sendVideoHeader(sps: ByteArray, pps: ByteArray, timestampMs: Long = 0L) {
+        val cleanSps = stripAnnexBPrefix(sps)
+        val cleanPps = stripAnnexBPrefix(pps)
+        if (cleanSps.isEmpty() || cleanPps.isEmpty()) return
+
+        cachedSps = cleanSps
+        cachedPps = cleanPps
+
         if (!isPublishing) return
         val out = outStream ?: return
         val baos = ByteArrayOutputStream()
@@ -798,31 +964,31 @@ class RtmpClient(
 
         // AVCDecoderConfigurationRecord (ISO 14496-15)
         baos.write(0x01) // configurationVersion
-        baos.write(if (sps.size > 1) sps[1].toInt() and 0xFF else 0x42) // AVCProfileIndication
-        baos.write(if (sps.size > 2) sps[2].toInt() and 0xFF else 0xC0) // profile_compatibility
-        baos.write(if (sps.size > 3) sps[3].toInt() and 0xFF else 0x1F) // AVCLevelIndication
+        baos.write(if (cleanSps.size > 1) cleanSps[1].toInt() and 0xFF else 0x42) // AVCProfileIndication
+        baos.write(if (cleanSps.size > 2) cleanSps[2].toInt() and 0xFF else 0xC0) // profile_compatibility
+        baos.write(if (cleanSps.size > 3) cleanSps[3].toInt() and 0xFF else 0x1F) // AVCLevelIndication
         baos.write(0xFF) // lengthSizeMinusOne | 0xFC = 0xFF (4 bytes)
         baos.write(0xE1) // numOfSequenceParameterSets | 0xE0 = 1
 
         // SPS length (2 bytes big endian) + SPS
         val spsLen = ByteArray(2)
-        spsLen[0] = ((sps.size ushr 8) and 0xFF).toByte()
-        spsLen[1] = (sps.size and 0xFF).toByte()
+        spsLen[0] = ((cleanSps.size ushr 8) and 0xFF).toByte()
+        spsLen[1] = (cleanSps.size and 0xFF).toByte()
         baos.write(spsLen)
-        baos.write(sps)
+        baos.write(cleanSps)
 
         // PPS count (1) + PPS length (2 bytes) + PPS
         baos.write(0x01)
         val ppsLen = ByteArray(2)
-        ppsLen[0] = ((pps.size ushr 8) and 0xFF).toByte()
-        ppsLen[1] = (pps.size and 0xFF).toByte()
+        ppsLen[0] = ((cleanPps.size ushr 8) and 0xFF).toByte()
+        ppsLen[1] = (cleanPps.size and 0xFF).toByte()
         baos.write(ppsLen)
-        baos.write(pps)
+        baos.write(cleanPps)
 
         val packet = baos.toByteArray()
-        sendPacket(out, CSID_VIDEO, 0, TYPE_VIDEO, streamId, packet)
-        videoHeaderSent = true
-        Log.i(TAG, "AVC Sequence Header enviado com sucesso (${packet.size} bytes)")
+        sendPacket(out, CSID_VIDEO, timestampMs.coerceAtLeast(0L), TYPE_VIDEO, streamId, packet)
+        hasVideoHeaderSent = true
+        Log.i(TAG, "AVC Sequence Header enviado com sucesso (${packet.size} bytes, SPS=${cleanSps.size}, PPS=${cleanPps.size})")
     }
 
     /**
@@ -833,26 +999,49 @@ class RtmpClient(
         val out = outStream ?: return
 
         val nalus = splitAnnexBNalus(naluBytes)
-        if (!videoHeaderSent) {
-            var inlineSps: ByteArray? = null
-            var inlinePps: ByteArray? = null
-            for (nalu in nalus) {
-                if (nalu.isNotEmpty()) {
-                    val nalType = nalu[0].toInt() and 0x1F
-                    if (nalType == 7) inlineSps = nalu
-                    else if (nalType == 8) inlinePps = nalu
+        var inlineSps: ByteArray? = null
+        var inlinePps: ByteArray? = null
+        var containsIdrNalu = false
+
+        for (nalu in nalus) {
+            if (nalu.isNotEmpty()) {
+                val nalType = nalu[0].toInt() and 0x1F
+                when (nalType) {
+                    7 -> inlineSps = nalu
+                    8 -> inlinePps = nalu
+                    5 -> containsIdrNalu = true
                 }
             }
-            if (inlineSps != null && inlinePps != null) {
-                sendVideoHeader(inlineSps, inlinePps)
+        }
+
+        val effectiveKeyFrame = isKeyFrame || containsIdrNalu
+        val spsToUse = inlineSps ?: cachedSps
+        val ppsToUse = inlinePps ?: cachedPps
+
+        if (!hasVideoHeaderSent) {
+            if (spsToUse != null && ppsToUse != null) {
+                sendVideoHeader(spsToUse, ppsToUse, timestampMs.coerceAtLeast(0L))
             } else {
+                return
+            }
+        } else if (inlineSps != null && inlinePps != null) {
+            val prevSps = cachedSps
+            val prevPps = cachedPps
+            if (prevSps == null || prevPps == null || !prevSps.contentEquals(inlineSps) || !prevPps.contentEquals(inlinePps)) {
+                sendVideoHeader(inlineSps, inlinePps, timestampMs.coerceAtLeast(0L))
+            }
+        }
+
+        // YouTube e decodificadores RTMP exigem que o primeiro frame após o AVC Sequence Header seja um Keyframe (IDR)
+        if (!firstKeyFrameSent) {
+            if (!effectiveKeyFrame) {
                 return
             }
         }
 
         val baos = ByteArrayOutputStream(naluBytes.size + 16)
         // Byte 0: FrameType (1=Key, 2=Inter) + CodecID (7=AVC)
-        val headerByte = if (isKeyFrame) 0x17 else 0x27
+        val headerByte = if (effectiveKeyFrame) 0x17 else 0x27
         baos.write(headerByte)
         // Byte 1: AVCPacketType (1 = AVC NALU)
         baos.write(0x01)
@@ -863,8 +1052,8 @@ class RtmpClient(
         for (nalu in nalus) {
             if (nalu.isEmpty()) continue
             val nalType = nalu[0].toInt() and 0x1F
-            // SPS (7) e PPS (8) já são enviados no AVCDecoderConfigurationRecord
-            if (nalType == 7 || nalType == 8) continue
+            // SPS (7), PPS (8) e AUD (9) não devem ir como VCL payload se já estão no Sequence Header
+            if (nalType == 7 || nalType == 8 || nalType == 9) continue
             val len = nalu.size
             baos.write((len ushr 24) and 0xFF)
             baos.write((len ushr 16) and 0xFF)
@@ -876,7 +1065,14 @@ class RtmpClient(
 
         if (!wroteVclNalu) return
         val packet = baos.toByteArray()
-        sendPacket(out, CSID_VIDEO, timestampMs, TYPE_VIDEO, streamId, packet)
+        sendPacket(out, CSID_VIDEO, timestampMs.coerceAtLeast(0L), TYPE_VIDEO, streamId, packet)
+        if (effectiveKeyFrame) {
+            firstKeyFrameSent = true
+        }
+        videoFramesSentCount++
+        if (videoFramesSentCount == 1L || videoFramesSentCount % 150L == 0L) {
+            Log.i(TAG, "Frame de vídeo #$videoFramesSentCount enviado (key=$effectiveKeyFrame, ts=${timestampMs}ms, bytes=${packet.size})")
+        }
     }
 
     private fun splitAnnexBNalus(data: ByteArray): List<ByteArray> {
@@ -918,7 +1114,7 @@ class RtmpClient(
      * Envia o cabeçalho AAC Sequence Header (AudioSpecificConfig).
      */
     fun sendAudioHeader(config: ByteArray) {
-        if (!isPublishing) return
+        if (!isPublishing || config.isEmpty()) return
         val out = outStream ?: return
         val baos = ByteArrayOutputStream()
 
@@ -930,15 +1126,15 @@ class RtmpClient(
 
         val packet = baos.toByteArray()
         sendPacket(out, CSID_AUDIO, 0, TYPE_AUDIO, streamId, packet)
-        audioHeaderSent = true
-        Log.i(TAG, "AAC Sequence Header enviado com sucesso")
+        hasAudioHeaderSent = true
+        Log.i(TAG, "AAC Sequence Header enviado com sucesso (${config.size} bytes)")
     }
 
     /**
      * Envia amostra de áudio codificada em AAC multiplexada em FLV Audio Tag.
      */
     fun sendAudioSample(aacBytes: ByteArray, timestampMs: Long) {
-        if (!isPublishing || !audioHeaderSent) return
+        if (!isPublishing || !hasAudioHeaderSent || aacBytes.isEmpty()) return
         val out = outStream ?: return
         val baos = ByteArrayOutputStream(aacBytes.size + 2)
 
@@ -959,7 +1155,8 @@ class RtmpClient(
         }
 
         val packet = baos.toByteArray()
-        sendPacket(out, CSID_AUDIO, timestampMs, TYPE_AUDIO, streamId, packet)
+        sendPacket(out, CSID_AUDIO, timestampMs.coerceAtLeast(0L), TYPE_AUDIO, streamId, packet)
+        audioFramesSentCount++
     }
 
     // --- Helpers de escrita AMF0 ---

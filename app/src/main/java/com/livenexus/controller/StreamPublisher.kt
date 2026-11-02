@@ -33,7 +33,7 @@ class StreamPublisher(
     private val threadPool = Executors.newCachedThreadPool()
     private val sendExecutor = Executors.newSingleThreadExecutor()
 
-    @Volatile private var publisherStartMs: Long = -1L
+    @Volatile private var streamMediaStartMs: Long = -1L
     @Volatile private var baseVideoTimestampUs: Long = -1L
     @Volatile private var baseVideoOffsetMs: Long = 0L
     @Volatile private var lastVideoTimestampMs: Long = 0L
@@ -96,9 +96,26 @@ class StreamPublisher(
             }
         }
 
-        publisherStartMs = SystemClock.elapsedRealtime()
+        streamMediaStartMs = -1L
         active = clients.any { it.second.isPublishing }
         return errors
+    }
+
+    /**
+     * Atualiza as dimensões de vídeo anunciadas nos clientes RTMP ativos (ex: ao trocar entre 16:9 e 9:16).
+     */
+    fun updateVideoDimensions(newWidth: Int, newHeight: Int) {
+        baseVideoTimestampUs = -1L
+        baseVideoOffsetMs = lastVideoTimestampMs
+        sendExecutor.execute {
+            for ((_, client) in clients) {
+                try {
+                    client.updateDimensions(newWidth, newHeight)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Falha ao atualizar dimensões no cliente RTMP", e)
+                }
+            }
+        }
     }
 
     /**
@@ -107,12 +124,13 @@ class StreamPublisher(
     fun onVideoHeader(sps: ByteArray, pps: ByteArray) {
         cachedSps = sps
         cachedPps = pps
+        val ts = lastVideoTimestampMs.coerceAtLeast(0L)
         sendExecutor.execute {
-            for ((_, client) in clients) {
+            for ((target, client) in clients) {
                 try {
-                    client.sendVideoHeader(sps, pps)
+                    client.sendVideoHeader(sps, pps, ts)
                 } catch (e: Exception) {
-                    Log.w(TAG, "Erro ao enviar cabeçalho de vídeo", e)
+                    Log.w(TAG, "Erro ao enviar cabeçalho de vídeo para ${target.platformName}", e)
                 }
             }
         }
@@ -124,25 +142,35 @@ class StreamPublisher(
     fun onVideoSample(naluBytes: ByteArray, info: MediaCodec.BufferInfo) {
         if (!active) return
 
-        if (baseVideoTimestampUs < 0) {
+        val nowMs = SystemClock.elapsedRealtime()
+        if (streamMediaStartMs < 0L) {
+            streamMediaStartMs = nowMs
+        }
+        if (baseVideoTimestampUs < 0L) {
             baseVideoTimestampUs = info.presentationTimeUs
-            val start = publisherStartMs
-            baseVideoOffsetMs = if (start > 0) (SystemClock.elapsedRealtime() - start).coerceAtLeast(0L) else 0L
+            baseVideoOffsetMs = maxOf(lastVideoTimestampMs, (nowMs - streamMediaStartMs).coerceAtLeast(0L))
         }
         val rawMs = baseVideoOffsetMs + ((info.presentationTimeUs - baseVideoTimestampUs) / 1000L).coerceAtLeast(0L)
         val timestampMs = maxOf(rawMs, lastVideoTimestampMs)
         lastVideoTimestampMs = timestampMs
 
         val isKeyFrame = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+        val sps = cachedSps
+        val pps = cachedPps
 
         sendExecutor.execute {
             for ((target, client) in clients) {
+                if (!client.isPublishing) continue
                 try {
+                    if (!client.hasVideoHeaderSent && sps != null && pps != null) {
+                        client.sendVideoHeader(sps, pps, timestampMs)
+                    }
                     client.sendVideoSample(naluBytes, isKeyFrame, timestampMs)
                 } catch (e: Exception) {
                     Log.w(TAG, "Erro no envio de vídeo para ${target.platformName}", e)
                 }
             }
+            active = clients.any { it.second.isPublishing }
         }
     }
 
@@ -152,11 +180,11 @@ class StreamPublisher(
     fun onAudioHeader(asc: ByteArray) {
         cachedAsc = asc
         sendExecutor.execute {
-            for ((_, client) in clients) {
+            for ((target, client) in clients) {
                 try {
                     client.sendAudioHeader(asc)
                 } catch (e: Exception) {
-                    Log.w(TAG, "Erro ao enviar cabeçalho de áudio", e)
+                    Log.w(TAG, "Erro ao enviar cabeçalho de áudio para ${target.platformName}", e)
                 }
             }
         }
@@ -168,23 +196,33 @@ class StreamPublisher(
     fun onAudioSample(aacBytes: ByteArray, info: MediaCodec.BufferInfo) {
         if (!active) return
 
-        if (baseAudioTimestampUs < 0) {
+        val nowMs = SystemClock.elapsedRealtime()
+        if (streamMediaStartMs < 0L) {
+            streamMediaStartMs = nowMs
+        }
+        if (baseAudioTimestampUs < 0L) {
             baseAudioTimestampUs = info.presentationTimeUs
-            val start = publisherStartMs
-            baseAudioOffsetMs = if (start > 0) (SystemClock.elapsedRealtime() - start).coerceAtLeast(0L) else 0L
+            baseAudioOffsetMs = maxOf(lastAudioTimestampMs, (nowMs - streamMediaStartMs).coerceAtLeast(0L))
         }
         val rawMs = baseAudioOffsetMs + ((info.presentationTimeUs - baseAudioTimestampUs) / 1000L).coerceAtLeast(0L)
         val timestampMs = maxOf(rawMs, lastAudioTimestampMs)
         lastAudioTimestampMs = timestampMs
 
+        val asc = cachedAsc
+
         sendExecutor.execute {
             for ((target, client) in clients) {
+                if (!client.isPublishing) continue
                 try {
+                    if (!client.hasAudioHeaderSent && asc != null) {
+                        client.sendAudioHeader(asc)
+                    }
                     client.sendAudioSample(aacBytes, timestampMs)
                 } catch (e: Exception) {
                     Log.w(TAG, "Erro no envio de áudio para ${target.platformName}", e)
                 }
             }
+            active = clients.any { it.second.isPublishing }
         }
     }
 

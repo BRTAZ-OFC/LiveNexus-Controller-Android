@@ -3,13 +3,17 @@ package com.livenexus.controller
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Build
+import android.os.Bundle
+import android.os.SystemClock
+import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
 
 /**
  * Encoder H.264 local por hardware via MediaCodec.
  * Recebe frames por Surface e entrega amostras codificadas e cabeçalhos SPS/PPS
- * para transmissão RTMP em tempo real.
+ * para transmissão RTMP/RTMPS em tempo real.
  */
 class LocalVideoEncoder(
     private val width: Int,
@@ -20,6 +24,13 @@ class LocalVideoEncoder(
     private val onFormat: (MediaFormat) -> Unit,
     private val onSpsPps: ((sps: ByteArray, pps: ByteArray) -> Unit)? = null
 ) : AutoCloseable {
+
+    companion object {
+        private const val TAG = "LiveNexusVideo"
+        private const val KEYFRAME_INTERVAL_SECONDS = 2
+        private const val SYNC_FRAME_INTERVAL_MS = 2000L
+    }
+
     private var codec: MediaCodec? = null
     private var input: Surface? = null
     private var worker: Thread? = null
@@ -33,6 +44,26 @@ class LocalVideoEncoder(
     val surface: Surface
         get() = input ?: throw IllegalStateException("Encoder não iniciado.")
 
+    private fun buildFormat(includeAdvancedFlags: Boolean): MediaFormat {
+        val repeatUs = (1_000_000L / fps.coerceAtLeast(1)).coerceAtLeast(16_666L)
+        return MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrateKbps * 1000)
+            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL_SECONDS)
+            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, repeatUs)
+            if (includeAdvancedFlags) {
+                setInteger(
+                    MediaFormat.KEY_BITRATE_MODE,
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+                )
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+                }
+            }
+        }
+    }
+
     @Synchronized
     fun start() {
         check(codec == null) { "Encoder já iniciado." }
@@ -43,102 +74,188 @@ class LocalVideoEncoder(
         require(bitrateKbps in 2000..10000 && bitrateKbps % 500 == 0) {
             "Bitrate deve estar entre 2000 e 10000 Kbps, em passos de 500."
         }
-        val created = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+
+        var created = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         try {
-            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, bitrateKbps * 1000)
-                setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+            try {
+                created.configure(buildFormat(includeAdvancedFlags = true), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            } catch (configErr: Exception) {
+                Log.w(TAG, "Fallback para formato H.264 básico: ${configErr.message}")
+                try { created.release() } catch (_: Exception) {}
+                created = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                created.configure(buildFormat(includeAdvancedFlags = false), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             }
-            created.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+
             val createdSurface = created.createInputSurface()
             created.start()
             codec = created
             input = createdSurface
             running = true
             lastError = null
+
+            val activeCodec = created
             worker = Thread({
                 val info = MediaCodec.BufferInfo()
+                var lastSyncRequestMs = SystemClock.elapsedRealtime()
+                var emittedFrames = 0L
                 try {
                     while (running) {
-                        when (val index = created.dequeueOutputBuffer(info, 10000L)) {
+                        val now = SystemClock.elapsedRealtime()
+                        if (now - lastSyncRequestMs >= SYNC_FRAME_INTERVAL_MS) {
+                            lastSyncRequestMs = now
+                            requestKeyFrameInternal(activeCodec)
+                        }
+
+                        when (val index = activeCodec.dequeueOutputBuffer(info, 10000L)) {
                             MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                                val outFmt = created.outputFormat
+                                val outFmt = activeCodec.outputFormat
                                 onFormat(outFmt)
                                 extractSpsPpsFromFormat(outFmt)
                             }
                             MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
                             else -> if (index >= 0) {
                                 try {
-                                    val buffer: ByteBuffer? = created.getOutputBuffer(index)
+                                    val buffer: ByteBuffer? = activeCodec.getOutputBuffer(index)
                                     if (buffer != null && info.size > 0) {
                                         buffer.position(info.offset)
                                         buffer.limit(info.offset + info.size)
                                         val bytes = ByteArray(info.size)
                                         buffer.get(bytes)
 
-                                        if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
-                                            extractSpsPpsFromBytes(bytes)
-                                        } else {
+                                        // Sempre verifica SPS/PPS (tanto em CODEC_CONFIG quanto inline em keyframes)
+                                        extractSpsPpsFromBytes(bytes)
+
+                                        val nalus = splitAnnexBNalus(bytes)
+                                        var hasVclNalu = false
+                                        var hasIdrNalu = false
+                                        for (nalu in nalus) {
+                                            if (nalu.isEmpty()) continue
+                                            val nalType = nalu[0].toInt() and 0x1F
+                                            if (nalType in 1..5) {
+                                                hasVclNalu = true
+                                                if (nalType == 5) hasIdrNalu = true
+                                            }
+                                        }
+
+                                        val isConfigOnly = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0 && !hasVclNalu
+                                        if (!isConfigOnly && hasVclNalu) {
+                                            var sampleFlags = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG.inv()
+                                            if (hasIdrNalu) {
+                                                sampleFlags = sampleFlags or MediaCodec.BUFFER_FLAG_KEY_FRAME
+                                            }
                                             val copy = MediaCodec.BufferInfo().apply {
-                                                set(0, bytes.size, info.presentationTimeUs, info.flags)
+                                                set(0, bytes.size, info.presentationTimeUs, sampleFlags)
+                                            }
+                                            emittedFrames++
+                                            if (emittedFrames == 1L) {
+                                                Log.i(TAG, "Primeiro frame H.264 gerado (${bytes.size} bytes, keyframe=${(sampleFlags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0})")
                                             }
                                             onSample(bytes, copy)
                                         }
                                     }
                                 } finally {
-                                    created.releaseOutputBuffer(index, false)
+                                    activeCodec.releaseOutputBuffer(index, false)
                                 }
                             }
                         }
                     }
                 } catch (error: Exception) {
-                    lastError = error.message ?: "Falha no encoder H.264."
-                    running = false
+                    if (running) {
+                        lastError = error.message ?: "Falha no encoder H.264."
+                        Log.e(TAG, "Erro no loop do LocalVideoEncoder", error)
+                        running = false
+                    }
                 }
             }, "LiveNexusH264Encoder").apply { start() }
+
+            Log.i(TAG, "LocalVideoEncoder iniciado: ${width}x${height} @ ${fps}fps, ${bitrateKbps}kbps")
         } catch (error: Exception) {
             running = false
             try { created.stop() } catch (_: Exception) {}
-            created.release()
+            try { created.release() } catch (_: Exception) {}
             throw error
         }
     }
 
+    fun requestKeyFrame() {
+        val active = codec ?: return
+        requestKeyFrameInternal(active)
+    }
+
+    private fun requestKeyFrameInternal(activeCodec: MediaCodec) {
+        try {
+            val params = Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+            }
+            activeCodec.setParameters(params)
+        } catch (_: Exception) {}
+    }
+
     private fun extractSpsPpsFromFormat(format: MediaFormat) {
-        val csd0 = format.getByteBuffer("csd-0")
-        val csd1 = format.getByteBuffer("csd-1")
-        if (csd0 != null && csd1 != null) {
-            val sps = ByteArray(csd0.remaining())
-            csd0.get(sps)
-            csd0.rewind()
-            val pps = ByteArray(csd1.remaining())
-            csd1.get(pps)
-            csd1.rewind()
-            spsFound = cleanStartCode(sps)
-            ppsFound = cleanStartCode(pps)
-            onSpsPps?.invoke(spsFound!!, ppsFound!!)
+        val candidateNalus = mutableListOf<ByteArray>()
+        val csd0 = format.getByteBuffer("csd-0")?.duplicate()
+        val csd1 = format.getByteBuffer("csd-1")?.duplicate()
+
+        if (csd0 != null && csd0.remaining() > 0) {
+            val bytes0 = ByteArray(csd0.remaining())
+            csd0.get(bytes0)
+            candidateNalus.addAll(splitAnnexBNalus(bytes0))
         }
+        if (csd1 != null && csd1.remaining() > 0) {
+            val bytes1 = ByteArray(csd1.remaining())
+            csd1.get(bytes1)
+            candidateNalus.addAll(splitAnnexBNalus(bytes1))
+        }
+
+        updateSpsPpsFromNalus(candidateNalus)
     }
 
     private fun extractSpsPpsFromBytes(data: ByteArray) {
-        val spsList = mutableListOf<ByteArray>()
+        val nalus = splitAnnexBNalus(data)
+        updateSpsPpsFromNalus(nalus)
+    }
+
+    private fun updateSpsPpsFromNalus(nalus: List<ByteArray>) {
+        var newSps: ByteArray? = null
+        var newPps: ByteArray? = null
+        for (nalu in nalus) {
+            if (nalu.isEmpty()) continue
+            val type = nalu[0].toInt() and 0x1F
+            if (type == 7) newSps = nalu
+            else if (type == 8) newPps = nalu
+        }
+        val finalSps = newSps ?: spsFound
+        val finalPps = newPps ?: ppsFound
+        if (finalSps != null && finalPps != null) {
+            val changed = spsFound == null || ppsFound == null ||
+                !finalSps.contentEquals(spsFound) || !finalPps.contentEquals(ppsFound)
+            spsFound = finalSps
+            ppsFound = finalPps
+            if (changed) {
+                Log.i(TAG, "SPS (${finalSps.size}B) e PPS (${finalPps.size}B) extraídos com sucesso.")
+                onSpsPps?.invoke(finalSps, finalPps)
+            }
+        }
+    }
+
+    private fun splitAnnexBNalus(data: ByteArray): List<ByteArray> {
+        val result = mutableListOf<ByteArray>()
         var i = 0
         var lastStart = -1
-        while (i < data.size - 3) {
-            val isStart4 = data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
-                    data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()
-            val isStart3 = data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte()
+
+        while (i <= data.size - 3) {
+            val isStart4 = (i <= data.size - 4) &&
+                data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
+                data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()
+            val isStart3 = !isStart4 &&
+                data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte()
+
             if (isStart4 || isStart3) {
                 val startCodeLen = if (isStart4) 4 else 3
                 if (lastStart >= 0) {
                     val len = i - lastStart
                     if (len > 0) {
-                        val nalu = ByteArray(len)
-                        System.arraycopy(data, lastStart, nalu, 0, len)
-                        spsList.add(nalu)
+                        result.add(data.copyOfRange(lastStart, i))
                     }
                 }
                 lastStart = i + startCodeLen
@@ -147,39 +264,13 @@ class LocalVideoEncoder(
             }
             i++
         }
+
         if (lastStart >= 0 && lastStart < data.size) {
-            val len = data.size - lastStart
-            val nalu = ByteArray(len)
-            System.arraycopy(data, lastStart, nalu, 0, len)
-            spsList.add(nalu)
+            result.add(data.copyOfRange(lastStart, data.size))
+        } else if (lastStart == -1 && data.isNotEmpty()) {
+            result.add(data)
         }
-
-        var sps: ByteArray? = null
-        var pps: ByteArray? = null
-        for (nalu in spsList) {
-            val type = nalu[0].toInt() and 0x1F
-            if (type == 7) sps = nalu
-            if (type == 8) pps = nalu
-        }
-        if (sps != null && pps != null) {
-            spsFound = sps
-            ppsFound = pps
-            onSpsPps?.invoke(sps, pps)
-        }
-    }
-
-    private fun cleanStartCode(bytes: ByteArray): ByteArray {
-        var start = 0
-        if (bytes.size > 4 && bytes[0] == 0.toByte() && bytes[1] == 0.toByte() &&
-            bytes[2] == 0.toByte() && bytes[3] == 1.toByte()) {
-            start = 4
-        } else if (bytes.size > 3 && bytes[0] == 0.toByte() && bytes[1] == 0.toByte() && bytes[2] == 1.toByte()) {
-            start = 3
-        }
-        if (start == 0) return bytes
-        val clean = ByteArray(bytes.size - start)
-        System.arraycopy(bytes, start, clean, 0, clean.size)
-        return clean
+        return result
     }
 
     @Synchronized
@@ -192,11 +283,11 @@ class LocalVideoEncoder(
                 Thread.currentThread().interrupt()
             }
         }
-        input?.release()
+        try { input?.release() } catch (_: Exception) {}
         input = null
         codec?.let {
             try { it.stop() } catch (_: Exception) {}
-            it.release()
+            try { it.release() } catch (_: Exception) {}
         }
         codec = null
     }

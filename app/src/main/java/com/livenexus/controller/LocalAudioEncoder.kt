@@ -193,15 +193,30 @@ class LocalAudioEncoder(
                 }
 
                 var outputIndex = mediaCodec.dequeueOutputBuffer(info, 0L)
-                while (outputIndex >= 0 && running) {
+                while ((outputIndex >= 0 || outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) && running) {
+                    if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        val outFormat = mediaCodec.outputFormat
+                        val csd0 = outFormat.getByteBuffer("csd-0")
+                        if (csd0 != null && csd0.remaining() >= 2) {
+                            val dup = csd0.duplicate()
+                            val cfg = ByteArray(dup.remaining())
+                            dup.get(cfg)
+                            headerDispatched = true
+                            onHeader(cfg)
+                        }
+                        outputIndex = mediaCodec.dequeueOutputBuffer(info, 0L)
+                        continue
+                    }
+
                     if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
-                        if (!headerDispatched && info.size > 0) {
+                        if (info.size >= 2) {
                             val outBuf = mediaCodec.getOutputBuffer(outputIndex)
                             if (outBuf != null) {
-                                outBuf.position(info.offset)
-                                outBuf.limit(info.offset + info.size)
+                                val dup = outBuf.duplicate()
+                                dup.position(info.offset)
+                                dup.limit(info.offset + info.size)
                                 val cfg = ByteArray(info.size)
-                                outBuf.get(cfg)
+                                dup.get(cfg)
                                 headerDispatched = true
                                 onHeader(cfg)
                             }
@@ -213,10 +228,11 @@ class LocalAudioEncoder(
 
                     val outBuf: ByteBuffer? = mediaCodec.getOutputBuffer(outputIndex)
                     if (outBuf != null && info.size > 0) {
-                        outBuf.position(info.offset)
-                        outBuf.limit(info.offset + info.size)
+                        val dup = outBuf.duplicate()
+                        dup.position(info.offset)
+                        dup.limit(info.offset + info.size)
                         val aacData = ByteArray(info.size)
-                        outBuf.get(aacData)
+                        dup.get(aacData)
 
                         val copyInfo = MediaCodec.BufferInfo().apply {
                             set(0, aacData.size, info.presentationTimeUs, info.flags)

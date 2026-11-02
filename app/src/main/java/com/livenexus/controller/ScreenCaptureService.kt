@@ -8,8 +8,14 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.Rect
+import android.graphics.RectF
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
@@ -22,6 +28,7 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import org.json.JSONArray
+import kotlin.math.abs
 
 /**
  * Serviço de captura da fonte "Captura de tela" (Editor de Cena) e transmissão ao vivo do cenário em RTMP/RTMPS.
@@ -41,6 +48,8 @@ class ScreenCaptureService : Service() {
         const val EXTRA_BITRATE_KBPS = "capture_bitrate_kbps"
         const val EXTRA_TARGETS_JSON = "capture_targets_json"
         const val EXTRA_VERTICAL_MODE = "capture_vertical_mode"
+
+        @Volatile private var activeInstance: ScreenCaptureService? = null
 
         @Volatile var previewFrame: Bitmap? = null
             private set
@@ -62,11 +71,27 @@ class ScreenCaptureService : Service() {
         }
 
         fun updateCaptureOrientation(vertical: Boolean) {
+            val changed = (isVerticalMode != vertical)
             isVerticalMode = vertical
+            if (changed) {
+                activeInstance?.onOrientationModeChanged(vertical)
+            }
         }
 
         fun reportError(message: String?) {
             lastError = message
+        }
+
+        fun computeTargetDimensions(maxDimension: Int, vertical: Boolean): Pair<Int, Int> {
+            val clampedMax = maxDimension.coerceIn(480, 1920)
+            val longSide = (clampedMax - (clampedMax % 2)).coerceAtLeast(480)
+            val rawShort = (longSide * 9) / 16
+            val shortSide = (rawShort - (rawShort % 2)).coerceAtLeast(270)
+            return if (vertical) {
+                Pair(shortSide, longSide) // 9:16
+            } else {
+                Pair(longSide, shortSide) // 16:9
+            }
         }
 
         private const val CHANNEL_ID = "livenexus_screen_capture"
@@ -81,16 +106,31 @@ class ScreenCaptureService : Service() {
     private var publisher: StreamPublisher? = null
     private var reader: ImageReader? = null
     private var captureThread: HandlerThread? = null
+    private var captureHandler: Handler? = null
     private var projectionCallback: MediaProjection.Callback? = null
-    private var latestCapturedScreenFrame: Bitmap? = null
+    private var displayListener: DisplayManager.DisplayListener? = null
+    @Volatile private var latestCapturedScreenFrame: Bitmap? = null
     private var screenBufferBitmap: Bitmap? = null
+    private var transformedFrameBitmapA: Bitmap? = null
+    private var transformedFrameBitmapB: Bitmap? = null
+    private var useBufferA: Boolean = true
+    private val transformPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+
     private var captureWidth: Int = 1280
     private var captureHeight: Int = 720
+    private var configuredMaxDimension: Int = 1280
+    private var configuredFps: Int = 30
+    private var configuredBitrateKbps: Int = 4500
+    private var lastDisplayRotation: Int = -1
+    private var lastPreviewAt: Long = 0L
+
+    private val captureLock = Any()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        activeInstance = this
         val notifications = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notifications.createNotificationChannel(
             NotificationChannel(
@@ -99,6 +139,44 @@ class ScreenCaptureService : Service() {
                 NotificationManager.IMPORTANCE_LOW
             )
         )
+        registerDisplayRotationListener()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        captureHandler?.post {
+            reconfigureCaptureForCurrentOrientation(force = false)
+        }
+    }
+
+    private fun registerDisplayRotationListener() {
+        try {
+            val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return
+            val listener = object : DisplayManager.DisplayListener {
+                override fun onDisplayAdded(displayId: Int) {}
+                override fun onDisplayRemoved(displayId: Int) {}
+                override fun onDisplayChanged(displayId: Int) {
+                    if (displayId == android.view.Display.DEFAULT_DISPLAY) {
+                        captureHandler?.post {
+                            reconfigureCaptureForCurrentOrientation(force = false)
+                        }
+                    }
+                }
+            }
+            displayListener = listener
+            dm.registerDisplayListener(listener, Handler(mainLooper))
+        } catch (e: Exception) {
+            Log.w(TAG, "Não foi possível registrar DisplayListener", e)
+        }
+    }
+
+    private fun unregisterDisplayRotationListener() {
+        val listener = displayListener ?: return
+        displayListener = null
+        try {
+            val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            dm?.unregisterDisplayListener(listener)
+        } catch (_: Exception) {}
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -172,10 +250,94 @@ class ScreenCaptureService : Service() {
     }
 
     /**
-     * Inicia exclusivamente a fonte "Captura de tela" (solicitada no menu Captura -> Editor de Cena).
+     * Chamado quando o usuário alterna entre Horizontal (16:9) e Vertical (9:16) no cenário.
+     */
+    private fun onOrientationModeChanged(vertical: Boolean) {
+        isVerticalMode = vertical
+        captureHandler?.post {
+            reconfigureCaptureForCurrentOrientation(force = true)
+        }
+        if (isLiveStreaming) {
+            Thread({
+                reconfigureStreamingOrientation(vertical)
+            }, "LiveNexusStreamOrientationUpdater").start()
+        }
+    }
+
+    private fun reconfigureStreamingOrientation(vertical: Boolean) {
+        val activePub = publisher ?: return
+        if (!isLiveStreaming) return
+        val (newW, newH) = computeTargetDimensions(configuredMaxDimension, vertical)
+        val fps = configuredFps
+        val bitrate = configuredBitrateKbps
+
+        try {
+            val oldCompositor = compositor
+            val oldEncoder = videoEncoder
+            compositor = null
+            videoEncoder = null
+            try { oldCompositor?.close() } catch (_: Exception) {}
+            try { oldEncoder?.close() } catch (_: Exception) {}
+
+            activePub.updateVideoDimensions(newW, newH)
+
+            val newEncoder = LocalVideoEncoder(
+                width = newW,
+                height = newH,
+                fps = fps,
+                bitrateKbps = bitrate,
+                onSample = { bytes, info -> activePub.onVideoSample(bytes, info) },
+                onFormat = { _ -> },
+                onSpsPps = { sps, pps -> activePub.onVideoHeader(sps, pps) }
+            )
+            newEncoder.start()
+            videoEncoder = newEncoder
+
+            val initialLayers = activeSceneLayers ?: loadPersistedSceneLayers(this)
+            val newCompositor = SceneCompositor(
+                outputSurface = newEncoder.surface,
+                width = newW,
+                height = newH,
+                fps = fps,
+                onFrameRendered = null
+            )
+            newCompositor.start { canvas, w, h ->
+                val layers = activeSceneLayers ?: initialLayers
+                val screenSourceBitmap = if (isCapturing) latestCapturedScreenFrame else null
+                SceneRenderer.render(
+                    canvas = canvas,
+                    width = w,
+                    height = h,
+                    layers = layers,
+                    screenFrame = screenSourceBitmap,
+                    isLiveStream = true
+                )
+            }
+            compositor = newCompositor
+            Log.i(TAG, "Encoder e Compositor reconfigurados para ${newW}x${newH} (vertical=$vertical)")
+        } catch (e: Throwable) {
+            Log.e(TAG, "Erro ao reconfigurar orientação do stream", e)
+        }
+    }
+
+    /**
+     * Inicia a fonte "Captura de tela" respeitando a orientação selecionada (16:9 Horizontal ou 9:16 Vertical).
      */
     private fun handleStartCapture(intent: Intent) {
+        if (intent.hasExtra(EXTRA_VERTICAL_MODE)) {
+            isVerticalMode = intent.getBooleanExtra(EXTRA_VERTICAL_MODE, isVerticalMode)
+        } else {
+            val prefs = getSharedPreferences("livenexus_capture_settings", Context.MODE_PRIVATE)
+            isVerticalMode = prefs.getString("capture_orientation", "horizontal") == "vertical"
+        }
+        configuredMaxDimension = intent.getIntExtra(EXTRA_MAX_DIMENSION, configuredMaxDimension).coerceIn(480, 1920)
+        configuredFps = intent.getIntExtra(EXTRA_FPS, configuredFps).coerceIn(15, 60)
+        configuredBitrateKbps = intent.getIntExtra(EXTRA_BITRATE_KBPS, configuredBitrateKbps).coerceIn(500, 20000)
+
         if (isCapturing && projection != null && virtualDisplay != null) {
+            captureHandler?.post {
+                reconfigureCaptureForCurrentOrientation(force = true)
+            }
             return
         }
 
@@ -225,81 +387,12 @@ class ScreenCaptureService : Service() {
             projectionCallback = callback
             activeProjection.registerCallback(callback, null)
 
-            val metrics = DisplayMetrics()
-            val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            @Suppress("DEPRECATION")
-            windowManager.defaultDisplay.getRealMetrics(metrics)
-            val sourceWidth = metrics.widthPixels.coerceAtLeast(2)
-            val sourceHeight = metrics.heightPixels.coerceAtLeast(2)
-            val maxDimension = intent.getIntExtra(EXTRA_MAX_DIMENSION, 1280).coerceIn(480, 1920)
-            val scale = minOf(1.0, maxDimension.toDouble() / maxOf(sourceWidth, sourceHeight))
-            val width = (sourceWidth * scale).toInt().coerceAtLeast(2)
-            val height = (sourceHeight * scale).toInt().coerceAtLeast(2)
-            captureWidth = width
-            captureHeight = height
-
-            val captureReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-            reader = captureReader
             val worker = HandlerThread("LiveNexusCapturePreview").also { it.start() }
             captureThread = worker
-            var lastPreviewAt = 0L
+            val workerHandler = Handler(worker.looper)
+            captureHandler = workerHandler
 
-            captureReader.setOnImageAvailableListener({ source ->
-                val image = try { source.acquireLatestImage() } catch (_: RuntimeException) { null }
-                if (image != null) {
-                    try {
-                        val plane = image.planes.firstOrNull()
-                        if (plane != null && plane.pixelStride == 4) {
-                            val paddedWidth = plane.rowStride / plane.pixelStride
-                            if (paddedWidth >= image.width) {
-                                var buffer = screenBufferBitmap
-                                if (buffer == null || buffer.width != paddedWidth || buffer.height != image.height) {
-                                    buffer = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
-                                    screenBufferBitmap = buffer
-                                }
-                                plane.buffer.rewind()
-                                buffer.copyPixelsFromBuffer(plane.buffer)
-                                val trimmed = if (paddedWidth == image.width) buffer else {
-                                    Bitmap.createBitmap(buffer, 0, 0, image.width, image.height)
-                                }
-                                latestCapturedScreenFrame = trimmed
-
-                                // Atualiza o frame exclusivo da fonte "Captura de tela" para o Editor de Cena
-                                val now = android.os.SystemClock.elapsedRealtime()
-                                if (now - lastPreviewAt >= 250L) {
-                                    lastPreviewAt = now
-                                    val maxPreviewWidth = 480
-                                    val ratio = minOf(1f, maxPreviewWidth.toFloat() / trimmed.width.toFloat())
-                                    previewFrame = if (ratio < 1f) {
-                                        Bitmap.createScaledBitmap(
-                                            trimmed,
-                                            (trimmed.width * ratio).toInt().coerceAtLeast(1),
-                                            (trimmed.height * ratio).toInt().coerceAtLeast(1),
-                                            true
-                                        )
-                                    } else trimmed
-                                }
-                            }
-                        }
-                    } catch (error: Exception) {
-                        Log.w(TAG, "Falha ao processar frame de tela", error)
-                    } finally {
-                        image.close()
-                    }
-                }
-            }, Handler(worker.looper))
-
-            virtualDisplay = activeProjection.createVirtualDisplay(
-                "LiveNEXUS Screen Capture",
-                width,
-                height,
-                metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                captureReader.surface,
-                null,
-                null
-            )
-            if (virtualDisplay == null) throw IllegalStateException("Captura de tela indisponível neste ambiente")
+            setupOrResizeVirtualDisplay(activeProjection, workerHandler)
 
             isCapturing = true
             updateForegroundNotification()
@@ -311,10 +404,272 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    private fun setupOrResizeVirtualDisplay(activeProjection: MediaProjection, workerHandler: Handler) {
+        synchronized(captureLock) {
+            val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val metrics = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            val display = windowManager.defaultDisplay
+            @Suppress("DEPRECATION")
+            display.getRealMetrics(metrics)
+            @Suppress("DEPRECATION")
+            lastDisplayRotation = display.rotation
+
+            val (targetW, targetH) = computeTargetDimensions(configuredMaxDimension, isVerticalMode)
+            captureWidth = targetW
+            captureHeight = targetH
+
+            val newReader = ImageReader.newInstance(targetW, targetH, PixelFormat.RGBA_8888, 2)
+            newReader.setOnImageAvailableListener({ source ->
+                processCapturedImage(source, targetW, targetH)
+            }, workerHandler)
+
+            val oldReader = reader
+            reader = newReader
+
+            val existingVd = virtualDisplay
+            if (existingVd == null) {
+                virtualDisplay = activeProjection.createVirtualDisplay(
+                    "LiveNEXUS Screen Capture",
+                    targetW,
+                    targetH,
+                    metrics.densityDpi,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    newReader.surface,
+                    null,
+                    workerHandler
+                )
+                if (virtualDisplay == null) {
+                    newReader.close()
+                    throw IllegalStateException("Captura de tela indisponível neste ambiente")
+                }
+            } else {
+                try {
+                    existingVd.resize(targetW, targetH, metrics.densityDpi)
+                    existingVd.surface = newReader.surface
+                } catch (e: Throwable) {
+                    Log.w(TAG, "Falha em resize do VirtualDisplay; recriando...", e)
+                    try { existingVd.release() } catch (_: Exception) {}
+                    virtualDisplay = activeProjection.createVirtualDisplay(
+                        "LiveNEXUS Screen Capture",
+                        targetW,
+                        targetH,
+                        metrics.densityDpi,
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                        newReader.surface,
+                        null,
+                        workerHandler
+                    )
+                }
+            }
+
+            if (oldReader != null && oldReader !== newReader) {
+                try {
+                    oldReader.setOnImageAvailableListener(null, null)
+                    oldReader.close()
+                } catch (_: Exception) {}
+            }
+
+            Log.i(TAG, "Captura configurada em ${targetW}x${targetH} (vertical=$isVerticalMode, display=${metrics.widthPixels}x${metrics.heightPixels})")
+        }
+    }
+
+    private fun reconfigureCaptureForCurrentOrientation(force: Boolean) {
+        val activeProjection = projection ?: return
+        val workerHandler = captureHandler ?: return
+        if (!isCapturing) return
+
+        val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        @Suppress("DEPRECATION")
+        val currentRotation = windowManager.defaultDisplay.rotation
+        val (targetW, targetH) = computeTargetDimensions(configuredMaxDimension, isVerticalMode)
+
+        if (!force && currentRotation == lastDisplayRotation && captureWidth == targetW && captureHeight == targetH) {
+            return
+        }
+
+        try {
+            setupOrResizeVirtualDisplay(activeProjection, workerHandler)
+        } catch (e: Throwable) {
+            Log.w(TAG, "Erro ao reconfigurar captura para nova orientação", e)
+        }
+    }
+
+    private fun processCapturedImage(source: ImageReader, targetW: Int, targetH: Int) {
+        val image = try { source.acquireLatestImage() } catch (_: RuntimeException) { null } ?: return
+        try {
+            val plane = image.planes.firstOrNull()
+            if (plane != null && plane.pixelStride == 4) {
+                val paddedWidth = plane.rowStride / plane.pixelStride
+                if (paddedWidth >= image.width) {
+                    var buffer = screenBufferBitmap
+                    if (buffer == null || buffer.width != paddedWidth || buffer.height != image.height) {
+                        buffer = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
+                        screenBufferBitmap = buffer
+                    }
+                    plane.buffer.rewind()
+                    buffer.copyPixelsFromBuffer(plane.buffer)
+                    val rawFrame = if (paddedWidth == image.width) buffer else {
+                        Bitmap.createBitmap(buffer, 0, 0, image.width, image.height)
+                    }
+
+                    // Extrai a região útil real da tela removendo barras de letterbox/pillarbox do SurfaceFlinger
+                    // e formata exatamente na proporção selecionada (16:9 Horizontal ou 9:16 Vertical)
+                    val contentRect = extractActiveContentRect(rawFrame)
+                    val formattedFrame = transformToTargetAspect(rawFrame, contentRect, targetW, targetH)
+                    latestCapturedScreenFrame = formattedFrame
+
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (now - lastPreviewAt >= 120L || previewFrame == null) {
+                        lastPreviewAt = now
+                        val maxPreviewSide = 640
+                        val maxSrcSide = maxOf(formattedFrame.width, formattedFrame.height).toFloat().coerceAtLeast(1f)
+                        val ratio = minOf(1f, maxPreviewSide.toFloat() / maxSrcSide)
+                        previewFrame = if (ratio < 1f) {
+                            Bitmap.createScaledBitmap(
+                                formattedFrame,
+                                (formattedFrame.width * ratio).toInt().coerceAtLeast(2),
+                                (formattedFrame.height * ratio).toInt().coerceAtLeast(2),
+                                true
+                            )
+                        } else {
+                            formattedFrame
+                        }
+                    }
+                }
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "Falha ao processar frame de tela", error)
+        } finally {
+            image.close()
+        }
+    }
+
     /**
-     * Inicia a transmissão ao vivo do cenário do Editor de Cena (sem abrir diálogo de captura de tela).
-     * Se a fonte "Captura de tela" estiver ativa na cena, ela será composta; caso contrário,
-     * apenas as demais camadas do cenário são transmitidas.
+     * Detecta e remove barras pretas ou claras uniformes (pillarbox / letterbox) inseridas pelo SurfaceFlinger
+     * quando a orientação física da tela difere do VirtualDisplay, preservando 100% da área útil.
+     */
+    private fun extractActiveContentRect(bitmap: Bitmap): Rect {
+        val w = bitmap.width
+        val h = bitmap.height
+        val full = Rect(0, 0, w, h)
+        if (w < 64 || h < 64) return full
+
+        fun isUniformBorderPixel(color: Int, refColor: Int): Boolean {
+            val dr = abs(Color.red(color) - Color.red(refColor))
+            val dg = abs(Color.green(color) - Color.green(refColor))
+            val db = abs(Color.blue(color) - Color.blue(refColor))
+            if (dr > 8 || dg > 8 || db > 8) return false
+            val r = Color.red(color)
+            val g = Color.green(color)
+            val b = Color.blue(color)
+            val isDarkBar = maxOf(r, g, b) <= 14
+            val isLightBar = minOf(r, g, b) >= 240 && (maxOf(r, g, b) - minOf(r, g, b) <= 12)
+            return isDarkBar || isLightBar
+        }
+
+        val sampleFractions = floatArrayOf(0.18f, 0.35f, 0.50f, 0.65f, 0.82f)
+
+        fun isColumnUniformBorder(x: Int): Boolean {
+            val clampedX = x.coerceIn(0, w - 1)
+            val ref = bitmap.getPixel(clampedX, (h * 0.5f).toInt())
+            for (f in sampleFractions) {
+                val y = (h * f).toInt().coerceIn(0, h - 1)
+                if (!isUniformBorderPixel(bitmap.getPixel(clampedX, y), ref)) return false
+            }
+            return true
+        }
+
+        fun isRowUniformBorder(y: Int): Boolean {
+            val clampedY = y.coerceIn(0, h - 1)
+            val ref = bitmap.getPixel((w * 0.5f).toInt(), clampedY)
+            for (f in sampleFractions) {
+                val x = (w * f).toInt().coerceIn(0, w - 1)
+                if (!isUniformBorderPixel(bitmap.getPixel(x, clampedY), ref)) return false
+            }
+            return true
+        }
+
+        var left = 0
+        var right = w - 1
+        if (isColumnUniformBorder(1) && isColumnUniformBorder(w - 2) && !isColumnUniformBorder(w / 2)) {
+            val maxCropX = (w * 0.38f).toInt()
+            while (left < maxCropX && isColumnUniformBorder(left)) left += 2
+            while (right > w - 1 - maxCropX && isColumnUniformBorder(right)) right -= 2
+        }
+
+        var top = 0
+        var bottom = h - 1
+        if (isRowUniformBorder(1) && isRowUniformBorder(h - 2) && !isRowUniformBorder(h / 2)) {
+            val maxCropY = (h * 0.38f).toInt()
+            while (top < maxCropY && isRowUniformBorder(top)) top += 2
+            while (bottom > h - 1 - maxCropY && isRowUniformBorder(bottom)) bottom -= 2
+        }
+
+        val rectW = right - left + 1
+        val rectH = bottom - top + 1
+        if (rectW < w / 4 || rectH < h / 4) return full
+        return Rect(left, top, right + 1, bottom + 1)
+    }
+
+    /**
+     * Compõe o conteúdo capturado para um Bitmap nas dimensões exatas de destino (16:9 ou 9:16),
+     * sem distorcer, esticar, girar ou cortar o conteúdo.
+     */
+    private fun transformToTargetAspect(source: Bitmap, srcRect: Rect, targetW: Int, targetH: Int): Bitmap {
+        if (srcRect.left == 0 && srcRect.top == 0 &&
+            srcRect.width() == source.width && srcRect.height() == source.height &&
+            source.width == targetW && source.height == targetH
+        ) {
+            return source
+        }
+
+        val dstBitmap = if (useBufferA) {
+            var b = transformedFrameBitmapA
+            if (b == null || b.width != targetW || b.height != targetH || b.isRecycled) {
+                b = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+                transformedFrameBitmapA = b
+            }
+            b
+        } else {
+            var b = transformedFrameBitmapB
+            if (b == null || b.width != targetW || b.height != targetH || b.isRecycled) {
+                b = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+                transformedFrameBitmapB = b
+            }
+            b
+        }
+        useBufferA = !useBufferA
+
+        val canvas = Canvas(dstBitmap)
+        canvas.drawColor(Color.rgb(6, 10, 24))
+
+        val srcW = srcRect.width().toFloat().coerceAtLeast(1f)
+        val srcH = srcRect.height().toFloat().coerceAtLeast(1f)
+        val dstW = targetW.toFloat()
+        val dstH = targetH.toFloat()
+
+        val srcAspect = srcW / srcH
+        val dstAspect = dstW / dstH
+
+        val dstRect = if (abs(srcAspect - dstAspect) / dstAspect <= 0.06f) {
+            RectF(0f, 0f, dstW, dstH)
+        } else {
+            val scale = minOf(dstW / srcW, dstH / srcH)
+            val drawW = srcW * scale
+            val drawH = srcH * scale
+            val left = (dstW - drawW) / 2f
+            val top = (dstH - drawH) / 2f
+            RectF(left, top, left + drawW, top + drawH)
+        }
+
+        canvas.drawBitmap(source, srcRect, dstRect, transformPaint)
+        return dstBitmap
+    }
+
+    /**
+     * Inicia a transmissão ao vivo do cenário do Editor de Cena.
+     * Se a fonte "Captura de tela" estiver ativa na cena, ela será composta em 16:9 (Horizontal) ou 9:16 (Vertical).
      */
     private fun handleStartStream(intent: Intent) {
         val targetsJson = intent.getStringExtra(EXTRA_TARGETS_JSON)
@@ -326,18 +681,28 @@ class ScreenCaptureService : Service() {
             return
         }
 
-        val fps = intent.getIntExtra(EXTRA_FPS, 30)
-        val bitrate = intent.getIntExtra(EXTRA_BITRATE_KBPS, 4500)
+        val fps = intent.getIntExtra(EXTRA_FPS, 30).coerceIn(15, 60)
+        val bitrate = intent.getIntExtra(EXTRA_BITRATE_KBPS, 4500).coerceIn(500, 20000)
         val maxDimension = intent.getIntExtra(EXTRA_MAX_DIMENSION, 1280).coerceIn(480, 1920)
         if (intent.hasExtra(EXTRA_VERTICAL_MODE)) {
             isVerticalMode = intent.getBooleanExtra(EXTRA_VERTICAL_MODE, isVerticalMode)
+        } else {
+            val prefs = getSharedPreferences("livenexus_capture_settings", Context.MODE_PRIVATE)
+            isVerticalMode = prefs.getString("capture_orientation", "horizontal") == "vertical"
         }
-        val longSide = maxDimension
-        val shortSide = ((longSide * 9) / 16).coerceAtLeast(2)
-        val targetW = if (isVerticalMode) shortSide else longSide
-        val targetH = if (isVerticalMode) longSide else shortSide
-        val evenWidth = (targetW - targetW % 2).coerceAtLeast(2)
-        val evenHeight = (targetH - targetH % 2).coerceAtLeast(2)
+
+        configuredMaxDimension = maxDimension
+        configuredFps = fps
+        configuredBitrateKbps = bitrate
+
+        val (evenWidth, evenHeight) = computeTargetDimensions(maxDimension, isVerticalMode)
+
+        // Garante que a captura de tela ativa também esteja nas dimensões da orientação selecionada
+        if (isCapturing) {
+            captureHandler?.post {
+                reconfigureCaptureForCurrentOrientation(force = true)
+            }
+        }
 
         try {
             val notif = Notification.Builder(this, CHANNEL_ID)
@@ -427,7 +792,6 @@ class ScreenCaptureService : Service() {
                 videoEncoder = encoder
 
                 // Compositor de Cenário do LiveNEXUS: transmite o canvas do Editor de Cena.
-                // A captura de tela só é desenhada na camada de tipo "screen" ("Captura de tela") se isCapturing estiver ativo.
                 val initialLayers = activeSceneLayers ?: loadPersistedSceneLayers(this)
                 val sceneComp = SceneCompositor(
                     outputSurface = encoder.surface,
@@ -489,18 +853,23 @@ class ScreenCaptureService : Service() {
         isCapturing = false
         latestCapturedScreenFrame = null
         screenBufferBitmap = null
+        transformedFrameBitmapA = null
+        transformedFrameBitmapB = null
         previewFrame = null
+        captureHandler = null
 
-        try {
-            virtualDisplay?.release()
-        } catch (_: Exception) {}
-        virtualDisplay = null
+        synchronized(captureLock) {
+            try {
+                virtualDisplay?.release()
+            } catch (_: Exception) {}
+            virtualDisplay = null
 
-        try {
-            reader?.setOnImageAvailableListener(null, null)
-            reader?.close()
-        } catch (_: Exception) {}
-        reader = null
+            try {
+                reader?.setOnImageAvailableListener(null, null)
+                reader?.close()
+            } catch (_: Exception) {}
+            reader = null
+        }
 
         try {
             captureThread?.quitSafely()
@@ -600,6 +969,10 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onDestroy() {
+        if (activeInstance === this) {
+            activeInstance = null
+        }
+        unregisterDisplayRotationListener()
         isConnecting = false
         stopStreamingOnly()
         stopCaptureOnly()

@@ -55,9 +55,19 @@ class SceneCompositor(
         isRunning = true
 
         renderThread = Thread({
+            var useEgl = false
             try {
-                initEGL()
-                initGL()
+                try {
+                    initEGL()
+                    initGL()
+                    useEgl = true
+                } catch (eglErr: Throwable) {
+                    Log.w(TAG, "EGL indisponível para o Surface; usando Canvas direto no Surface.", eglErr)
+                    releaseGL()
+                    releaseEGL()
+                    useEgl = false
+                }
+
                 val frameIntervalMs = (1000L / fps).coerceAtLeast(10L)
                 val startNs = System.nanoTime()
                 var frameIndex = 0L
@@ -75,30 +85,45 @@ class SceneCompositor(
                         } catch (_: Exception) {}
                     }
 
-                    // Envia o frame renderizado para a textura OpenGL
-                    GLES20.glViewport(0, 0, width, height)
-                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                    GLES20.glUseProgram(program)
+                    if (useEgl) {
+                        // Envia o frame renderizado para a textura OpenGL
+                        GLES20.glViewport(0, 0, width, height)
+                        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                        GLES20.glUseProgram(program)
 
-                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
-                    GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, compositedBitmap, 0)
-                    GLES20.glUniform1i(uTextureLoc, 0)
+                        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+                        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, compositedBitmap, 0)
+                        GLES20.glUniform1i(uTextureLoc, 0)
 
-                    vertexBuffer?.position(0)
-                    GLES20.glVertexAttribPointer(aPositionLoc, 2, GLES20.GL_FLOAT, false, 4 * 4, vertexBuffer)
-                    GLES20.glEnableVertexAttribArray(aPositionLoc)
+                        vertexBuffer?.position(0)
+                        GLES20.glVertexAttribPointer(aPositionLoc, 2, GLES20.GL_FLOAT, false, 4 * 4, vertexBuffer)
+                        GLES20.glEnableVertexAttribArray(aPositionLoc)
 
-                    vertexBuffer?.position(2)
-                    GLES20.glVertexAttribPointer(aTexCoordLoc, 2, GLES20.GL_FLOAT, false, 4 * 4, vertexBuffer)
-                    GLES20.glEnableVertexAttribArray(aTexCoordLoc)
+                        vertexBuffer?.position(2)
+                        GLES20.glVertexAttribPointer(aTexCoordLoc, 2, GLES20.GL_FLOAT, false, 4 * 4, vertexBuffer)
+                        GLES20.glEnableVertexAttribArray(aTexCoordLoc)
 
-                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
-                    // Define o timestamp de apresentação para o MediaCodec (em nanos)
-                    val ptsNs = System.nanoTime() - startNs
-                    EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, ptsNs)
-                    EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+                        // Define o timestamp de apresentação para o MediaCodec (em nanos)
+                        val ptsNs = System.nanoTime() - startNs
+                        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, ptsNs)
+                        EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+                    } else if (outputSurface.isValid) {
+                        val surfaceCanvas = try {
+                            outputSurface.lockHardwareCanvas()
+                        } catch (_: Throwable) {
+                            try { outputSurface.lockCanvas(null) } catch (_: Throwable) { null }
+                        }
+                        if (surfaceCanvas != null) {
+                            try {
+                                surfaceCanvas.drawBitmap(compositedBitmap, 0f, 0f, null)
+                            } finally {
+                                try { outputSurface.unlockCanvasAndPost(surfaceCanvas) } catch (_: Throwable) {}
+                            }
+                        }
+                    }
 
                     frameIndex++
 
@@ -113,10 +138,12 @@ class SceneCompositor(
                     }
                 }
             } catch (e: Throwable) {
-                Log.e(TAG, "Erro no loop de composição EGL", e)
+                Log.e(TAG, "Erro no loop de composição", e)
             } finally {
-                releaseGL()
-                releaseEGL()
+                if (useEgl) {
+                    releaseGL()
+                    releaseEGL()
+                }
                 try {
                     if (!compositedBitmap.isRecycled) {
                         compositedBitmap.recycle()

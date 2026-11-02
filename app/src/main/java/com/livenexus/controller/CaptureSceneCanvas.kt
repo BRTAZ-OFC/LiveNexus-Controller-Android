@@ -238,8 +238,6 @@ class CaptureSceneCanvas(context: Context) : View(context) {
                 val tappedLayer = moving
                 if (tappedLayer != null && touched) {
                     onChange?.invoke()
-                } else if (tappedLayer != null && !touched && tappedLayer.type == "screen" && frame == null) {
-                    onScreenSourceTap?.invoke()
                 }
                 moving = null
                 multiTouch = false
