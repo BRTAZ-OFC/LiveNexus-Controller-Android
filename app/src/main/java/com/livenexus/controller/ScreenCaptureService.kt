@@ -756,6 +756,9 @@ class ScreenCaptureService : Service() {
                             val micOn = audioPrefs.getBoolean("mic_enabled", true)
                             if (!micOn) 0f else (audioPrefs.getInt("mic_volume", 75).coerceIn(0, 100) / 100f)
                         },
+                        noiseSuppressionProvider = {
+                            audioPrefs.getBoolean("noise_suppression_enabled", true)
+                        },
                         onHeader = { asc -> streamPub.onAudioHeader(asc) },
                         onSample = { bytes, info -> streamPub.onAudioSample(bytes, info) }
                     )

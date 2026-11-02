@@ -442,6 +442,11 @@ class MainActivity : Activity() {
                 changed = true
             }
         }
+        val ytUser = capturePrefs.getString("youtube_username", null)?.trim()
+        if (!ytUser.isNullOrBlank() && !ytUser.startsWith("@")) {
+            edit.putString("youtube_username", "@${ytUser.removePrefix("@").trim()}")
+            changed = true
+        }
         if (changed) edit.apply()
     }
 
@@ -494,7 +499,13 @@ class MainActivity : Activity() {
         val currentKey = capturePrefs.getString("key_$platform", "")?.trim() ?: ""
         val initialKey = if (isValidStreamKey(currentKey)) currentKey else ""
         val currentUser = capturePrefs.getString("${platform}_username", "")?.trim() ?: ""
-        val initialUser = if (currentUser.equals("null", ignoreCase = true) || currentUser.equals("undefined", ignoreCase = true)) "" else currentUser
+        val sanitizedUser = if (currentUser.equals("null", ignoreCase = true) || currentUser.equals("undefined", ignoreCase = true)) "" else currentUser
+        val initialUser = if (platform == "youtube") {
+            val body = sanitizedUser.removePrefix("@").trim()
+            if (body.isNotBlank()) "@$body" else "@"
+        } else {
+            sanitizedUser
+        }
 
         val scrollView = ScrollView(this).apply {
             isFillViewport = true
@@ -525,6 +536,25 @@ class MainActivity : Activity() {
             setHintTextColor(Color.GRAY)
             background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
             setPadding(dp(12), dp(10), dp(12), dp(10))
+            setSelection(text.length)
+            if (platform == "youtube") {
+                addTextChangedListener(object : android.text.TextWatcher {
+                    private var editing = false
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                    override fun afterTextChanged(s: android.text.Editable?) {
+                        if (editing || s == null) return
+                        val current = s.toString()
+                        if (!current.startsWith("@")) {
+                            editing = true
+                            val fixed = "@" + current.replace("@", "")
+                            s.replace(0, s.length, fixed)
+                            setSelection(s.length)
+                            editing = false
+                        }
+                    }
+                })
+            }
         }
         layout.addView(userInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = dp(10)
@@ -560,10 +590,16 @@ class MainActivity : Activity() {
                     Toast.makeText(this, "A Chave de Transmissão é obrigatória.", Toast.LENGTH_SHORT).show()
                     return@setPositiveButton
                 }
-                val user = userInput.text.toString().trim().removePrefix("@")
+                val rawUser = userInput.text.toString().trim()
+                val cleanBody = rawUser.removePrefix("@").trim()
+                val finalUsername = if (platform == "youtube") {
+                    if (cleanBody.isNotBlank()) "@$cleanBody" else "@CanalYouTube"
+                } else {
+                    if (cleanBody.isNotBlank()) rawUser else "Canal $platformName"
+                }
                 capturePrefs.edit()
                     .putString("key_$platform", key)
-                    .putString("${platform}_username", if (user.isNotBlank()) user else "Canal $platformName")
+                    .putString("${platform}_username", finalUsername)
                     .putBoolean("stream_$platform", true)
                     .apply()
                 platformConnected[platform] = true
@@ -2199,6 +2235,39 @@ class MainActivity : Activity() {
 
                 audioChannel("Microfone", "mic", "♩")
                 audioChannel("Áudio interno", "internal", "♫")
+
+                val nsCard = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = shape(Color.rgb(14, 18, 44), NeonTheme.cyan, 12)
+                    setPadding(dp(14), dp(12), dp(14), dp(12))
+                }
+                val nsRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                val nsTitles = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                }
+                nsTitles.addView(text("🔇  Supressão de Ruídos", 13.5f, Color.WHITE).apply {
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                })
+                nsTitles.addView(text("Remove chiados, eco e ruídos de fundo do microfone", 11f, Color.rgb(170, 185, 220)).apply {
+                    setPadding(0, dp(2), 0, 0)
+                })
+                nsRow.addView(nsTitles, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                val nsEnabled = capturePrefs.getBoolean("noise_suppression_enabled", true)
+                val nsSwitch = Switch(this).apply {
+                    isChecked = nsEnabled
+                    setOnCheckedChangeListener { _, checked ->
+                        capturePrefs.edit().putBoolean("noise_suppression_enabled", checked).apply()
+                    }
+                }
+                nsRow.addView(nsSwitch)
+                nsCard.addView(nsRow)
+                contentContainer.addView(nsCard, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                ))
             }
             populate()
         }
@@ -2352,8 +2421,9 @@ class MainActivity : Activity() {
                 typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             })
 
+            val displayHandle = if (cleanUsername.startsWith("@")) cleanUsername else "@$cleanUsername"
             val statusLabel = if (isConn) {
-                if (cleanUsername.isNotBlank()) "● @$cleanUsername" else "● RTMP Pronto"
+                if (cleanUsername.isNotBlank()) "● $displayHandle" else "● RTMP Pronto"
             } else {
                 "○ Inserir Chave"
             }
@@ -2481,7 +2551,8 @@ class MainActivity : Activity() {
             activePlatforms.forEach { p ->
                 val rawUser = capturePrefs.getString("${p.lowercase()}_username", "")?.trim() ?: ""
                 val username = if (rawUser.equals("null", ignoreCase = true) || rawUser.equals("undefined", ignoreCase = true)) "" else rawUser
-                val label = if (username.isNotBlank()) "$p (@$username)" else p
+                val displayHandle = if (username.startsWith("@")) username else "@$username"
+                val label = if (username.isNotBlank()) "$p ($displayHandle)" else p
                 val pill = text(label, 10.5f, NeonTheme.cyan).apply {
                     setPadding(dp(6), dp(2), dp(6), dp(2))
                     background = shape(Color.rgb(8, 24, 48), NeonTheme.cyan, 8)
