@@ -436,7 +436,6 @@ class MainActivity : Activity() {
     // ==========================================
     // 1. CONFIGURAÇÃO YOUTUBE POR CHAVE RTMP
     private fun openYouTubeStudioDialog() {
-    private fun openYouTubeStudioDialog() {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(10), dp(20), dp(10))
@@ -515,7 +514,6 @@ class MainActivity : Activity() {
 
     // Configuração Kick apenas por chave RTMP/RTMPS.
     private fun openKickRtmpDialog() {
-    private fun openKickRtmpDialog() {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(10), dp(20), dp(10))
@@ -570,7 +568,7 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("Configurar Kick RTMP")
             .setView(layout)
-            .setPositiveButton("Salvar e Autenticar") { _, _ ->
+            .setPositiveButton("Salvar Chave RTMP") { _, _ ->
                 val user = usernameInput.text.toString().trim()
                 val key = keyInput.text.toString().trim()
                 if (key.isBlank()) {
