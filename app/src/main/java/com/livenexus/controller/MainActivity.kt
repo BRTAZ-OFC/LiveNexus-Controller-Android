@@ -128,6 +128,7 @@ class MainActivity : Activity() {
         if (targetPage >= 0) page = targetPage
         authenticated = true
         ControllerRuntime.signedIn = true
+        cleanStaleNullPreferences()
         loadCaptureScenes()
         ScreenCaptureService.updateCaptureOrientation(isVerticalCaptureMode())
         syncActivityOrientationWithCaptureMode()
@@ -296,8 +297,7 @@ class MainActivity : Activity() {
         resumed = true
         if (authenticated) prepareOverlay()
         resumeCaptureRefresh()
-        // O estado das plataformas RTMP é local: sem chamadas às APIs/OAuth.
-        refreshStreamingKeyStatus()
+        checkStreamingPlatformsStatus()
     }
 
     override fun onPause() {
@@ -417,175 +417,68 @@ class MainActivity : Activity() {
         return if (h > 0) String.format("%02d:%02d:%02d", h, m, s) else String.format("%02d:%02d", m, s)
     }
 
-    private fun refreshStreamingKeyStatus(onComplete: (() -> Unit)? = null) {
-        listOf("youtube", "twitch", "kick").forEach { platform ->
-            platformConnected[platform] = isValidStreamKey(capturePrefs.getString("key_$platform", ""))
+    private fun checkStreamingPlatformsStatus(onComplete: (() -> Unit)? = null) {
+        val platforms = listOf("youtube", "twitch", "kick")
+        platforms.forEach { p ->
+            val hasKey = isValidStreamKey(capturePrefs.getString("key_$p", ""))
+            platformConnected[p] = hasKey
         }
         onComplete?.invoke()
         if (page == 2) render()
     }
 
+    private fun cleanStaleNullPreferences() {
+        val keysToClean = listOf(
+            "key_youtube", "key_twitch", "key_kick",
+            "youtube_username", "twitch_username", "kick_username",
+            "url_youtube", "url_twitch", "url_kick"
+        )
+        val edit = capturePrefs.edit()
+        var changed = false
+        for (k in keysToClean) {
+            val v = capturePrefs.getString(k, null)
+            if (v != null && (v.trim().isEmpty() || v.equals("null", true) || v.equals("undefined", true) || v.equals("none", true))) {
+                edit.remove(k)
+                changed = true
+            }
+        }
+        if (changed) edit.apply()
+    }
+
     private fun openPlatformAuthDialog(platform: String) {
-        when (platform) {
-            "youtube" -> openYouTubeStudioDialog()
-            "twitch" -> openStreamKeyDialog("twitch", "Twitch")
-            "kick" -> openKickRtmpDialog()
+        val name = when (platform) {
+            "youtube" -> "YouTube"
+            "twitch" -> "Twitch"
+            "kick" -> "Kick"
+            else -> platform.replaceFirstChar { it.uppercase() }
         }
+        openPlatformRtmpDialog(platform, name)
     }
 
-    // ==========================================
-    // 1. CONFIGURAÇÃO YOUTUBE POR CHAVE RTMP
+    private fun openTwitchAuthDialog() {
+        openPlatformRtmpDialog("twitch", "Twitch")
+    }
+
+    private fun openYouTubeAuthDialog() {
+        openPlatformRtmpDialog("youtube", "YouTube")
+    }
+
     private fun openYouTubeStudioDialog() {
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(10), dp(20), dp(10))
-        }
-
-        val openStudioBtn = Button(this).apply {
-            text = "🔗 Abrir YouTube Studio no Navegador"
-            setBackgroundColor(Color.rgb(180, 20, 30))
-            setTextColor(Color.WHITE)
-            setOnClickListener {
-                try {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://studio.youtube.com/channel/live/livestreaming")))
-                } catch (e: Exception) {
-                    Toast.makeText(this@MainActivity, "Não foi possível abrir o navegador", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-        layout.addView(openStudioBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = dp(12)
-        })
-
-        layout.addView(text("Nome ou @handle do Canal:", 12f, Color.rgb(200, 210, 240)).apply {
-            setPadding(0, 0, 0, dp(4))
-        })
-        val channelInput = EditText(this).apply {
-            hint = "Ex: @MeuCanalAoVivo"
-            setText(capturePrefs.getString("youtube_username", ""))
-            setSingleLine(true)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-        }
-        layout.addView(channelInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = dp(10)
-        })
-
-        layout.addView(text("Chave de Transmissão (YouTube Studio):", 12f, Color.rgb(200, 210, 240)).apply {
-            setPadding(0, 0, 0, dp(4))
-        })
-        val savedKey = capturePrefs.getString("key_youtube", "")?.trim() ?: ""
-        val initialKey = if (isValidStreamKey(savedKey)) savedKey else ""
-        val keyInput = EditText(this).apply {
-            hint = "Cole sua chave de transmissão aqui"
-            setText(initialKey)
-            setSingleLine(true)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-        }
-        layout.addView(keyInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-
-        AlertDialog.Builder(this)
-            .setTitle("Configurar YouTube RTMP")
-            .setView(layout)
-            .setPositiveButton("Salvar Chave RTMP") { _, _ ->
-                val channel = channelInput.text.toString().trim()
-                val key = keyInput.text.toString().trim()
-                if (!isValidStreamKey(key)) {
-                    Toast.makeText(this, "A Chave de Transmissão é obrigatória e não pode ser nula.", Toast.LENGTH_SHORT).show()
-                    return@setPositiveButton
-                }
-                capturePrefs.edit()
-                    .putString("key_youtube", key)
-                    .putString("youtube_username", if (channel.isNotBlank()) channel.removePrefix("@") else "Canal YouTube")
-                    .putBoolean("stream_youtube", true)
-                    .apply()
-                platformConnected["youtube"] = true
-                Toast.makeText(this, "Chave RTMP do YouTube salva!", Toast.LENGTH_SHORT).show()
-                render()
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
+        openPlatformRtmpDialog("youtube", "YouTube")
     }
 
-    // Configuração Kick apenas por chave RTMP/RTMPS.
+    private fun openKickAuthDialog() {
+        openPlatformRtmpDialog("kick", "Kick")
+    }
+
+
+
     private fun openKickRtmpDialog() {
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(10), dp(20), dp(10))
-        }
+        openPlatformRtmpDialog("kick", "Kick")
+    }
 
-        val openKickBtn = Button(this).apply {
-            text = "🔗 Abrir Dashboard da Kick (Stream Settings)"
-            setBackgroundColor(Color.rgb(16, 140, 60))
-            setTextColor(Color.WHITE)
-            setOnClickListener {
-                try {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://kick.com/dashboard/settings/stream")))
-                } catch (e: Exception) {
-                    Toast.makeText(this@MainActivity, "Não foi possível abrir o navegador", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-        layout.addView(openKickBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = dp(12)
-        })
-
-        layout.addView(text("Nome de Usuário / Canal Kick:", 12f, Color.rgb(200, 210, 240)).apply {
-            setPadding(0, 0, 0, dp(4))
-        })
-        val usernameInput = EditText(this).apply {
-            hint = "Ex: KickStreamer"
-            setText(capturePrefs.getString("kick_username", ""))
-            setSingleLine(true)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-        }
-        layout.addView(usernameInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = dp(10)
-        })
-
-        layout.addView(text("Chave de Transmissão da Kick (Stream Key):", 12f, Color.rgb(200, 210, 240)).apply {
-            setPadding(0, 0, 0, dp(4))
-        })
-        val keyInput = EditText(this).apply {
-            hint = "Ex: sk_us_xxxxxx ou chave RTMP"
-            setText(capturePrefs.getString("key_kick", ""))
-            setSingleLine(true)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-        }
-        layout.addView(keyInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-
-        AlertDialog.Builder(this)
-            .setTitle("Configurar Kick RTMP")
-            .setView(layout)
-            .setPositiveButton("Salvar Chave RTMP") { _, _ ->
-                val user = usernameInput.text.toString().trim()
-                val key = keyInput.text.toString().trim()
-                if (key.isBlank()) {
-                    Toast.makeText(this, "A Chave de Transmissão da Kick é obrigatória.", Toast.LENGTH_SHORT).show()
-                    return@setPositiveButton
-                }
-                capturePrefs.edit()
-                    .putString("key_kick", key)
-                    .putString("kick_username", if (user.isNotBlank()) user else "Kick Streamer")
-                    .putBoolean("stream_kick", true)
-                    .apply()
-                platformConnected["kick"] = true
-                Toast.makeText(this, "Chave RTMP da Kick salva!", Toast.LENGTH_SHORT).show()
-                render()
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
+    private fun openStreamKeyDialog(platform: String, platformName: String) {
+        openPlatformRtmpDialog(platform, platformName)
     }
 
     private fun isValidStreamKey(key: String?): Boolean {
@@ -597,45 +490,139 @@ class MainActivity : Activity() {
             !trimmed.equals("none", ignoreCase = true)
     }
 
-    private fun openStreamKeyDialog(platform: String, platformName: String) {
+    private fun openPlatformRtmpDialog(platform: String, platformName: String) {
         val currentKey = capturePrefs.getString("key_$platform", "")?.trim() ?: ""
         val initialKey = if (isValidStreamKey(currentKey)) currentKey else ""
-        val input = EditText(this).apply {
-            hint = if (platform == "youtube") "Ex: xxxx-xxxx-xxxx-xxxx-xxxx" else "Ex: live_123456789_xxxxxx"
+        val currentUser = capturePrefs.getString("${platform}_username", "")?.trim() ?: ""
+        val initialUser = if (currentUser.equals("null", ignoreCase = true) || currentUser.equals("undefined", ignoreCase = true)) "" else currentUser
+
+        val defaultUrl = when (platform) {
+            "youtube" -> StreamingConfig.RTMPS_YOUTUBE
+            "twitch" -> StreamingConfig.RTMP_TWITCH
+            "kick" -> StreamingConfig.RTMP_KICK
+            else -> "rtmp://"
+        }
+        val savedUrl = capturePrefs.getString("url_$platform", "")?.trim() ?: ""
+        val initialUrl = if (savedUrl.isNotBlank()) savedUrl else defaultUrl
+
+        val (dashboardUrl, dashboardLabel) = when (platform) {
+            "youtube" -> Pair("https://studio.youtube.com/channel/UC/livestreaming", "🔗 Abrir YouTube Live Studio")
+            "twitch" -> Pair("https://dashboard.twitch.tv/settings/stream", "🔗 Abrir Dashboard da Twitch")
+            "kick" -> Pair("https://kick.com/dashboard/settings/stream", "🔗 Abrir Dashboard da Kick")
+            else -> Pair("", "")
+        }
+
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(10), dp(20), dp(10))
+        }
+
+        if (dashboardUrl.isNotBlank()) {
+            val dashBtn = Button(this).apply {
+                text = dashboardLabel
+                setBackgroundColor(when (platform) {
+                    "kick" -> Color.rgb(16, 140, 60)
+                    "twitch" -> Color.rgb(104, 24, 168)
+                    else -> Color.rgb(204, 0, 0)
+                })
+                setTextColor(Color.WHITE)
+                setOnClickListener {
+                    try {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(dashboardUrl)))
+                    } catch (e: Exception) {
+                        Toast.makeText(this@MainActivity, "Não foi possível abrir o navegador", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            layout.addView(dashBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(12)
+            })
+        }
+
+        layout.addView(text("Nome do Canal / Usuário ($platformName):", 12f, Color.rgb(200, 210, 240)).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        val userInput = EditText(this).apply {
+            hint = "Ex: MeuCanal$platformName"
+            setText(initialUser)
             setSingleLine(true)
-            setText(initialKey)
-            selectAll()
             setTextColor(Color.WHITE)
             setHintTextColor(Color.GRAY)
             background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
             setPadding(dp(12), dp(10), dp(12), dp(10))
         }
-        val defaultRtmp = when (platform) {
-            "youtube" -> "rtmp://a.rtmp.youtube.com/live2\n(Fallback automático RTMPS 443 ativo)"
-            "twitch" -> "rtmp://live.twitch.tv/app/"
-            "kick" -> "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
-            else -> "rtmp://"
+        layout.addView(userInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(10)
+        })
+
+        layout.addView(text("URL do Servidor RTMP / RTMPS:", 12f, Color.rgb(200, 210, 240)).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        val urlInput = EditText(this).apply {
+            hint = defaultUrl
+            setText(initialUrl)
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
         }
+        layout.addView(urlInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(10)
+        })
+
+        layout.addView(text("Chave de Transmissão (Stream Key):", 12f, Color.rgb(200, 210, 240)).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        val keyInput = EditText(this).apply {
+            hint = when (platform) {
+                "youtube" -> "Ex: xxxx-xxxx-xxxx-xxxx-xxxx"
+                "twitch" -> "Ex: live_123456789_xxxxxx"
+                "kick" -> "Ex: sk_us_xxxxxx"
+                else -> "Chave RTMP"
+            }
+            setText(initialKey)
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        layout.addView(keyInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
         AlertDialog.Builder(this)
-            .setTitle("Chave de Transmissão - $platformName")
-            .setMessage("Servidor RTMP:\n$defaultRtmp\n\nInsira sua chave de transmissão oficial:")
-            .setView(input)
-            .setPositiveButton("Salvar") { _, _ ->
-                val keyVal = input.text.toString().trim()
-                if (!isValidStreamKey(keyVal)) {
-                    Toast.makeText(this, "A Chave de Transmissão é obrigatória e não pode ser nula.", Toast.LENGTH_SHORT).show()
+            .setTitle("Conexão RTMP - $platformName")
+            .setView(layout)
+            .setPositiveButton("Salvar RTMP") { _, _ ->
+                val key = keyInput.text.toString().trim()
+                if (!isValidStreamKey(key)) {
+                    Toast.makeText(this, "A Chave de Transmissão é obrigatória.", Toast.LENGTH_SHORT).show()
                     return@setPositiveButton
                 }
-                val existingUser = capturePrefs.getString("${platform}_username", "") ?: ""
-                val editor = capturePrefs.edit()
-                    .putString("key_$platform", keyVal)
+                val user = userInput.text.toString().trim()
+                val url = urlInput.text.toString().trim().ifBlank { defaultUrl }
+                capturePrefs.edit()
+                    .putString("key_$platform", key)
+                    .putString("url_$platform", url)
+                    .putString("${platform}_username", if (user.isNotBlank()) user else "Canal $platformName")
                     .putBoolean("stream_$platform", true)
-                if (existingUser.isBlank()) {
-                    editor.putString("${platform}_username", "Canal $platformName")
-                }
-                editor.apply()
+                    .apply()
                 platformConnected[platform] = true
-                Toast.makeText(this, "Chave RTMP de $platformName salva!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "$platformName configurado com sucesso!", Toast.LENGTH_SHORT).show()
+                render()
+            }
+            .setNeutralButton("Remover") { _, _ ->
+                capturePrefs.edit()
+                    .remove("key_$platform")
+                    .remove("url_$platform")
+                    .remove("${platform}_username")
+                    .remove("${platform}_token")
+                    .remove("${platform}_login")
+                    .remove("${platform}_user_id")
+                    .putBoolean("stream_$platform", false)
+                    .apply()
+                platformConnected[platform] = false
+                Toast.makeText(this, "Configurações de $platformName removidas.", Toast.LENGTH_SHORT).show()
                 render()
             }
             .setNegativeButton("Cancelar", null)
@@ -647,9 +634,12 @@ class MainActivity : Activity() {
         if (capturePrefs.getBoolean("stream_youtube", false)) {
             val key = capturePrefs.getString("key_youtube", "")?.trim() ?: ""
             if (isValidStreamKey(key)) {
+                val url = capturePrefs.getString("url_youtube", "")?.trim().let {
+                    if (it.isNullOrBlank()) StreamingConfig.RTMPS_YOUTUBE else it
+                }
                 array.put(JSONObject().apply {
                     put("platform", "YouTube")
-                    put("url", StreamingConfig.RTMP_YOUTUBE)
+                    put("url", url)
                     put("key", key)
                 })
             }
@@ -657,9 +647,12 @@ class MainActivity : Activity() {
         if (capturePrefs.getBoolean("stream_twitch", false)) {
             val key = capturePrefs.getString("key_twitch", "")?.trim() ?: ""
             if (isValidStreamKey(key)) {
+                val url = capturePrefs.getString("url_twitch", "")?.trim().let {
+                    if (it.isNullOrBlank()) StreamingConfig.RTMP_TWITCH else it
+                }
                 array.put(JSONObject().apply {
                     put("platform", "Twitch")
-                    put("url", StreamingConfig.RTMP_TWITCH)
+                    put("url", url)
                     put("key", key)
                 })
             }
@@ -667,9 +660,12 @@ class MainActivity : Activity() {
         if (capturePrefs.getBoolean("stream_kick", false)) {
             val key = capturePrefs.getString("key_kick", "")?.trim() ?: ""
             if (isValidStreamKey(key)) {
+                val url = capturePrefs.getString("url_kick", "")?.trim().let {
+                    if (it.isNullOrBlank()) StreamingConfig.RTMP_KICK else it
+                }
                 array.put(JSONObject().apply {
                     put("platform", "Kick")
-                    put("url", StreamingConfig.RTMP_KICK)
+                    put("url", url)
                     put("key", key)
                 })
             }
@@ -2314,7 +2310,7 @@ class MainActivity : Activity() {
             isFocusable = true
             setOnClickListener {
                 Toast.makeText(this@MainActivity, "Verificando chaves RTMP salvas...", Toast.LENGTH_SHORT).show()
-                refreshStreamingKeyStatus {
+                checkStreamingPlatformsStatus {
                     Toast.makeText(this@MainActivity, "Chaves RTMP verificadas!", Toast.LENGTH_SHORT).show()
                 }
             }
@@ -2352,11 +2348,11 @@ class MainActivity : Activity() {
                 setOnLongClickListener {
                     val options = arrayOf(
                         if (isConn) "Alternar Seleção (${if (selected) "Selecionado" else "Desmarcado"})" else "Configurar RTMP",
-                        "Configurar Chave RTMP",
-                        "Remover Chave RTMP"
+                        "Configurar RTMP / Servidor e Chave",
+                        "Remover Chave e Desconectar"
                     )
                     AlertDialog.Builder(this@MainActivity)
-                        .setTitle("RTMP - $name")
+                        .setTitle("Conta - $name")
                         .setItems(options) { _, which ->
                             when (which) {
                                 0 -> {
@@ -2370,6 +2366,7 @@ class MainActivity : Activity() {
                                 2 -> {
                                     capturePrefs.edit()
                                         .remove("key_$slug")
+                                        .remove("url_$slug")
                                         .remove("${slug}_username")
                                         .remove("${slug}_token")
                                         .remove("${slug}_login")
@@ -2377,7 +2374,7 @@ class MainActivity : Activity() {
                                         .putBoolean(prefKey, false)
                                         .apply()
                                     platformConnected[slug] = false
-                                    Toast.makeText(this@MainActivity, "Chave RTMP de $name removida.", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(this@MainActivity, "Conta $name desconectada.", Toast.LENGTH_SHORT).show()
                                     render()
                                 }
                             }
@@ -2406,9 +2403,9 @@ class MainActivity : Activity() {
             })
 
             val statusLabel = if (isConn) {
-                if (cleanUsername.isNotBlank()) "● RTMP @$cleanUsername" else "● Chave RTMP salva"
+                if (cleanUsername.isNotBlank()) "● @$cleanUsername" else "● RTMP Pronto"
             } else {
-                "○ Configurar RTMP"
+                "○ Inserir Chave"
             }
             val statusColor = if (isConn) NeonTheme.green else Color.rgb(180, 185, 215)
             val statusText = text(statusLabel, 10f, statusColor).apply {
@@ -2532,7 +2529,8 @@ class MainActivity : Activity() {
                 setPadding(0, 0, dp(6), 0)
             })
             activePlatforms.forEach { p ->
-                val username = capturePrefs.getString("${p.lowercase()}_username", "") ?: ""
+                val rawUser = capturePrefs.getString("${p.lowercase()}_username", "")?.trim() ?: ""
+                val username = if (rawUser.equals("null", ignoreCase = true) || rawUser.equals("undefined", ignoreCase = true)) "" else rawUser
                 val label = if (username.isNotBlank()) "$p (@$username)" else p
                 val pill = text(label, 10.5f, NeonTheme.cyan).apply {
                     setPadding(dp(6), dp(2), dp(6), dp(2))

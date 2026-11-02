@@ -9,7 +9,7 @@ object StreamingConfig {
     // =========================================================================
     // SERVIDORES RTMP / RTMPS PADRÃO
     // =========================================================================
-    const val RTMP_YOUTUBE = "rtmp://a.rtmp.youtube.com/live2"
+    const val RTMP_YOUTUBE = "rtmps://a.rtmps.youtube.com:443/live2"
     const val RTMPS_YOUTUBE = "rtmps://a.rtmps.youtube.com:443/live2"
     const val RTMP_TWITCH = "rtmp://live.twitch.tv/app/"
     const val RTMPS_TWITCH = "rtmps://live.twitch.tv:443/app/"
