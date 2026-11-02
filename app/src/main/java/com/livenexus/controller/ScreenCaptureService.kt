@@ -912,17 +912,26 @@ class ScreenCaptureService : Service() {
         publisher = null
     }
 
+    private fun isValidStreamKey(key: String?): Boolean {
+        if (key.isNullOrBlank()) return false
+        val trimmed = key.trim()
+        return trimmed.isNotEmpty() &&
+            !trimmed.equals("null", ignoreCase = true) &&
+            !trimmed.equals("undefined", ignoreCase = true) &&
+            !trimmed.equals("none", ignoreCase = true)
+    }
+
     private fun parseTargets(json: String?): List<StreamPublisher.StreamTarget> {
         if (json.isNullOrBlank()) return emptyList()
         val result = mutableListOf<StreamPublisher.StreamTarget>()
         try {
             val array = JSONArray(json)
             for (i in 0 until array.length()) {
-                val obj = array.getJSONObject(i)
-                val platform = obj.optString("platform", "Live")
-                val url = obj.optString("url", "").trim()
-                val key = obj.optString("key", "").trim()
-                if (url.isNotBlank() && key.isNotBlank()) {
+                val obj = array.optJSONObject(i) ?: continue
+                val platform = if (!obj.has("platform") || obj.isNull("platform")) "Live" else obj.optString("platform", "Live")
+                val url = if (!obj.has("url") || obj.isNull("url")) "" else obj.optString("url", "").trim()
+                val key = if (!obj.has("key") || obj.isNull("key")) "" else obj.optString("key", "").trim()
+                if (url.isNotBlank() && !url.equals("null", ignoreCase = true) && isValidStreamKey(key)) {
                     result.add(StreamPublisher.StreamTarget(platform, url, key))
                 }
             }

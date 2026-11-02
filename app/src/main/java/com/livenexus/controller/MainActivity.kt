@@ -323,7 +323,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     if (!isFinishing && !isDestroyed) {
                         if (connected) {
-                            val hasKey = !capturePrefs.getString("key_$platform", "").isNullOrBlank()
+                            val hasKey = isValidStreamKey(capturePrefs.getString("key_$platform", ""))
                             if (!hasKey) {
                                 AlertDialog.Builder(this@MainActivity)
                                     .setTitle("Conta Conectada (${platform.uppercase()})")
@@ -796,9 +796,11 @@ class MainActivity : Activity() {
         layout.addView(text("Chave de Transmissão (YouTube Studio):", 12f, Color.rgb(200, 210, 240)).apply {
             setPadding(0, 0, 0, dp(4))
         })
+        val savedKey = capturePrefs.getString("key_youtube", "")?.trim() ?: ""
+        val initialKey = if (isValidStreamKey(savedKey)) savedKey else ""
         val keyInput = EditText(this).apply {
             hint = "Cole sua chave de transmissão aqui"
-            setText(capturePrefs.getString("key_youtube", ""))
+            setText(initialKey)
             setSingleLine(true)
             setTextColor(Color.WHITE)
             setHintTextColor(Color.GRAY)
@@ -813,8 +815,8 @@ class MainActivity : Activity() {
             .setPositiveButton("Salvar e Autenticar") { _, _ ->
                 val channel = channelInput.text.toString().trim()
                 val key = keyInput.text.toString().trim()
-                if (key.isBlank()) {
-                    Toast.makeText(this, "A Chave de Transmissão é obrigatória.", Toast.LENGTH_SHORT).show()
+                if (!isValidStreamKey(key)) {
+                    Toast.makeText(this, "A Chave de Transmissão é obrigatória e não pode ser nula.", Toast.LENGTH_SHORT).show()
                     return@setPositiveButton
                 }
                 capturePrefs.edit()
@@ -1171,12 +1173,22 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun isValidStreamKey(key: String?): Boolean {
+        if (key.isNullOrBlank()) return false
+        val trimmed = key.trim()
+        return trimmed.isNotEmpty() &&
+            !trimmed.equals("null", ignoreCase = true) &&
+            !trimmed.equals("undefined", ignoreCase = true) &&
+            !trimmed.equals("none", ignoreCase = true)
+    }
+
     private fun openStreamKeyDialog(platform: String, platformName: String) {
-        val currentKey = capturePrefs.getString("key_$platform", "") ?: ""
+        val currentKey = capturePrefs.getString("key_$platform", "")?.trim() ?: ""
+        val initialKey = if (isValidStreamKey(currentKey)) currentKey else ""
         val input = EditText(this).apply {
             hint = if (platform == "youtube") "Ex: xxxx-xxxx-xxxx-xxxx-xxxx" else "Ex: live_123456789_xxxxxx"
             setSingleLine(true)
-            setText(currentKey)
+            setText(initialKey)
             selectAll()
             setTextColor(Color.WHITE)
             setHintTextColor(Color.GRAY)
@@ -1195,8 +1207,8 @@ class MainActivity : Activity() {
             .setView(input)
             .setPositiveButton("Salvar") { _, _ ->
                 val keyVal = input.text.toString().trim()
-                if (keyVal.isBlank()) {
-                    Toast.makeText(this, "A Chave de Transmissão é obrigatória.", Toast.LENGTH_SHORT).show()
+                if (!isValidStreamKey(keyVal)) {
+                    Toast.makeText(this, "A Chave de Transmissão é obrigatória e não pode ser nula.", Toast.LENGTH_SHORT).show()
                     return@setPositiveButton
                 }
                 val existingUser = capturePrefs.getString("${platform}_username", "") ?: ""
@@ -1219,7 +1231,7 @@ class MainActivity : Activity() {
         val array = JSONArray()
         if (capturePrefs.getBoolean("stream_youtube", false)) {
             val key = capturePrefs.getString("key_youtube", "")?.trim() ?: ""
-            if (key.isNotEmpty()) {
+            if (isValidStreamKey(key)) {
                 array.put(JSONObject().apply {
                     put("platform", "YouTube")
                     put("url", StreamingConfig.RTMP_YOUTUBE)
@@ -1229,7 +1241,7 @@ class MainActivity : Activity() {
         }
         if (capturePrefs.getBoolean("stream_twitch", false)) {
             val key = capturePrefs.getString("key_twitch", "")?.trim() ?: ""
-            if (key.isNotEmpty()) {
+            if (isValidStreamKey(key)) {
                 array.put(JSONObject().apply {
                     put("platform", "Twitch")
                     put("url", StreamingConfig.RTMP_TWITCH)
@@ -1239,7 +1251,7 @@ class MainActivity : Activity() {
         }
         if (capturePrefs.getBoolean("stream_kick", false)) {
             val key = capturePrefs.getString("key_kick", "")?.trim() ?: ""
-            if (key.isNotEmpty()) {
+            if (isValidStreamKey(key)) {
                 array.put(JSONObject().apply {
                     put("platform", "Kick")
                     put("url", StreamingConfig.RTMP_KICK)
@@ -1355,7 +1367,7 @@ class MainActivity : Activity() {
 
         // Verifica se todas as plataformas marcadas possuem Stream Key real cadastrada
         val missingKey = selectedPlatforms.firstOrNull {
-            capturePrefs.getString("key_${it.third}", "")?.trim().isNullOrBlank()
+            !isValidStreamKey(capturePrefs.getString("key_${it.third}", ""))
         }
         if (missingKey != null) {
             AlertDialog.Builder(this)
@@ -2904,10 +2916,11 @@ class MainActivity : Activity() {
 
         fun makePlatformTile(slug: String, name: String, iconSymbol: String): View {
             val prefKey = "stream_$slug"
-            val username = capturePrefs.getString("${slug}_username", "") ?: ""
-            val hasCustomKey = !capturePrefs.getString("key_$slug", "").isNullOrBlank()
-            val isConn = (platformConnected[slug] == true && (username.isNotBlank() || hasCustomKey)) ||
-                username.isNotBlank() || hasCustomKey
+            val username = capturePrefs.getString("${slug}_username", "")?.trim() ?: ""
+            val cleanUsername = if (username.equals("null", ignoreCase = true) || username.equals("undefined", ignoreCase = true)) "" else username
+            val hasCustomKey = isValidStreamKey(capturePrefs.getString("key_$slug", ""))
+            val isConn = (platformConnected[slug] == true && (cleanUsername.isNotBlank() || hasCustomKey)) ||
+                cleanUsername.isNotBlank() || hasCustomKey
             val selected = capturePrefs.getBoolean(prefKey, false) && isConn
 
             val tile = FrameLayout(this).apply {
@@ -2979,7 +2992,7 @@ class MainActivity : Activity() {
             })
 
             val statusLabel = if (isConn) {
-                if (username.isNotBlank()) "● @$username" else "● Autenticado"
+                if (cleanUsername.isNotBlank()) "● @$cleanUsername" else "● Autenticado"
             } else {
                 "○ Fazer Login"
             }

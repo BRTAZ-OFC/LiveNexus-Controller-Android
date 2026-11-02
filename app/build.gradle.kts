@@ -12,15 +12,27 @@ android {
     }
     signingConfigs {
         create("release") {
-            storeFile = file(System.getenv("LIVENEXUS_KEYSTORE_PATH") ?: "livenexus-release.jks")
-            storePassword = System.getenv("LIVENEXUS_KEYSTORE_PASSWORD")
-            keyAlias = System.getenv("LIVENEXUS_KEY_ALIAS")
-            keyPassword = System.getenv("LIVENEXUS_KEY_PASSWORD")
+            val envKeystore = System.getenv("LIVENEXUS_KEYSTORE_PATH")
+            val releaseKeystore = if (!envKeystore.isNullOrBlank()) file(envKeystore) else file("livenexus-release.jks")
+            val fallbackKeystore = file("${rootDir}/debug.keystore")
+            storeFile = if (releaseKeystore.exists()) releaseKeystore else fallbackKeystore
+            storePassword = System.getenv("LIVENEXUS_KEYSTORE_PASSWORD") ?: "android"
+            keyAlias = System.getenv("LIVENEXUS_KEY_ALIAS") ?: "androiddebugkey"
+            keyPassword = System.getenv("LIVENEXUS_KEY_PASSWORD") ?: "android"
+        }
+        create("debugConfig") {
+            storeFile = file("${rootDir}/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
         }
     }
     buildTypes {
         getByName("release") {
             signingConfig = signingConfigs.getByName("release")
+        }
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("debugConfig")
         }
     }
     compileOptions {

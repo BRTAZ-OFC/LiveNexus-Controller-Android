@@ -48,8 +48,11 @@ object LiveNexusApi {
                 throw IllegalStateException("A resposta não é JSON (HTTP $status). Verifique o endereço da API.")
             }
             if (status !in 200..299 || !response.optBoolean("ok", false)) {
-                throw IllegalStateException(response.optString("message",
-                    response.optString("error", "Falha na API (HTTP $status).")))
+                val errorMsg = response.optCleanString("message")
+                    .ifBlank { response.optCleanString("error") }
+                    .ifBlank { response.optCleanString("description") }
+                    .ifBlank { "Falha na resposta da API LiveNexus (HTTP $status)." }
+                throw IllegalStateException(errorMsg)
             }
             return response
         } finally {
@@ -57,15 +60,32 @@ object LiveNexusApi {
         }
     }
 
+    /**
+     * Retorna uma String limpa de um JSONObject tratando JSONObject.NULL e textos "null".
+     */
+    fun JSONObject.optCleanString(key: String, fallback: String = ""): String {
+        if (!has(key) || isNull(key)) return fallback
+        val v = opt(key)?.toString()?.trim() ?: ""
+        return if (v.isEmpty() || v.equals("null", ignoreCase = true) || v.equals("undefined", ignoreCase = true)) {
+            fallback
+        } else {
+            v
+        }
+    }
+
     fun streamingConnected(platform: String): Boolean {
         require(platform in setOf("twitch", "youtube", "kick")) { "Plataforma não permitida." }
-        return request("/api/auth/$platform/status").getBoolean("connected")
+        val res = request("/api/auth/$platform/status")
+        return res.optBoolean("connected", false)
     }
 
     fun streamingAuthorizationUrl(platform: String): String {
         require(platform in setOf("twitch", "youtube", "kick")) { "Plataforma não permitida." }
         val response = request("/api/auth/$platform/url")
-        val url = response.optString("url")
+        val url = response.optCleanString("url")
+        require(url.isNotBlank() && (url.startsWith("https://") || url.startsWith("http://"))) {
+            "O servidor não retornou URL de autorização válida para $platform."
+        }
         val parsed = URL(url)
         val allowed = when (platform) {
             "twitch" -> "id.twitch.tv"
@@ -90,15 +110,18 @@ object LiveNexusApi {
         token = null
         val result = request("/api/auth/login", "POST",
             JSONObject().put("user", user).put("password", password))
-        val newToken = result.optString("token", "")
+        val newToken = result.optCleanString("token")
         require(newToken.isNotBlank()) { "O servidor não retornou token de sessão." }
         token = newToken
         return request("/api/auth/me").getJSONObject("user")
     }
 
     fun acceptWebToken(candidate: String): JSONObject {
-        require(candidate.isNotBlank()) { "Token de login vazio." }
-        token = candidate
+        val clean = candidate.trim()
+        require(clean.isNotBlank() && !clean.equals("null", ignoreCase = true) && !clean.equals("undefined", ignoreCase = true)) {
+            "Token de login inválido ou vazio."
+        }
+        token = clean
         return try { checkSession() } catch (error: Exception) { token = null; throw error }
     }
 

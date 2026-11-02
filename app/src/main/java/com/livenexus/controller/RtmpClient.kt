@@ -112,6 +112,9 @@ class RtmpClient(
     @Volatile
     private var cachedPps: ByteArray? = null
 
+    @Volatile
+    private var cachedAsc: ByteArray? = null
+
     private var videoFramesSentCount: Long = 0L
     private var audioFramesSentCount: Long = 0L
 
@@ -124,7 +127,7 @@ class RtmpClient(
     fun connect() {
         val cleanKey = sanitizeStreamKey(streamKey)
         if (cleanKey.isBlank()) {
-            throw IllegalArgumentException("Chave de transmissão (Stream Key) vazia.")
+            throw IllegalArgumentException("Chave de transmissão (Stream Key) não configurada ou inválida.")
         }
 
         val candidateUrls = buildCandidateUrls(rtmpUrl, streamKey)
@@ -153,7 +156,15 @@ class RtmpClient(
     }
 
     private fun sanitizeStreamKey(rawKey: String): String {
-        var key = rawKey.trim()
+        val trimmed = rawKey.trim()
+        if (trimmed.isEmpty() ||
+            trimmed.equals("null", ignoreCase = true) ||
+            trimmed.equals("undefined", ignoreCase = true) ||
+            trimmed.equals("none", ignoreCase = true)
+        ) {
+            return ""
+        }
+        var key = trimmed
         if (key.startsWith("rtmp://", ignoreCase = true) || key.startsWith("rtmps://", ignoreCase = true)) {
             val withoutScheme = key.substringAfter("://")
             val pathPart = withoutScheme.substringAfter('/', "").trim('/')
@@ -172,7 +183,11 @@ class RtmpClient(
         } else if (key.startsWith("app/")) {
             key = key.removePrefix("app/").trim()
         }
-        return key.trim('/')
+        key = key.trim('/')
+        if (key.equals("null", ignoreCase = true) || key.equals("undefined", ignoreCase = true)) {
+            return ""
+        }
+        return key
     }
 
     private fun buildCandidateUrls(baseUrl: String, rawKey: String): List<String> {
@@ -504,19 +519,35 @@ class RtmpClient(
         sendPacket(out, CSID_DATA, 0, TYPE_DATA_AMF0, streamId, baos.toByteArray())
     }
 
+    private data class Amf0Command(
+        val commandName: String,
+        val transactionId: Double,
+        val commandObject: Any?,
+        val infoObject: Map<String, Any?>?,
+        val extraArgs: List<Any?> = emptyList()
+    )
+
     private fun readUntilConnectResult(input: InputStream, output: OutputStream): Boolean {
         val startTime = System.currentTimeMillis()
         while (System.currentTimeMillis() - startTime < 10000) {
             val packet = readNextMessage(input, output)
             if (packet.type == TYPE_COMMAND_AMF0) {
+                val cmd = parseAmf0Command(packet.payload)
+                if (cmd != null) {
+                    if (cmd.commandName == "_result" && (cmd.transactionId == 0.0 || cmd.transactionId == 1.0)) {
+                        return true
+                    }
+                    if (cmd.commandName == "_error") {
+                        val desc = (cmd.infoObject?.get("description") as? String)
+                            ?: "Servidor rejeitou conexão RTMP"
+                        throw IllegalStateException("Servidor rejeitou conexão RTMP: $desc")
+                    }
+                }
                 val str = String(packet.payload, Charsets.ISO_8859_1)
-                val items = parseAmf0TopLevel(packet.payload)
-                val cmd = items.getOrNull(0) as? String
-                val transId = (items.getOrNull(1) as? Double)?.toInt()
-                if (str.contains("NetConnection.Connect.Success") || (cmd == "_result" && (transId == null || transId == 1))) {
+                if (str.contains("NetConnection.Connect.Success")) {
                     return true
                 }
-                if (cmd == "_error" || str.contains("NetConnection.Connect.Rejected") || str.contains("NetConnection.Connect.Failed")) {
+                if (str.contains("NetConnection.Connect.Rejected") || str.contains("NetConnection.Connect.Failed")) {
                     throw IllegalStateException("Servidor rejeitou conexão RTMP.")
                 }
             }
@@ -530,24 +561,25 @@ class RtmpClient(
         while (System.currentTimeMillis() - startTime < 10000) {
             val packet = readNextMessage(input, output)
             if (packet.type == TYPE_COMMAND_AMF0) {
-                val items = parseAmf0TopLevel(packet.payload)
-                val cmd = items.getOrNull(0) as? String
-                val transId = (items.getOrNull(1) as? Double)?.toInt()
-
-                if (cmd == "_result") {
-                    // Ignora respostas _result de releaseStream (transId=2) ou FCPublish (transId=3)
-                    if (transId != null && transId != targetTrans) {
+                val cmd = parseAmf0Command(packet.payload)
+                if (cmd != null) {
+                    if (cmd.commandName == "_result") {
+                        if (cmd.transactionId.toInt() != targetTrans) {
+                            continue
+                        }
+                        val streamNum = (cmd.infoObject?.get("streamId") as? Double)?.toInt()
+                            ?: (cmd.extraArgs.firstOrNull { it is Double } as? Double)?.toInt()
+                            ?: (cmd.commandObject as? Double)?.toInt()
+                        return streamNum ?: 1
+                    }
+                    if (cmd.commandName == "_error" && cmd.transactionId.toInt() == targetTrans) {
+                        val desc = (cmd.infoObject?.get("description") as? String) ?: "Erro desconhecido"
+                        throw IllegalStateException("Erro ao criar stream no servidor RTMP: $desc")
+                    }
+                    // Se for onFCPublish recebido antecipadamente, ignora e continua aguardando o _result do createStream
+                    if (cmd.commandName == "onFCPublish") {
                         continue
                     }
-                    val streamNum = (items.getOrNull(3) as? Double)?.toInt()
-                        ?: (items.lastOrNull { it is Double && it != expectedTransId } as? Double)?.toInt()
-                    if (streamNum != null && streamNum > 0) {
-                        return streamNum
-                    }
-                    return 1
-                }
-                if (cmd == "_error" && (transId == null || transId == targetTrans)) {
-                    throw IllegalStateException("Erro ao criar stream no servidor RTMP.")
                 }
             }
         }
@@ -555,111 +587,198 @@ class RtmpClient(
     }
 
     /**
-     * Decodifica os valores AMF0 de nível superior de um comando RTMP (nome do comando, transactionId, etc.).
+     * Decodifica valores AMF0 estruturados de pacotes de comando RTMP.
      */
-    private fun parseAmf0TopLevel(payload: ByteArray): List<Any?> {
-        val result = mutableListOf<Any?>()
-        var pos = 0
-
-        fun skipAmfValue(): Any? {
-            if (pos >= payload.size) return null
-            val marker = payload[pos++].toInt() and 0xFF
-            return when (marker) {
-                0x00 -> { // Number (8 bytes IEEE-754)
-                    if (pos + 8 > payload.size) {
-                        pos = payload.size
-                        null
-                    } else {
-                        val d = ByteBuffer.wrap(payload, pos, 8).order(ByteOrder.BIG_ENDIAN).double
-                        pos += 8
-                        d
-                    }
-                }
-                0x01 -> { // Boolean (1 byte)
-                    if (pos >= payload.size) null else (payload[pos++].toInt() != 0)
-                }
-                0x02 -> { // String (2 bytes len + UTF-8)
-                    if (pos + 2 > payload.size) {
-                        pos = payload.size
-                        null
-                    } else {
-                        val len = ((payload[pos].toInt() and 0xFF) shl 8) or (payload[pos + 1].toInt() and 0xFF)
-                        pos += 2
-                        if (pos + len > payload.size) {
-                            pos = payload.size
-                            null
-                        } else {
-                            val s = String(payload, pos, len, Charsets.UTF_8)
-                            pos += len
-                            s
-                        }
-                    }
-                }
-                0x03 -> { // Object
-                    while (pos + 3 <= payload.size) {
-                        val kLen = ((payload[pos].toInt() and 0xFF) shl 8) or (payload[pos + 1].toInt() and 0xFF)
-                        if (kLen == 0 && (payload[pos + 2].toInt() and 0xFF) == 0x09) {
-                            pos += 3
-                            break
-                        }
-                        pos += 2 + kLen
-                        skipAmfValue()
-                    }
-                    "object"
-                }
-                0x05, 0x06 -> null // Null / Undefined
-                0x08 -> { // ECMA Array
-                    if (pos + 4 <= payload.size) {
-                        pos += 4
-                        while (pos + 3 <= payload.size) {
-                            val kLen = ((payload[pos].toInt() and 0xFF) shl 8) or (payload[pos + 1].toInt() and 0xFF)
-                            if (kLen == 0 && (payload[pos + 2].toInt() and 0xFF) == 0x09) {
-                                pos += 3
-                                break
-                            }
-                            pos += 2 + kLen
-                            skipAmfValue()
-                        }
-                    } else {
-                        pos = payload.size
-                    }
-                    "ecma_array"
-                }
-                else -> {
-                    pos = payload.size
-                    null
+    private fun parseAmf0Value(payload: ByteArray, startPos: Int): Pair<Any?, Int> {
+        if (startPos >= payload.size) return Pair(null, startPos)
+        var pos = startPos
+        val marker = payload[pos++].toInt() and 0xFF
+        return when (marker) {
+            0x00 -> { // Number (8 bytes IEEE-754 double)
+                if (pos + 8 > payload.size) {
+                    Pair(null, payload.size)
+                } else {
+                    val d = ByteBuffer.wrap(payload, pos, 8).order(ByteOrder.BIG_ENDIAN).double
+                    pos += 8
+                    Pair(d, pos)
                 }
             }
+            0x01 -> { // Boolean (1 byte)
+                if (pos >= payload.size) {
+                    Pair(false, payload.size)
+                } else {
+                    Pair(payload[pos++].toInt() != 0, pos)
+                }
+            }
+            0x02 -> { // String (2 bytes len + UTF-8)
+                if (pos + 2 > payload.size) {
+                    Pair("", payload.size)
+                } else {
+                    val len = ((payload[pos].toInt() and 0xFF) shl 8) or (payload[pos + 1].toInt() and 0xFF)
+                    pos += 2
+                    if (pos + len > payload.size) {
+                        Pair("", payload.size)
+                    } else {
+                        val s = String(payload, pos, len, Charsets.UTF_8)
+                        pos += len
+                        Pair(s, pos)
+                    }
+                }
+            }
+            0x03 -> { // Object (key-value pairs até 0x00 0x00 0x09)
+                val map = mutableMapOf<String, Any?>()
+                while (pos + 3 <= payload.size) {
+                    val kLen = ((payload[pos].toInt() and 0xFF) shl 8) or (payload[pos + 1].toInt() and 0xFF)
+                    if (kLen == 0 && (payload[pos + 2].toInt() and 0xFF) == 0x09) {
+                        pos += 3
+                        break
+                    }
+                    pos += 2
+                    if (pos + kLen > payload.size) {
+                        pos = payload.size
+                        break
+                    }
+                    val key = String(payload, pos, kLen, Charsets.UTF_8)
+                    pos += kLen
+                    val (v, nextPos) = parseAmf0Value(payload, pos)
+                    map[key] = v
+                    pos = nextPos
+                }
+                Pair(map, pos)
+            }
+            0x05, 0x06 -> Pair(null, pos) // Null / Undefined
+            0x08 -> { // ECMA Array (4 bytes count + key-value pairs até 0x00 0x00 0x09)
+                if (pos + 4 <= payload.size) {
+                    pos += 4
+                }
+                val map = mutableMapOf<String, Any?>()
+                while (pos + 3 <= payload.size) {
+                    val kLen = ((payload[pos].toInt() and 0xFF) shl 8) or (payload[pos + 1].toInt() and 0xFF)
+                    if (kLen == 0 && (payload[pos + 2].toInt() and 0xFF) == 0x09) {
+                        pos += 3
+                        break
+                    }
+                    pos += 2
+                    if (pos + kLen > payload.size) {
+                        pos = payload.size
+                        break
+                    }
+                    val key = String(payload, pos, kLen, Charsets.UTF_8)
+                    pos += kLen
+                    val (v, nextPos) = parseAmf0Value(payload, pos)
+                    map[key] = v
+                    pos = nextPos
+                }
+                Pair(map, pos)
+            }
+            0x0C -> { // Long String (4 bytes length + UTF-8)
+                if (pos + 4 > payload.size) {
+                    Pair("", payload.size)
+                } else {
+                    val len = ByteBuffer.wrap(payload, pos, 4).order(ByteOrder.BIG_ENDIAN).int
+                    pos += 4
+                    if (len <= 0 || pos + len > payload.size) {
+                        Pair("", payload.size)
+                    } else {
+                        val s = String(payload, pos, len, Charsets.UTF_8)
+                        pos += len
+                        Pair(s, pos)
+                    }
+                }
+            }
+            else -> Pair(null, payload.size)
         }
+    }
 
-        while (pos < payload.size && result.size < 6) {
-            result.add(skipAmfValue())
+    private fun parseAmf0TopLevel(payload: ByteArray): List<Any?> {
+        val list = mutableListOf<Any?>()
+        var pos = 0
+        while (pos < payload.size && list.size < 10) {
+            val (v, nextPos) = parseAmf0Value(payload, pos)
+            list.add(v)
+            if (nextPos <= pos) break
+            pos = nextPos
         }
-        return result
+        return list
+    }
+
+    private fun parseAmf0Command(payload: ByteArray): Amf0Command? {
+        val items = parseAmf0TopLevel(payload)
+        if (items.isEmpty()) return null
+        val cmdName = items[0] as? String ?: return null
+        val transId = (items.getOrNull(1) as? Double) ?: 0.0
+        val cmdObj = items.getOrNull(2)
+        @Suppress("UNCHECKED_CAST")
+        val infoObj = items.getOrNull(3) as? Map<String, Any?>
+        val extra = if (items.size > 4) items.subList(4, items.size) else emptyList()
+        return Amf0Command(cmdName, transId, cmdObj, infoObj, extra)
     }
 
     private fun verifyPublishStatus(input: InputStream, output: OutputStream, sock: Socket) {
         val prevTimeout = sock.soTimeout
         try {
-            sock.soTimeout = 3500
+            sock.soTimeout = 4000
             val startTime = System.currentTimeMillis()
-            while (System.currentTimeMillis() - startTime < 6000) {
+            var receivedOnFCPublish = false
+            while (System.currentTimeMillis() - startTime < 8000) {
                 val packet = readNextMessage(input, output)
                 if (packet.type == TYPE_COMMAND_AMF0) {
-                    val str = String(packet.payload, Charsets.ISO_8859_1)
-                    if (str.contains("NetStream.Publish.BadName") ||
-                        str.contains("NetStream.Publish.Rejected") ||
-                        str.contains("NetStream.Publish.Failed") ||
-                        str.contains("NetStream.Publish.Unauthorized") ||
-                        (str.contains("_error") && str.contains("publish", ignoreCase = true))
-                    ) {
-                        throw IllegalStateException("Chave de transmissão (Stream Key) recusada pelo servidor RTMP.")
-                    }
-                    if (str.contains("NetStream.Publish.Start")) {
-                        Log.i(TAG, "NetStream.Publish.Start confirmado pelo servidor!")
-                        return
+                    val cmd = parseAmf0Command(packet.payload)
+                    val rawStr = String(packet.payload, Charsets.ISO_8859_1)
+
+                    if (cmd != null) {
+                        when (cmd.commandName) {
+                            "onFCPublish" -> {
+                                val code = (cmd.infoObject?.get("code") as? String) ?: ""
+                                val desc = (cmd.infoObject?.get("description") as? String) ?: ""
+                                Log.i(TAG, "Recebida confirmação preliminar onFCPublish ($code: $desc), aguardando onStatus do publish...")
+                                receivedOnFCPublish = true
+                                continue
+                            }
+                            "onStatus" -> {
+                                val code = (cmd.infoObject?.get("code") as? String) ?: ""
+                                val level = (cmd.infoObject?.get("level") as? String) ?: ""
+                                val desc = (cmd.infoObject?.get("description") as? String) ?: ""
+                                Log.i(TAG, "Recebida resposta onStatus: level=$level, code=$code, desc=$desc")
+
+                                if (code == "NetStream.Publish.Start") {
+                                    Log.i(TAG, "Publicação confirmada pelo servidor RTMP (onStatus: NetStream.Publish.Start)!")
+                                    return
+                                }
+                                if (code.contains("BadName", ignoreCase = true) ||
+                                    code.contains("Rejected", ignoreCase = true) ||
+                                    code.contains("Failed", ignoreCase = true) ||
+                                    code.contains("Unauthorized", ignoreCase = true) ||
+                                    level.equals("error", ignoreCase = true)
+                                ) {
+                                    throw IllegalStateException("Chave de transmissão recusada pelo servidor RTMP ($code: $desc).")
+                                }
+                            }
+                            "_error" -> {
+                                val desc = (cmd.infoObject?.get("description") as? String)
+                                    ?: ((cmd.commandObject as? Map<*, *>)?.get("description") as? String)
+                                    ?: "Erro desconhecido retornado pelo servidor RTMP."
+                                throw IllegalStateException("Erro do servidor RTMP na publicação: $desc")
+                            }
+                            else -> {
+                                Log.d(TAG, "Ignorando comando preliminar durante verifyPublishStatus: ${cmd.commandName}")
+                            }
+                        }
+                    } else {
+                        // Fallback de contingência
+                        if (rawStr.contains("NetStream.Publish.BadName") ||
+                            rawStr.contains("NetStream.Publish.Rejected") ||
+                            rawStr.contains("NetStream.Publish.Failed") ||
+                            rawStr.contains("NetStream.Publish.Unauthorized")
+                        ) {
+                            throw IllegalStateException("Chave de transmissão (Stream Key) recusada pelo servidor RTMP.")
+                        }
                     }
                 }
+            }
+            if (receivedOnFCPublish) {
+                Log.i(TAG, "onFCPublish recebido com sucesso e timeout no onStatus; iniciando publicação de mídia.")
+                return
             }
         } catch (timeout: SocketTimeoutException) {
             // Alguns servidores RTMP só enviam onStatus após receber os primeiros frames; conexão segue aberta
@@ -684,16 +803,42 @@ class RtmpClient(
                 while (isPublishing) {
                     val packet = readNextMessage(input, output)
                     if (packet.type == TYPE_COMMAND_AMF0) {
-                        val str = String(packet.payload, Charsets.ISO_8859_1)
-                        if (str.contains("NetStream.Publish.BadName") ||
-                            str.contains("NetStream.Publish.Rejected") ||
-                            str.contains("NetStream.Publish.Failed") ||
-                            str.contains("NetStream.Publish.Unauthorized")
-                        ) {
-                            lastError = "Publicação RTMP recusada pelo servidor: $str"
-                            Log.e(TAG, lastError!!)
-                            isPublishing = false
-                            break
+                        val cmd = parseAmf0Command(packet.payload)
+                        if (cmd != null) {
+                            if (cmd.commandName == "onStatus") {
+                                val code = (cmd.infoObject?.get("code") as? String) ?: ""
+                                val level = (cmd.infoObject?.get("level") as? String) ?: ""
+                                val desc = (cmd.infoObject?.get("description") as? String) ?: ""
+                                if (code.contains("BadName", ignoreCase = true) ||
+                                    code.contains("Rejected", ignoreCase = true) ||
+                                    code.contains("Failed", ignoreCase = true) ||
+                                    code.contains("Unauthorized", ignoreCase = true) ||
+                                    level.equals("error", ignoreCase = true)
+                                ) {
+                                    lastError = "Publicação RTMP recusada pelo servidor ($code: $desc)"
+                                    Log.e(TAG, lastError!!)
+                                    isPublishing = false
+                                    break
+                                }
+                            } else if (cmd.commandName == "_error") {
+                                val desc = (cmd.infoObject?.get("description") as? String) ?: "Erro do servidor RTMP"
+                                lastError = "Erro no servidor RTMP: $desc"
+                                Log.e(TAG, lastError!!)
+                                isPublishing = false
+                                break
+                            }
+                        } else {
+                            val str = String(packet.payload, Charsets.ISO_8859_1)
+                            if (str.contains("NetStream.Publish.BadName") ||
+                                str.contains("NetStream.Publish.Rejected") ||
+                                str.contains("NetStream.Publish.Failed") ||
+                                str.contains("NetStream.Publish.Unauthorized")
+                            ) {
+                                lastError = "Publicação RTMP recusada pelo servidor"
+                                Log.e(TAG, lastError!!)
+                                isPublishing = false
+                                break
+                            }
                         }
                     }
                 }
@@ -750,6 +895,7 @@ class RtmpClient(
                     val length = readInt24(input)
                     val type = readByteCounted(input)
                     state.timestampDelta = delta
+                    state.timestamp += delta
                     state.messageLength = length
                     state.messageTypeId = type
                     state.hasExtendedTimestamp = (delta == 0xFFFFFFL)
@@ -758,20 +904,36 @@ class RtmpClient(
                 2 -> {
                     val delta = readInt24(input).toLong()
                     state.timestampDelta = delta
+                    state.timestamp += delta
                     state.hasExtendedTimestamp = (delta == 0xFFFFFFL)
                     state.buffer.reset()
                 }
                 3 -> {
-                    // Continuation chunk (se buffer estiver vazio, inicia nova mensagem com mesmos parâmetros)
+                    // Continuation chunk ou início de nova mensagem
+                    if (state.buffer.size() == 0) {
+                        state.timestamp += state.timestampDelta
+                    }
                 }
             }
 
             if (state.hasExtendedTimestamp) {
                 val extTs = readInt32(input).toLong() and 0xFFFFFFFFL
-                if (fmt == 0) {
-                    state.timestamp = extTs
-                } else {
-                    state.timestampDelta = extTs
+                when (fmt) {
+                    0 -> {
+                        state.timestamp = extTs
+                    }
+                    1, 2 -> {
+                        state.timestamp -= state.timestampDelta
+                        state.timestampDelta = extTs
+                        state.timestamp += extTs
+                    }
+                    3 -> {
+                        if (state.buffer.size() == 0) {
+                            state.timestamp -= state.timestampDelta
+                            state.timestampDelta = extTs
+                            state.timestamp += extTs
+                        }
+                    }
                 }
             }
 
@@ -1115,6 +1277,10 @@ class RtmpClient(
      */
     fun sendAudioHeader(config: ByteArray) {
         if (!isPublishing || config.isEmpty()) return
+        if (hasAudioHeaderSent && cachedAsc != null && cachedAsc.contentEquals(config)) {
+            return
+        }
+        cachedAsc = config.copyOf()
         val out = outStream ?: return
         val baos = ByteArrayOutputStream()
 
@@ -1125,7 +1291,7 @@ class RtmpClient(
         baos.write(config)
 
         val packet = baos.toByteArray()
-        sendPacket(out, CSID_AUDIO, 0, TYPE_AUDIO, streamId, packet)
+        sendPacket(out, CSID_AUDIO, 0L, TYPE_AUDIO, streamId, packet)
         hasAudioHeaderSent = true
         Log.i(TAG, "AAC Sequence Header enviado com sucesso (${config.size} bytes)")
     }
@@ -1199,6 +1365,12 @@ class RtmpClient(
     private fun closeQuietly() {
         isPublishing = false
         isConnected = false
+        hasVideoHeaderSent = false
+        hasAudioHeaderSent = false
+        firstKeyFrameSent = false
+        cachedSps = null
+        cachedPps = null
+        cachedAsc = null
         try { readerThread?.interrupt() } catch (_: Exception) {}
         readerThread = null
         try { outStream?.flush() } catch (_: Exception) {}

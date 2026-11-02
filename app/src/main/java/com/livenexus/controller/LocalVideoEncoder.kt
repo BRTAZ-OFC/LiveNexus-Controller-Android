@@ -60,6 +60,10 @@ class LocalVideoEncoder(
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
                 }
+                // YouTube e RTMP exigem AVC Baseline ou Main sem B-frames (CTS == PTS)
+                try {
+                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                } catch (_: Exception) {}
             }
         }
     }
