@@ -33,7 +33,7 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
     private val main = Handler(Looper.getMainLooper())
     private val dialogs = mutableListOf<AlertDialog>()
     private var player = false
-    private var adding = true
+    private var adding = false
     private var disposed = false
 
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
@@ -159,17 +159,26 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
         val primaryButtons = listOf(
              {
                 createTileView("Música", "♫", "cenario", NeonTheme.cyan, isLandscape || overlay) {
+                    adding = false
                     player = true
                     render()
                 }
             },
             {
                 createTileView("Câmera", "▣", "camera", NeonTheme.purple, isLandscape || overlay) {
+                    if (adding) {
+                        adding = false
+                        render()
+                    }
                     error("Câmera ainda não integrada.")
                 }
             },
             {
                 createTileView("Reload\nRTC", "↻", "cenario", NeonTheme.cyan, isLandscape || overlay) {
+                    if (adding) {
+                        adding = false
+                        render()
+                    }
                     command("rtc-reload")
                 }
             },
@@ -207,8 +216,11 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
         }
 
         // 2. Menu visual "Adicionar Ação" — exibido somente quando o usuário toca em Adicionar
+        val addActionPanel = buildAddActionPanel(isLandscape).apply {
+            visibility = if (adding) View.VISIBLE else View.GONE
+        }
         if (adding) {
-            addView(buildAddActionPanel(isLandscape), LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+            addView(addActionPanel, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
                 topMargin = dp(2)
                 bottomMargin = dp(8)
             })
@@ -236,8 +248,20 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
                     cardStyle = cardStyle,
                     iconAccent = accentColor,
                     compact = isLandscape || overlay,
-                    configure = { configure(index) },
-                    action = { execute(index) }
+                    configure = {
+                        if (adding) {
+                            adding = false
+                            render()
+                        }
+                        configure(index)
+                    },
+                    action = {
+                        if (adding) {
+                            adding = false
+                            render()
+                        }
+                        execute(index)
+                    }
                 )
                 grid.addView(tile, GridLayout.LayoutParams().apply {
                     width = 0
