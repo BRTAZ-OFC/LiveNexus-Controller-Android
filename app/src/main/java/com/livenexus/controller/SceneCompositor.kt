@@ -117,6 +117,11 @@ class SceneCompositor(
             } finally {
                 releaseGL()
                 releaseEGL()
+                try {
+                    if (!compositedBitmap.isRecycled) {
+                        compositedBitmap.recycle()
+                    }
+                } catch (_: Exception) {}
             }
         }, "LiveNexusSceneCompositor").also { it.start() }
     }

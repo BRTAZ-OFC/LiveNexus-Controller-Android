@@ -434,7 +434,7 @@ class MainActivity : Activity() {
                     putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
                     putExtra(ScreenCaptureService.EXTRA_VERTICAL_MODE, isVerticalCaptureMode())
                 }
-                startService(intent)
+                startForegroundService(intent)
                 Toast.makeText(this, "Fonte Captura de tela ativada no Editor de Cena.", Toast.LENGTH_SHORT).show()
                 refreshCaptureCanvas()
             } catch (e: Throwable) {
@@ -1244,7 +1244,7 @@ class MainActivity : Activity() {
                 putExtra(ScreenCaptureService.EXTRA_TARGETS_JSON, targetsJson)
                 putExtra(ScreenCaptureService.EXTRA_VERTICAL_MODE, isVerticalCaptureMode())
             }
-            startService(intent)
+            startForegroundService(intent)
 
             val pollStart = System.currentTimeMillis()
             val pollRunnable = object : Runnable {

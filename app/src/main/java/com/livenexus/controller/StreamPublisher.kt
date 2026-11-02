@@ -192,6 +192,12 @@ class StreamPublisher(
     override fun close() {
         active = false
         sendExecutor.shutdown()
+        try {
+            sendExecutor.awaitTermination(600, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        sendExecutor.shutdownNow()
         for ((_, client) in clients) {
             try {
                 client.close()

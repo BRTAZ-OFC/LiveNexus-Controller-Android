@@ -19,6 +19,7 @@ class LocalAudioEncoder(
     private val sampleRate: Int = 44100,
     private val channelCount: Int = 2,
     private val bitrateBps: Int = 128000,
+    private val volumeProvider: () -> Float = { 1.0f },
     private val onHeader: (ByteArray) -> Unit,
     private val onSample: (ByteArray, MediaCodec.BufferInfo) -> Unit
 ) : AutoCloseable {
@@ -31,6 +32,7 @@ class LocalAudioEncoder(
     private var codec: MediaCodec? = null
     private var worker: Thread? = null
     @Volatile private var running = false
+    @Volatile private var headerDispatched = false
     @Volatile var lastError: String? = null
         private set
 
@@ -41,20 +43,26 @@ class LocalAudioEncoder(
 
         val channelConfig = if (channelCount == 1) AudioFormat.CHANNEL_IN_MONO else AudioFormat.CHANNEL_IN_STEREO
         val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-        val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+        val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat).coerceAtLeast(4096)
         val bufferSize = maxOf(minBufferSize * 2, 4096)
 
-        val record = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            sampleRate,
-            channelConfig,
-            audioFormat,
-            bufferSize
-        )
-
-        if (record.state != AudioRecord.STATE_INITIALIZED) {
-            record.release()
-            throw IllegalStateException("Falha ao inicializar AudioRecord do microfone.")
+        var record: AudioRecord? = null
+        try {
+            val candidate = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                channelConfig,
+                audioFormat,
+                bufferSize
+            )
+            if (candidate.state == AudioRecord.STATE_INITIALIZED) {
+                record = candidate
+            } else {
+                candidate.release()
+                Log.w(TAG, "AudioRecord não inicializou; usando gerador PCM silencioso de fallback.")
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Permissão/hardware de microfone indisponível; usando áudio silencioso AAC.", e)
         }
         audioRecord = record
 
@@ -70,24 +78,33 @@ class LocalAudioEncoder(
             createdCodec.start()
             codec = createdCodec
         } catch (e: Exception) {
-            record.release()
+            try { record?.release() } catch (_: Exception) {}
             audioRecord = null
-            createdCodec.release()
+            try { createdCodec.release() } catch (_: Exception) {}
             throw e
         }
 
-        // Gera o AudioSpecificConfig padrão para AAC-LC (44100Hz stereo: 0x12, 0x10)
+        // Gera e envia imediatamente o AudioSpecificConfig padrão para AAC-LC (44100Hz stereo: 0x12, 0x10)
         val asc = createAudioSpecificConfig(sampleRate, channelCount)
+        headerDispatched = true
         onHeader(asc)
 
         running = true
-        record.startRecording()
+        try {
+            record?.startRecording()
+        } catch (e: Throwable) {
+            Log.w(TAG, "Falha em startRecording; mantendo trilha AAC silenciosa.", e)
+            try { record?.release() } catch (_: Exception) {}
+            audioRecord = null
+            record = null
+        }
 
+        val activeRecord = record
         worker = Thread({
-            encodeLoop(record, createdCodec, bufferSize)
+            encodeLoop(activeRecord, createdCodec, bufferSize)
         }, "LiveNexusAudioEncoder").apply { start() }
 
-        Log.i(TAG, "AudioRecord e MediaCodec AAC iniciados com sucesso ($sampleRate Hz, $channelCount canais)")
+        Log.i(TAG, "MediaCodec AAC iniciado ($sampleRate Hz, $channelCount canais, mic=${activeRecord != null})")
     }
 
     private fun createAudioSpecificConfig(sampleRate: Int, channels: Int): ByteArray {
@@ -115,30 +132,80 @@ class LocalAudioEncoder(
         return byteArrayOf(byte1.toByte(), byte2.toByte())
     }
 
-    private fun encodeLoop(record: AudioRecord, mediaCodec: MediaCodec, bufferSize: Int) {
-        val pcmBuffer = ByteArray(bufferSize)
+    private fun applyVolumeInPlace(pcmBuffer: ByteArray, length: Int, gain: Float) {
+        if (gain <= 0.001f) {
+            java.util.Arrays.fill(pcmBuffer, 0, length, 0.toByte())
+            return
+        }
+        if (gain in 0.99f..1.01f) return
+        var i = 0
+        while (i + 1 < length) {
+            val lo = pcmBuffer[i].toInt() and 0xFF
+            val hi = pcmBuffer[i + 1].toInt()
+            val sample = (hi shl 8) or lo
+            val scaled = (sample * gain).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            pcmBuffer[i] = (scaled and 0xFF).toByte()
+            pcmBuffer[i + 1] = ((scaled shr 8) and 0xFF).toByte()
+            i += 2
+        }
+    }
+
+    private fun encodeLoop(record: AudioRecord?, mediaCodec: MediaCodec, bufferSize: Int) {
+        val frameChunkBytes = 4096.coerceAtMost(bufferSize)
+        val pcmBuffer = ByteArray(frameChunkBytes)
         val info = MediaCodec.BufferInfo()
+        val bytesPerFrame = (channelCount * 2).coerceAtLeast(2)
+        var totalFramesSubmitted = 0L
 
         try {
             while (running) {
-                val readBytes = record.read(pcmBuffer, 0, pcmBuffer.size)
-                if (readBytes > 0) {
+                val readBytes = if (record != null) {
+                    val r = record.read(pcmBuffer, 0, pcmBuffer.size)
+                    if (r > 0) {
+                        val gain = try { volumeProvider().coerceIn(0f, 1f) } catch (_: Exception) { 1f }
+                        applyVolumeInPlace(pcmBuffer, r, gain)
+                        r
+                    } else {
+                        java.util.Arrays.fill(pcmBuffer, 0.toByte())
+                        try { Thread.sleep(20L) } catch (_: InterruptedException) { break }
+                        pcmBuffer.size
+                    }
+                } else {
+                    java.util.Arrays.fill(pcmBuffer, 0.toByte())
+                    val sleepMs = ((pcmBuffer.size / bytesPerFrame) * 1000L / sampleRate).coerceAtLeast(15L)
+                    try { Thread.sleep(sleepMs) } catch (_: InterruptedException) { break }
+                    pcmBuffer.size
+                }
+
+                if (readBytes > 0 && running) {
                     val inputIndex = mediaCodec.dequeueInputBuffer(10000L)
                     if (inputIndex >= 0) {
                         val inputBuffer: ByteBuffer? = mediaCodec.getInputBuffer(inputIndex)
                         if (inputBuffer != null) {
+                            val toWrite = minOf(readBytes, inputBuffer.remaining())
                             inputBuffer.clear()
-                            inputBuffer.put(pcmBuffer, 0, readBytes)
-                            val ptsUs = System.nanoTime() / 1000L
-                            mediaCodec.queueInputBuffer(inputIndex, 0, readBytes, ptsUs, 0)
+                            inputBuffer.put(pcmBuffer, 0, toWrite)
+                            val ptsUs = (totalFramesSubmitted * 1_000_000L) / sampleRate
+                            totalFramesSubmitted += (toWrite / bytesPerFrame)
+                            mediaCodec.queueInputBuffer(inputIndex, 0, toWrite, ptsUs, 0)
                         }
                     }
                 }
 
                 var outputIndex = mediaCodec.dequeueOutputBuffer(info, 0L)
-                while (outputIndex >= 0) {
+                while (outputIndex >= 0 && running) {
                     if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
-                        // Configuração do codec já enviada
+                        if (!headerDispatched && info.size > 0) {
+                            val outBuf = mediaCodec.getOutputBuffer(outputIndex)
+                            if (outBuf != null) {
+                                outBuf.position(info.offset)
+                                outBuf.limit(info.offset + info.size)
+                                val cfg = ByteArray(info.size)
+                                outBuf.get(cfg)
+                                headerDispatched = true
+                                onHeader(cfg)
+                            }
+                        }
                         mediaCodec.releaseOutputBuffer(outputIndex, false)
                         outputIndex = mediaCodec.dequeueOutputBuffer(info, 0L)
                         continue
@@ -162,8 +229,10 @@ class LocalAudioEncoder(
                 }
             }
         } catch (e: Exception) {
-            lastError = e.message ?: "Falha na captura/codificação de áudio"
-            Log.w(TAG, "Erro no loop de áudio", e)
+            if (running) {
+                lastError = e.message ?: "Falha na captura/codificação de áudio"
+                Log.w(TAG, "Erro no loop de áudio", e)
+            }
         }
     }
 
@@ -173,6 +242,7 @@ class LocalAudioEncoder(
         val t = worker
         worker = null
         if (t != null && t !== Thread.currentThread()) {
+            t.interrupt()
             try { t.join(1000L) } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
             }

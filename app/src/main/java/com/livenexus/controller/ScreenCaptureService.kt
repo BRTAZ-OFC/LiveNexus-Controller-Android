@@ -199,7 +199,9 @@ class ScreenCaptureService : Service() {
                 .addAction(android.R.drawable.ic_media_pause, "Parar", buildStopPendingIntent())
                 .build()
 
-            val fgType = if (isLiveStreaming || isConnecting) {
+            val hasMicPerm = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            val fgType = if ((isLiveStreaming || isConnecting) && hasMicPerm) {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             } else {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
@@ -346,12 +348,20 @@ class ScreenCaptureService : Service() {
                 .addAction(android.R.drawable.ic_media_pause, "Parar", buildStopPendingIntent())
                 .build()
 
-            val fgType = if (isCapturing) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            } else {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            val hasMicPerm = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            val fgType = when {
+                isCapturing && hasMicPerm ->
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                isCapturing -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                hasMicPerm -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                else -> 0
             }
-            startForeground(NOTIFICATION_ID, notif, fgType)
+            if (fgType != 0) {
+                startForeground(NOTIFICATION_ID, notif, fgType)
+            } else {
+                startForeground(NOTIFICATION_ID, notif)
+            }
         } catch (e: Throwable) {
             Log.w(TAG, "Aviso ao atualizar foreground service", e)
         }
@@ -442,10 +452,15 @@ class ScreenCaptureService : Service() {
 
                 // Encoder de Áudio AAC (Microfone)
                 try {
+                    val audioPrefs = getSharedPreferences("livenexus_capture_settings", Context.MODE_PRIVATE)
                     val aEncoder = LocalAudioEncoder(
                         sampleRate = 44100,
                         channelCount = 2,
                         bitrateBps = 128000,
+                        volumeProvider = {
+                            val micOn = audioPrefs.getBoolean("mic_enabled", true)
+                            if (!micOn) 0f else (audioPrefs.getInt("mic_volume", 75).coerceIn(0, 100) / 100f)
+                        },
                         onHeader = { asc -> streamPub.onAudioHeader(asc) },
                         onSample = { bytes, info -> streamPub.onAudioSample(bytes, info) }
                     )
