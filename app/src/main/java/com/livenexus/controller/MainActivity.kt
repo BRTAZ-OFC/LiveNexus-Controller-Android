@@ -55,7 +55,6 @@ class MainActivity : Activity() {
 
     private var lastMediaProjectionResultCode: Int = 0
     private var lastMediaProjectionData: Intent? = null
-    private var pendingStreamingPlatform: String? = null
     private var transmissionStartTime = 0L
     @Volatile private var isRequestingMediaProjection = false
     @Volatile private var startStreamAfterCaptureAuth = false
@@ -297,94 +296,8 @@ class MainActivity : Activity() {
         resumed = true
         if (authenticated) prepareOverlay()
         resumeCaptureRefresh()
-        val pending = pendingStreamingPlatform
-        if (pending != null) {
-            val platform = pending
-            pendingStreamingPlatform = null
-            Thread {
-                var connected = false
-                try {
-                    connected = LiveNexusApi.streamingConnected(platform)
-                } catch (_: Exception) {}
-                platformConnected[platform] = connected
-                if (connected) {
-                    val existingName = capturePrefs.getString("${platform}_username", "") ?: ""
-                    val editor = capturePrefs.edit().putBoolean("stream_$platform", true)
-                    if (existingName.isBlank()) {
-                        val defaultLabel = when (platform) {
-                            "youtube" -> "Canal YouTube"
-                            "twitch" -> "Twitch Streamer"
-                            else -> "Kick Streamer"
-                        }
-                        editor.putString("${platform}_username", defaultLabel)
-                    }
-                    editor.apply()
-                }
-                runOnUiThread {
-                    if (!isFinishing && !isDestroyed) {
-                        if (connected) {
-                            val hasKey = isValidStreamKey(capturePrefs.getString("key_$platform", ""))
-                            if (!hasKey) {
-                                AlertDialog.Builder(this@MainActivity)
-                                    .setTitle("Conta Conectada (${platform.uppercase()})")
-                                    .setMessage("Login OAuth concluído! Para transmitir ao vivo via RTMP, insira a sua Chave de Transmissão (Stream Key):")
-                                    .setPositiveButton("Inserir Chave RTMP") { _, _ ->
-                                        if (platform == "youtube") openYouTubeStudioDialog()
-                                        else openStreamKeyDialog(platform, platform.replaceFirstChar { it.uppercase() })
-                                    }
-                                    .setNegativeButton("Mais tarde") { _, _ -> render() }
-                                    .show()
-                            } else {
-                                AlertDialog.Builder(this@MainActivity)
-                                    .setTitle("Conta Conectada")
-                                    .setMessage("A conta do ${platform.uppercase()} foi conectada e autorizada com sucesso!")
-                                    .setPositiveButton("OK") { _, _ -> render() }
-                                    .show()
-                            }
-                            render()
-                        } else {
-                            val pName = when (platform) {
-                                "youtube" -> "YouTube"
-                                "twitch" -> "Twitch"
-                                else -> "Kick"
-                            }
-                            val input = EditText(this@MainActivity).apply {
-                                hint = "Ex: @MeuCanal"
-                                setSingleLine(true)
-                                setTextColor(Color.WHITE)
-                                setHintTextColor(Color.GRAY)
-                                background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
-                                setPadding(dp(12), dp(10), dp(12), dp(10))
-                            }
-                            AlertDialog.Builder(this@MainActivity)
-                                .setTitle("Concluir Login - $pName")
-                                .setMessage("Ao retornar do login no navegador, confirme o seu canal ou usuário para vincular à transmissão:")
-                                .setView(input)
-                                .setPositiveButton("Confirmar Canal") { _, _ ->
-                                    val channelVal = input.text.toString().trim()
-                                    if (channelVal.isNotBlank()) {
-                                        capturePrefs.edit()
-                                            .putString("${platform}_username", channelVal.removePrefix("@"))
-                                            .putBoolean("stream_$platform", true)
-                                            .apply()
-                                        platformConnected[platform] = true
-                                        Toast.makeText(this@MainActivity, "$pName vinculado com sucesso!", Toast.LENGTH_SHORT).show()
-                                        render()
-                                        if (capturePrefs.getString("key_$platform", "").isNullOrBlank()) {
-                                            if (platform == "youtube") openYouTubeStudioDialog()
-                                            else openStreamKeyDialog(platform, pName)
-                                        }
-                                    }
-                                }
-                                .setNegativeButton("Cancelar", null)
-                                .show()
-                        }
-                    }
-                }
-            }.start()
-        } else {
-            checkStreamingPlatformsStatus()
-        }
+        // O estado das plataformas RTMP é local: sem chamadas às APIs/OAuth.
+        refreshStreamingKeyStatus()
     }
 
     override fun onPause() {
@@ -504,257 +417,25 @@ class MainActivity : Activity() {
         return if (h > 0) String.format("%02d:%02d:%02d", h, m, s) else String.format("%02d:%02d", m, s)
     }
 
-    private fun checkStreamingPlatformsStatus(onComplete: (() -> Unit)? = null) {
-        Thread {
-            val platforms = listOf("youtube", "twitch", "kick")
-            platforms.forEach { p ->
-                try {
-                    val status = LiveNexusApi.streamingConnected(p)
-                    platformConnected[p] = status
-                } catch (_: Exception) {}
-            }
-            runOnUiThread {
-                onComplete?.invoke()
-                if (page == 2) render()
-            }
-        }.start()
+    private fun refreshStreamingKeyStatus(onComplete: (() -> Unit)? = null) {
+        listOf("youtube", "twitch", "kick").forEach { platform ->
+            platformConnected[platform] = isValidStreamKey(capturePrefs.getString("key_$platform", ""))
+        }
+        onComplete?.invoke()
+        if (page == 2) render()
     }
 
     private fun openPlatformAuthDialog(platform: String) {
         when (platform) {
-            "youtube" -> openYouTubeAuthDialog()
-            "twitch" -> openTwitchAuthDialog()
-            "kick" -> openKickAuthDialog()
+            "youtube" -> openYouTubeStudioDialog()
+            "twitch" -> openStreamKeyDialog("twitch", "Twitch")
+            "kick" -> openKickRtmpDialog()
         }
     }
 
     // ==========================================
-    // 1. AUTENTICAÇÃO REAL TWITCH (OAUTH 2.0 & HELIX API)
-    // ==========================================
-    private fun openTwitchAuthDialog() {
-        val options = arrayOf(
-            "🔑 Login Oficial Twitch (OAuth 2.0)",
-            "📋 Inserir Chave de Transmissão (Stream Key)"
-        )
-        AlertDialog.Builder(this)
-            .setTitle("Autenticação Twitch")
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> openTwitchOAuthLogin()
-                    1 -> openStreamKeyDialog("twitch", "Twitch")
-                }
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
-    }
-
-    private fun openTwitchOAuthLogin() {
-        val state = UUID.randomUUID().toString().replace("-", "")
-        val twitchClientId = "w6jaglxcs6jv5ordvcmxhc9d2d1sny"
-        val redirectUri = "https://livenexus.acq.lat/api/auth/twitch/callback"
-        val authUrl = "https://id.twitch.tv/oauth2/authorize" +
-            "?client_id=$twitchClientId" +
-            "&redirect_uri=${Uri.encode(redirectUri)}" +
-            "&response_type=token" +
-            "&force_verify=true" +
-            "&scope=${Uri.encode("channel:manage:broadcast user:read:email")}" +
-            "&state=$state"
-
-        val browser = WebView(this)
-        browser.settings.javaScriptEnabled = true
-        browser.settings.domStorageEnabled = true
-        browser.settings.userAgentString = browser.settings.userAgentString.replace("; wv", "")
-        CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(browser, true)
-
-        var dialog: AlertDialog? = null
-
-        browser.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                super.onPageStarted(view, url, favicon)
-                if (url == null) return
-                if (url.contains("livenexus.acq.lat/api/auth/twitch/callback")) {
-                    val fragment = Uri.parse(url).fragment ?: ""
-                    var token = ""
-                    if (fragment.isNotEmpty()) {
-                        val pairs = fragment.split("&")
-                        for (pair in pairs) {
-                            val parts = pair.split("=")
-                            if (parts.size == 2 && parts[0] == "access_token") {
-                                token = parts[1]
-                                break
-                            }
-                        }
-                    }
-                    if (token.isEmpty()) {
-                        token = Uri.parse(url).getQueryParameter("access_token") ?: ""
-                    }
-
-                    if (token.isNotEmpty()) {
-                        browser.stopLoading()
-                        dialog?.dismiss()
-                        fetchTwitchUserData(token, state)
-                    }
-                }
-            }
-        }
-
-        dialog = AlertDialog.Builder(this)
-            .setTitle("Login Oficial Twitch")
-            .setView(browser)
-            .setNegativeButton("Cancelar") { d, _ ->
-                browser.stopLoading()
-                d.dismiss()
-            }
-            .create()
-
-        dialog.show()
-        val metrics = resources.displayMetrics
-        dialog.window?.setLayout((metrics.widthPixels * 0.95).toInt(), (metrics.heightPixels * 0.85).toInt())
-        browser.loadUrl(authUrl)
-    }
-
-    private fun fetchTwitchUserData(token: String, state: String) {
-        val progress = AlertDialog.Builder(this)
-            .setTitle("Twitch Conectada")
-            .setMessage("Validando streamer na API da Twitch...")
-            .setCancelable(false)
-            .create()
-        progress.show()
-
-        Thread {
-            try {
-                val conn = URL("https://api.twitch.tv/helix/users").openConnection() as HttpURLConnection
-                conn.requestMethod = "GET"
-                conn.setRequestProperty("Client-Id", "w6jaglxcs6jv5ordvcmxhc9d2d1sny")
-                conn.setRequestProperty("Authorization", "Bearer $token")
-                conn.connectTimeout = 10000
-                conn.readTimeout = 10000
-                val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
-                val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
-                conn.disconnect()
-
-                val json = JSONObject(body)
-                val data = json.optJSONArray("data")
-                var displayName = "TwitchStreamer"
-                var loginName = ""
-                var userId = ""
-                if (data != null && data.length() > 0) {
-                    val userObj = data.getJSONObject(0)
-                    displayName = userObj.optString("display_name", displayName)
-                    loginName = userObj.optString("login", "")
-                    userId = userObj.optString("id", "")
-                }
-
-                capturePrefs.edit()
-                    .putString("twitch_username", displayName)
-                    .putString("twitch_login", loginName)
-                    .putString("twitch_token", token)
-                    .putString("twitch_user_id", userId)
-                    .putBoolean("stream_twitch", true)
-                    .apply()
-                platformConnected["twitch"] = true
-
-                try {
-                    LiveNexusApi.saveTwitchAuthorization(token, state)
-                } catch (_: Exception) {}
-
-                runOnUiThread {
-                    progress.dismiss()
-                    val hasKey = capturePrefs.getString("key_twitch", "")?.isNotBlank() == true
-                    if (!hasKey) {
-                        AlertDialog.Builder(this@MainActivity)
-                            .setTitle("Twitch Conectada (@$displayName)")
-                            .setMessage("Login OAuth realizado com sucesso! Para transmitir, insira a sua Chave de Transmissão (Stream Key) da Twitch:")
-                            .setPositiveButton("Inserir Stream Key") { _, _ ->
-                                openStreamKeyDialog("twitch", "Twitch")
-                            }
-                            .setNegativeButton("Mais tarde") { _, _ -> render() }
-                            .show()
-                    } else {
-                        AlertDialog.Builder(this@MainActivity)
-                            .setTitle("Twitch Autenticada!")
-                            .setMessage("Conta @$displayName conectada e pronta para transmissões ao vivo.")
-                            .setPositiveButton("OK") { _, _ -> render() }
-                            .show()
-                    }
-                    render()
-                }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    progress.dismiss()
-                    capturePrefs.edit()
-                        .putString("twitch_token", token)
-                        .putBoolean("stream_twitch", true)
-                        .apply()
-                    platformConnected["twitch"] = true
-                    Toast.makeText(this@MainActivity, "Twitch autorizada via OAuth!", Toast.LENGTH_LONG).show()
-                    render()
-                }
-            }
-        }.start()
-    }
-
-    // ==========================================
-    // 2. AUTENTICAÇÃO REAL YOUTUBE (OAUTH GOOGLE / YOUTUBE STUDIO)
-    // ==========================================
-    private fun openYouTubeAuthDialog() {
-        val options = arrayOf(
-            "🌐 Login Google / YouTube (OAuth Oficial)",
-            "📺 Login com Chave do YouTube Studio"
-        )
-        AlertDialog.Builder(this)
-            .setTitle("Autenticação YouTube")
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> openYouTubeOAuthInBrowser()
-                    1 -> openYouTubeStudioDialog()
-                }
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
-    }
-
-    private fun openYouTubeOAuthInBrowser() {
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("Conectando ao Google")
-            .setMessage("Obtendo URL de autorização oficial do Google...")
-            .create()
-        dialog.show()
-
-        Thread {
-            try {
-                val authUrl = LiveNexusApi.streamingAuthorizationUrl("youtube")
-                runOnUiThread {
-                    dialog.dismiss()
-                    pendingStreamingPlatform = "youtube"
-                    try {
-                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)))
-                    } catch (e: Exception) {
-                        Toast.makeText(this@MainActivity, "Erro ao abrir navegador: ${e.message}", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            } catch (err: Exception) {
-                runOnUiThread {
-                    dialog.dismiss()
-                    val fallbackGoogleOAuth = "https://accounts.google.com/o/oauth2/v2/auth" +
-                        "?client_id=342488497308-lfhbao1jda4r9btcglsn0huedlacu2vk.apps.googleusercontent.com" +
-                        "&redirect_uri=https%3A%2F%2Flivenexus.acq.lat%2Fapi%2Fauth%2Fyoutube%2Fcallback" +
-                        "&response_type=code" +
-                        "&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fyoutube" +
-                        "&access_type=offline" +
-                        "&prompt=consent"
-                    pendingStreamingPlatform = "youtube"
-                    try {
-                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(fallbackGoogleOAuth)))
-                    } catch (e: Exception) {
-                        Toast.makeText(this@MainActivity, "Erro ao abrir navegador: ${e.message}", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        }.start()
-    }
-
+    // 1. CONFIGURAÇÃO YOUTUBE POR CHAVE RTMP
+    private fun openYouTubeStudioDialog() {
     private fun openYouTubeStudioDialog() {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -810,9 +491,9 @@ class MainActivity : Activity() {
         layout.addView(keyInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
         AlertDialog.Builder(this)
-            .setTitle("Autenticar Canal YouTube")
+            .setTitle("Configurar YouTube RTMP")
             .setView(layout)
-            .setPositiveButton("Salvar e Autenticar") { _, _ ->
+            .setPositiveButton("Salvar Chave RTMP") { _, _ ->
                 val channel = channelInput.text.toString().trim()
                 val key = keyInput.text.toString().trim()
                 if (!isValidStreamKey(key)) {
@@ -825,279 +506,15 @@ class MainActivity : Activity() {
                     .putBoolean("stream_youtube", true)
                     .apply()
                 platformConnected["youtube"] = true
-                Toast.makeText(this, "Canal YouTube autenticado com sucesso!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Chave RTMP do YouTube salva!", Toast.LENGTH_SHORT).show()
                 render()
             }
             .setNegativeButton("Cancelar", null)
             .show()
     }
 
-    // ==========================================
-    // 3. AUTENTICAÇÃO REAL KICK (OAUTH 2.1 COM PKCE & CREATOR DASHBOARD)
-    // ==========================================
-    private fun openKickAuthDialog() {
-        val options = arrayOf(
-            "🔑 Login Oficial Kick (OAuth 2.1 com PKCE)",
-            "⚙️ Configurar Kick Developer Keys (Client ID / Secret)",
-            "📋 Inserir Chave RTMP da Kick (Creator Dashboard)"
-        )
-        AlertDialog.Builder(this)
-            .setTitle("Autenticação Kick")
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> openKickOAuthLogin()
-                    1 -> openKickDeveloperKeysDialog()
-                    2 -> openKickRtmpDialog()
-                }
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
-    }
-
-    private fun openKickOAuthLogin() {
-        val clientId = capturePrefs.getString("kick_client_id", StreamingConfig.KICK_CLIENT_ID)?.ifBlank { StreamingConfig.KICK_CLIENT_ID } ?: StreamingConfig.KICK_CLIENT_ID
-        val clientSecret = capturePrefs.getString("kick_client_secret", StreamingConfig.KICK_CLIENT_SECRET)?.ifBlank { StreamingConfig.KICK_CLIENT_SECRET } ?: StreamingConfig.KICK_CLIENT_SECRET
-        val redirectUri = capturePrefs.getString("kick_redirect_uri", StreamingConfig.KICK_REDIRECT_URI)?.ifBlank { StreamingConfig.KICK_REDIRECT_URI } ?: StreamingConfig.KICK_REDIRECT_URI
-
-        if (clientId.isBlank()) {
-            openKickDeveloperKeysDialog { openKickOAuthLogin() }
-            return
-        }
-
-        val verifierBytes = ByteArray(32)
-        java.security.SecureRandom().nextBytes(verifierBytes)
-        val codeVerifier = android.util.Base64.encodeToString(
-            verifierBytes,
-            android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP
-        )
-
-        val sha256 = java.security.MessageDigest.getInstance("SHA-256")
-        val challengeBytes = sha256.digest(codeVerifier.toByteArray(Charsets.US_ASCII))
-        val codeChallenge = android.util.Base64.encodeToString(
-            challengeBytes,
-            android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP
-        )
-        val state = UUID.randomUUID().toString().replace("-", "")
-
-        val authUrl = "https://id.kick.com/oauth/authorize" +
-            "?client_id=${Uri.encode(clientId)}" +
-            "&response_type=code" +
-            "&redirect_uri=${Uri.encode(redirectUri)}" +
-            "&scope=${Uri.encode("user:read channel:read channel:write")}" +
-            "&code_challenge=${Uri.encode(codeChallenge)}" +
-            "&code_challenge_method=S256" +
-            "&state=$state"
-
-        val browser = WebView(this)
-        browser.settings.javaScriptEnabled = true
-        browser.settings.domStorageEnabled = true
-        browser.settings.userAgentString = browser.settings.userAgentString.replace("; wv", "")
-        CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(browser, true)
-
-        var dialog: AlertDialog? = null
-
-        browser.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                super.onPageStarted(view, url, favicon)
-                if (url == null) return
-                if (url.startsWith(redirectUri) || url.contains("/api/auth/kick/callback")) {
-                    val uri = Uri.parse(url)
-                    val code = uri.getQueryParameter("code")
-                    if (!code.isNullOrBlank()) {
-                        browser.stopLoading()
-                        dialog?.dismiss()
-                        exchangeKickCodeForToken(code, codeVerifier, clientId, clientSecret, redirectUri)
-                    }
-                }
-            }
-        }
-
-        dialog = AlertDialog.Builder(this)
-            .setTitle("Login Oficial Kick (OAuth 2.1)")
-            .setView(browser)
-            .setNegativeButton("Cancelar") { d, _ ->
-                browser.stopLoading()
-                d.dismiss()
-            }
-            .create()
-
-        dialog.show()
-        val metrics = resources.displayMetrics
-        dialog.window?.setLayout((metrics.widthPixels * 0.95).toInt(), (metrics.heightPixels * 0.85).toInt())
-        browser.loadUrl(authUrl)
-    }
-
-    private fun exchangeKickCodeForToken(
-        code: String,
-        verifier: String,
-        clientId: String,
-        clientSecret: String,
-        redirectUri: String
-    ) {
-        val progress = AlertDialog.Builder(this)
-            .setTitle("Kick OAuth 2.1")
-            .setMessage("Autenticando streamer e gerando token na Kick...")
-            .setCancelable(false)
-            .create()
-        progress.show()
-
-        Thread {
-            try {
-                val conn = URL("https://id.kick.com/oauth/token").openConnection() as HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
-                conn.setRequestProperty("Accept", "application/json")
-                conn.connectTimeout = 12000
-                conn.readTimeout = 12000
-                conn.doOutput = true
-
-                val postData = StringBuilder()
-                    .append("grant_type=").append(Uri.encode("authorization_code"))
-                    .append("&client_id=").append(Uri.encode(clientId))
-                    .append("&code=").append(Uri.encode(code))
-                    .append("&redirect_uri=").append(Uri.encode(redirectUri))
-                    .append("&code_verifier=").append(Uri.encode(verifier))
-                if (clientSecret.isNotBlank()) {
-                    postData.append("&client_secret=").append(Uri.encode(clientSecret))
-                }
-
-                conn.outputStream.use { it.write(postData.toString().toByteArray(Charsets.UTF_8)) }
-                val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
-                val respText = stream?.bufferedReader()?.use { it.readText() } ?: ""
-                conn.disconnect()
-
-                val tokenJson = JSONObject(respText)
-                val accessToken = tokenJson.optString("access_token", "")
-                if (accessToken.isBlank()) {
-                    val errMsg = tokenJson.optString("message", tokenJson.optString("error_description", "Falha na troca de código Kick."))
-                    throw IllegalStateException(errMsg)
-                }
-
-                var username = "KickStreamer"
-                try {
-                    val userConn = URL("https://api.kick.com/public/v1/users").openConnection() as HttpURLConnection
-                    userConn.setRequestProperty("Authorization", "Bearer $accessToken")
-                    userConn.setRequestProperty("Accept", "application/json")
-                    if (userConn.responseCode in 200..299) {
-                        val userJson = JSONObject(userConn.inputStream.bufferedReader().use { it.readText() })
-                        val dataObj = userJson.optJSONObject("data") ?: userJson
-                        username = dataObj.optString("username", dataObj.optString("name", username))
-                    }
-                    userConn.disconnect()
-                } catch (_: Exception) {}
-
-                capturePrefs.edit()
-                    .putString("kick_token", accessToken)
-                    .putString("kick_username", username)
-                    .putBoolean("stream_kick", true)
-                    .apply()
-                platformConnected["kick"] = true
-
-                runOnUiThread {
-                    progress.dismiss()
-                    val hasKey = capturePrefs.getString("key_kick", "")?.isNotBlank() == true
-                    if (!hasKey) {
-                        AlertDialog.Builder(this@MainActivity)
-                            .setTitle("Kick Conectada (@$username)")
-                            .setMessage("Login OAuth 2.1 concluído! Para transmitir, insira sua Chave de Transmissão RTMP da Kick:")
-                            .setPositiveButton("Inserir Chave RTMP") { _, _ ->
-                                openKickRtmpDialog()
-                            }
-                            .setNegativeButton("Mais tarde") { _, _ -> render() }
-                            .show()
-                    } else {
-                        AlertDialog.Builder(this@MainActivity)
-                            .setTitle("Kick Autenticada!")
-                            .setMessage("Streamer @$username autenticado via OAuth 2.1 com sucesso!")
-                            .setPositiveButton("OK") { _, _ -> render() }
-                            .show()
-                    }
-                    render()
-                }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    progress.dismiss()
-                    Toast.makeText(this@MainActivity, "Erro Kick OAuth: ${e.message}", Toast.LENGTH_LONG).show()
-                }
-            }
-        }.start()
-    }
-
-    private fun openKickDeveloperKeysDialog(onSaved: (() -> Unit)? = null) {
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(10), dp(20), dp(10))
-        }
-
-        layout.addView(text("Kick Client ID:", 12f, Color.rgb(200, 210, 240)).apply {
-            setPadding(0, 0, 0, dp(4))
-        })
-        val idInput = EditText(this).apply {
-            hint = "Cole o Client ID da Kick"
-            setText(capturePrefs.getString("kick_client_id", StreamingConfig.KICK_CLIENT_ID))
-            setSingleLine(true)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-        }
-        layout.addView(idInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = dp(10)
-        })
-
-        layout.addView(text("Kick Client Secret:", 12f, Color.rgb(200, 210, 240)).apply {
-            setPadding(0, 0, 0, dp(4))
-        })
-        val secretInput = EditText(this).apply {
-            hint = "Cole o Client Secret da Kick"
-            setText(capturePrefs.getString("kick_client_secret", StreamingConfig.KICK_CLIENT_SECRET))
-            setSingleLine(true)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-        }
-        layout.addView(secretInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = dp(10)
-        })
-
-        layout.addView(text("Redirect URI (Kick Developer Portal):", 12f, Color.rgb(200, 210, 240)).apply {
-            setPadding(0, 0, 0, dp(4))
-        })
-        val redirectInput = EditText(this).apply {
-            hint = "Ex: https://livenexus.acq.lat/api/auth/kick/callback"
-            setText(capturePrefs.getString("kick_redirect_uri", StreamingConfig.KICK_REDIRECT_URI))
-            setSingleLine(true)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-        }
-        layout.addView(redirectInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-
-        AlertDialog.Builder(this)
-            .setTitle("Credenciais Kick Developer")
-            .setView(layout)
-            .setPositiveButton("Salvar Chaves") { _, _ ->
-                val cid = idInput.text.toString().trim()
-                val sec = secretInput.text.toString().trim()
-                val red = redirectInput.text.toString().trim()
-                capturePrefs.edit()
-                    .putString("kick_client_id", cid)
-                    .putString("kick_client_secret", sec)
-                    .putString("kick_redirect_uri", red)
-                    .apply()
-                StreamingConfig.KICK_CLIENT_ID = cid
-                StreamingConfig.KICK_CLIENT_SECRET = sec
-                StreamingConfig.KICK_REDIRECT_URI = red
-                Toast.makeText(this, "Chaves da Kick salvas no projeto!", Toast.LENGTH_SHORT).show()
-                onSaved?.invoke()
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
-    }
-
+    // Configuração Kick apenas por chave RTMP/RTMPS.
+    private fun openKickRtmpDialog() {
     private fun openKickRtmpDialog() {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1151,7 +568,7 @@ class MainActivity : Activity() {
         layout.addView(keyInput, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
         AlertDialog.Builder(this)
-            .setTitle("Autenticação Kick RTMP")
+            .setTitle("Configurar Kick RTMP")
             .setView(layout)
             .setPositiveButton("Salvar e Autenticar") { _, _ ->
                 val user = usernameInput.text.toString().trim()
@@ -1166,7 +583,7 @@ class MainActivity : Activity() {
                     .putBoolean("stream_kick", true)
                     .apply()
                 platformConnected["kick"] = true
-                Toast.makeText(this, "Conta Kick autenticada com sucesso!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Chave RTMP da Kick salva!", Toast.LENGTH_SHORT).show()
                 render()
             }
             .setNegativeButton("Cancelar", null)
@@ -1220,7 +637,7 @@ class MainActivity : Activity() {
                 }
                 editor.apply()
                 platformConnected[platform] = true
-                Toast.makeText(this, "$platformName salvo e autenticado!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Chave RTMP de $platformName salva!", Toast.LENGTH_SHORT).show()
                 render()
             }
             .setNegativeButton("Cancelar", null)
@@ -2898,9 +2315,9 @@ class MainActivity : Activity() {
             isClickable = true
             isFocusable = true
             setOnClickListener {
-                Toast.makeText(this@MainActivity, "Consultando conexões no LiveNexus...", Toast.LENGTH_SHORT).show()
-                checkStreamingPlatformsStatus {
-                    Toast.makeText(this@MainActivity, "Status das plataformas atualizado!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "Verificando chaves RTMP salvas...", Toast.LENGTH_SHORT).show()
+                refreshStreamingKeyStatus {
+                    Toast.makeText(this@MainActivity, "Chaves RTMP verificadas!", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -2919,8 +2336,7 @@ class MainActivity : Activity() {
             val username = capturePrefs.getString("${slug}_username", "")?.trim() ?: ""
             val cleanUsername = if (username.equals("null", ignoreCase = true) || username.equals("undefined", ignoreCase = true)) "" else username
             val hasCustomKey = isValidStreamKey(capturePrefs.getString("key_$slug", ""))
-            val isConn = (platformConnected[slug] == true && (cleanUsername.isNotBlank() || hasCustomKey)) ||
-                cleanUsername.isNotBlank() || hasCustomKey
+            val isConn = hasCustomKey
             val selected = capturePrefs.getBoolean(prefKey, false) && isConn
 
             val tile = FrameLayout(this).apply {
@@ -2937,12 +2353,12 @@ class MainActivity : Activity() {
                 }
                 setOnLongClickListener {
                     val options = arrayOf(
-                        if (isConn) "Alternar Seleção (${if (selected) "Selecionado" else "Desmarcado"})" else "Fazer Login",
-                        "Gerenciar Autenticação / Login",
-                        "Desconectar e Apagar Conta"
+                        if (isConn) "Alternar Seleção (${if (selected) "Selecionado" else "Desmarcado"})" else "Configurar RTMP",
+                        "Configurar Chave RTMP",
+                        "Remover Chave RTMP"
                     )
                     AlertDialog.Builder(this@MainActivity)
-                        .setTitle("Conta - $name")
+                        .setTitle("RTMP - $name")
                         .setItems(options) { _, which ->
                             when (which) {
                                 0 -> {
@@ -2963,7 +2379,7 @@ class MainActivity : Activity() {
                                         .putBoolean(prefKey, false)
                                         .apply()
                                     platformConnected[slug] = false
-                                    Toast.makeText(this@MainActivity, "Conta $name desconectada.", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(this@MainActivity, "Chave RTMP de $name removida.", Toast.LENGTH_SHORT).show()
                                     render()
                                 }
                             }
@@ -2992,9 +2408,9 @@ class MainActivity : Activity() {
             })
 
             val statusLabel = if (isConn) {
-                if (cleanUsername.isNotBlank()) "● @$cleanUsername" else "● Autenticado"
+                if (cleanUsername.isNotBlank()) "● RTMP @$cleanUsername" else "● Chave RTMP salva"
             } else {
-                "○ Fazer Login"
+                "○ Configurar RTMP"
             }
             val statusColor = if (isConn) NeonTheme.green else Color.rgb(180, 185, 215)
             val statusText = text(statusLabel, 10f, statusColor).apply {
