@@ -727,7 +727,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun stopLiveTransmission() {
+    fun stopLiveTransmission() {
         isTransmitting = false
         transmissionStartTime = 0L
         ControllerRuntime.isTransmitting = false
@@ -746,16 +746,33 @@ class MainActivity : Activity() {
         render()
     }
 
-    private fun handleStartTransmissionClick() {
-        val selectedPlatforms = listOf(
+    fun handleStartTransmissionClick() {
+        var selectedPlatforms = listOf(
             Triple("stream_youtube", "YouTube", "youtube"),
             Triple("stream_twitch", "Twitch", "twitch"),
             Triple("stream_kick", "Kick", "kick")
         ).filter { capturePrefs.getBoolean(it.first, false) }
 
         if (selectedPlatforms.isEmpty()) {
-            Toast.makeText(this, "Selecione ao menos uma plataforma de transmissão.", Toast.LENGTH_SHORT).show()
-            return
+            val availableWithKeys = listOf(
+                Triple("stream_youtube", "YouTube", "youtube"),
+                Triple("stream_twitch", "Twitch", "twitch"),
+                Triple("stream_kick", "Kick", "kick")
+            ).filter { isValidStreamKey(capturePrefs.getString("key_${it.third}", "")) }
+
+            if (availableWithKeys.isNotEmpty()) {
+                val editor = capturePrefs.edit()
+                for (p in availableWithKeys) {
+                    editor.putBoolean(p.first, true)
+                }
+                editor.apply()
+                selectedPlatforms = availableWithKeys
+            } else {
+                Toast.makeText(this, "Configure ao menos uma chave RTMP no menu Transmissão.", Toast.LENGTH_LONG).show()
+                page = 2
+                render()
+                return
+            }
         }
 
         // Verifica se todas as plataformas marcadas possuem Stream Key real cadastrada
@@ -978,7 +995,7 @@ class MainActivity : Activity() {
     }
 
     private fun normalizeUrl(raw: String): String {
-        val trimmed = raw.trim()
+        var trimmed = raw.trim().replace("\n", "").replace("\r", "")
         if (trimmed.isBlank()) return ""
         if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
             return trimmed
@@ -1000,7 +1017,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun openBrowserSourceEditDialog(layer: CaptureLayer, onDismiss: (() -> Unit)? = null) {
+    fun openBrowserSourceEditDialog(layer: CaptureLayer, onDismiss: (() -> Unit)? = null) {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(16), dp(20), dp(16))
@@ -1030,18 +1047,41 @@ class MainActivity : Activity() {
         ).apply { bottomMargin = dp(12) })
 
         // Campo URL
-        root.addView(text("URL da Página (Browser Source):", 12.5f, Color.rgb(200, 200, 220)).apply {
+        val urlHeaderRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        urlHeaderRow.addView(text("URL Completa (Browser Source):", 12.5f, Color.rgb(200, 200, 220)).apply {
             setPadding(0, 0, 0, dp(4))
-        })
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val charCounter = text("${layer.url.length} chars", 11f, NeonTheme.cyan).apply {
+            gravity = Gravity.END
+            setPadding(0, 0, 0, dp(4))
+        }
+        urlHeaderRow.addView(charCounter)
+        root.addView(urlHeaderRow)
+
         val urlInput = EditText(this).apply {
             setText(layer.url)
-            hint = "https://.../alertas, chat ou overlay"
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
-            setSingleLine(true)
+            hint = "https://.../alertas, chat, overlay ou widgets"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
+                android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            isSingleLine = false
+            minLines = 2
+            maxLines = 4
             setTextColor(Color.WHITE)
             setHintTextColor(Color.GRAY)
             background = shape(Color.rgb(22, 20, 48), NeonTheme.purple, 8)
             setPadding(dp(12), dp(10), dp(12), dp(10))
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    charCounter.text = "${s?.length ?: 0} chars"
+                }
+                override fun afterTextChanged(s: android.text.Editable?) {}
+            })
         }
         root.addView(urlInput, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
@@ -1064,13 +1104,14 @@ class MainActivity : Activity() {
             setOnClickListener { onClick() }
         }
 
-        val pasteBtn = smallButton("📋 Colar URL", NeonTheme.cyan) {
+        val pasteBtn = smallButton("📋 Colar Link Completo", NeonTheme.cyan) {
             val clip = (getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)?.primaryClip
             if (clip != null && clip.itemCount > 0) {
                 val pasted = clip.getItemAt(0)?.text?.toString()?.trim() ?: ""
                 if (pasted.isNotEmpty()) {
                     urlInput.setText(pasted)
                     urlInput.setSelection(urlInput.text.length)
+                    Toast.makeText(this, "Link colado (${pasted.length} caracteres).", Toast.LENGTH_SHORT).show()
                 }
             } else {
                 Toast.makeText(this, "Área de transferência vazia.", Toast.LENGTH_SHORT).show()
@@ -1110,6 +1151,7 @@ class MainActivity : Activity() {
             layer.height = 1f
             persistCaptureScenes()
             refreshCaptureCanvas()
+            ScreenCaptureService.updateActiveSceneLayers(activeCaptureScene()?.sources)
             Toast.makeText(this, "Browser Source ajustado para tela cheia.", Toast.LENGTH_SHORT).show()
         }
         toolRow.addView(fitScreenBtn, LinearLayout.LayoutParams(
@@ -1119,6 +1161,7 @@ class MainActivity : Activity() {
         val reloadBtn = smallButton("🔄 Recarregar", NeonTheme.cyan) {
             captureBrowserUrl = null
             captureBrowserView?.reload()
+            ScreenCaptureService.updateActiveSceneLayers(activeCaptureScene()?.sources)
             Toast.makeText(this, "Página recarregada.", Toast.LENGTH_SHORT).show()
         }
         toolRow.addView(reloadBtn)
@@ -1136,6 +1179,8 @@ class MainActivity : Activity() {
                 layer.url = if (rawUrl.isNotBlank()) normalizeUrl(rawUrl) else ""
                 persistCaptureScenes()
                 refreshCaptureCanvas()
+                ScreenCaptureService.updateActiveSceneLayers(activeCaptureScene()?.sources)
+                updateCaptureBrowserSource()
                 onDismiss?.invoke()
                 Toast.makeText(this, "Browser Source salvo com sucesso!", Toast.LENGTH_SHORT).show()
             }

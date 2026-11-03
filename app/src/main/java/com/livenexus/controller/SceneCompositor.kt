@@ -22,9 +22,9 @@ import java.nio.FloatBuffer
  */
 class SceneCompositor(
     private val outputSurface: Surface,
-    private val width: Int,
-    private val height: Int,
-    private val fps: Int,
+    val width: Int,
+    val height: Int,
+    val fps: Int,
     private val onFrameRendered: ((Bitmap) -> Unit)? = null
 ) : AutoCloseable {
 

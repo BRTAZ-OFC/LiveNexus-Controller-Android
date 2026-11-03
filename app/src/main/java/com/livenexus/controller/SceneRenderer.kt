@@ -39,7 +39,8 @@ object SceneRenderer {
         screenFrame: Bitmap?,
         isLiveStream: Boolean = true,
         selectedLayerId: String? = null,
-        handleSize: Float = 0f
+        handleSize: Float = 0f,
+        browserFrameProvider: ((String) -> Bitmap?)? = null
     ) {
         val paint = paintLocal.get()!!
         val textPaint = textPaintLocal.get()!!
@@ -128,27 +129,35 @@ object SceneRenderer {
                     canvas.drawText(layer.name.take(60), box.left + 16f, textY, textPaint)
                 }
                 "browser" -> {
-                    paint.style = Paint.Style.FILL
-                    paint.color = Color.argb(215, 10, 26, 52)
-                    canvas.drawRoundRect(box, 10f, 10f, paint)
-                    borderPaint.color = NeonTheme.cyan
-                    borderPaint.strokeWidth = 2f
-                    canvas.drawRoundRect(box, 10f, 10f, borderPaint)
+                    val frame = browserFrameProvider?.invoke(layer.id)
+                    if (frame != null && !frame.isRecycled) {
+                        paint.reset()
+                        paint.isAntiAlias = true
+                        paint.isFilterBitmap = true
+                        canvas.drawBitmap(frame, null, box, paint)
+                    } else {
+                        paint.style = Paint.Style.FILL
+                        paint.color = Color.argb(215, 10, 26, 52)
+                        canvas.drawRoundRect(box, 10f, 10f, paint)
+                        borderPaint.color = NeonTheme.cyan
+                        borderPaint.strokeWidth = 2f
+                        canvas.drawRoundRect(box, 10f, 10f, borderPaint)
 
-                    textPaint.color = NeonTheme.cyan
-                    textPaint.textSize = (box.height() * 0.28f).coerceIn(12f, 26f)
-                    val title = "🌐 ${layer.name.take(30)}"
-                    val hasSubtitle = box.height() >= 36f
-                    val titleY = if (hasSubtitle) box.centerY() - 6f else box.centerY() - (textPaint.descent() + textPaint.ascent()) / 2
-                    canvas.drawText(title, box.left + 14f, titleY, textPaint)
+                        textPaint.color = NeonTheme.cyan
+                        textPaint.textSize = (box.height() * 0.28f).coerceIn(12f, 26f)
+                        val title = "🌐 ${layer.name.take(30)}"
+                        val hasSubtitle = box.height() >= 36f
+                        val titleY = if (hasSubtitle) box.centerY() - 6f else box.centerY() - (textPaint.descent() + textPaint.ascent()) / 2
+                        canvas.drawText(title, box.left + 14f, titleY, textPaint)
 
-                    if (hasSubtitle) {
-                        val subPaint = Paint(textPaint).apply {
-                            color = if (layer.url.isNotBlank()) Color.rgb(180, 225, 255) else Color.rgb(255, 185, 90)
-                            textSize = (textPaint.textSize * 0.75f).coerceIn(10f, 18f)
+                        if (hasSubtitle) {
+                            val subPaint = Paint(textPaint).apply {
+                                color = if (layer.url.isNotBlank()) Color.rgb(180, 225, 255) else Color.rgb(255, 185, 90)
+                                textSize = (textPaint.textSize * 0.75f).coerceIn(10f, 18f)
+                            }
+                            val subText = if (layer.url.isNotBlank()) layer.url else "Duplo clique para adicionar URL"
+                            canvas.drawText(subText.take(50), box.left + 14f, titleY + subPaint.textSize + 8f, subPaint)
                         }
-                        val subText = if (layer.url.isNotBlank()) layer.url.take(45) else "Duplo clique para adicionar URL"
-                        canvas.drawText(subText, box.left + 14f, titleY + subPaint.textSize + 8f, subPaint)
                     }
                 }
                 else -> {

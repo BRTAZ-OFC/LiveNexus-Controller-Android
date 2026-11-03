@@ -139,7 +139,18 @@ class ControllerPanel(context: Context, private val isOverlay: Boolean) : Linear
         dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(NeonTheme.cyan)
     }
 
+    private fun findMainActivity(ctx: Context?): MainActivity? {
+        var c = ctx
+        while (c is android.content.ContextWrapper) {
+            if (c is MainActivity) return c
+            c = c.baseContext
+        }
+        return null
+    }
+
     private fun styleForType(type: String): Triple<String, String, Int> = when (type) {
+        "Iniciar Live" -> Triple("((•))", "camera", NeonTheme.green)
+        "Encerrar Live" -> Triple("⬛", "minus", NeonTheme.red)
         "Overlay" -> Triple("🖼", "overlay", NeonTheme.blue)
         "LivePix" -> Triple("💎", "livepix", NeonTheme.purple)
         "Contador +1", "Teste contador +1" -> Triple("+", "plus", NeonTheme.green)
@@ -332,8 +343,13 @@ class ControllerPanel(context: Context, private val isOverlay: Boolean) : Linear
                 isClickable = true
                 isFocusable = true
                 setOnClickListener {
-                    StreamingConfig.stopLiveStream(context)
-                    Toast.makeText(context, "Transmissão encerrada.", Toast.LENGTH_SHORT).show()
+                    val act = findMainActivity(context)
+                    if (act != null) {
+                        act.stopLiveTransmission()
+                    } else {
+                        StreamingConfig.stopLiveStream(context)
+                        Toast.makeText(context, "Transmissão encerrada.", Toast.LENGTH_SHORT).show()
+                    }
                     render()
                 }
             }
@@ -361,12 +377,18 @@ class ControllerPanel(context: Context, private val isOverlay: Boolean) : Linear
                 isClickable = true
                 isFocusable = true
                 setOnClickListener {
-                    val started = StreamingConfig.startLiveStream(context)
-                    if (started) {
-                        Toast.makeText(context, "Iniciando transmissão ao vivo...", Toast.LENGTH_SHORT).show()
+                    val act = findMainActivity(context)
+                    if (act != null) {
+                        act.handleStartTransmissionClick()
                         render()
                     } else {
-                        Toast.makeText(context, "Configure ao menos uma chave RTMP válida nas configurações do app.", Toast.LENGTH_LONG).show()
+                        val started = StreamingConfig.startLiveStream(context)
+                        if (started) {
+                            Toast.makeText(context, "Iniciando transmissão ao vivo...", Toast.LENGTH_SHORT).show()
+                            render()
+                        } else {
+                            Toast.makeText(context, "Configure ao menos uma chave RTMP no menu Transmissão.", Toast.LENGTH_LONG).show()
+                        }
                     }
                 }
             }
@@ -787,6 +809,8 @@ class ControllerPanel(context: Context, private val isOverlay: Boolean) : Linear
 
     private fun buildAddActionPanel(isLandscape: Boolean): View {
         val options = listOf(
+            "Iniciar Live",
+            "Encerrar Live",
             "Cenário",
             "Overlay",
             "LivePix",
@@ -1015,6 +1039,30 @@ class ControllerPanel(context: Context, private val isOverlay: Boolean) : Linear
                 } catch (e: Exception) {
                     error(e.message ?: "Não foi possível abrir o Receiver.")
                 }
+            }
+            "Iniciar Live" -> {
+                val act = findMainActivity(context)
+                if (act != null) {
+                    act.handleStartTransmissionClick()
+                } else {
+                    val started = StreamingConfig.startLiveStream(context)
+                    if (started) {
+                        Toast.makeText(context, "Iniciando transmissão ao vivo...", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "Configure ao menos uma chave RTMP no menu Transmissão.", Toast.LENGTH_LONG).show()
+                    }
+                }
+                render()
+            }
+            "Encerrar Live" -> {
+                val act = findMainActivity(context)
+                if (act != null) {
+                    act.stopLiveTransmission()
+                } else {
+                    StreamingConfig.stopLiveStream(context)
+                    Toast.makeText(context, "Transmissão encerrada.", Toast.LENGTH_SHORT).show()
+                }
+                render()
             }
             else -> error("Ação ainda não integrada: ${kind(index)}")
         }

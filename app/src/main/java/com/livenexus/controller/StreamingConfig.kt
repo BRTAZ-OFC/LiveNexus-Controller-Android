@@ -32,35 +32,53 @@ object StreamingConfig {
     fun buildActiveTargetsJson(context: Context): String {
         val prefs = context.getSharedPreferences("livenexus_capture_settings", Context.MODE_PRIVATE)
         val array = JSONArray()
-        if (prefs.getBoolean("stream_youtube", false)) {
-            val key = prefs.getString("key_youtube", "")?.trim() ?: ""
-            if (isValidStreamKey(key)) {
-                array.put(JSONObject().apply {
-                    put("platform", "YouTube")
-                    put("url", RTMPS_YOUTUBE)
-                    put("key", key)
-                })
+
+        val yKey = prefs.getString("key_youtube", "")?.trim() ?: ""
+        val tKey = prefs.getString("key_twitch", "")?.trim() ?: ""
+        val kKey = prefs.getString("key_kick", "")?.trim() ?: ""
+
+        var streamYoutube = prefs.getBoolean("stream_youtube", false)
+        var streamTwitch = prefs.getBoolean("stream_twitch", false)
+        var streamKick = prefs.getBoolean("stream_kick", false)
+
+        // Se nenhuma estiver marcada com switch, mas existem chaves cadastradas, ativa automaticamente
+        if (!streamYoutube && !streamTwitch && !streamKick) {
+            val editor = prefs.edit()
+            if (isValidStreamKey(yKey)) {
+                streamYoutube = true
+                editor.putBoolean("stream_youtube", true)
             }
+            if (isValidStreamKey(tKey)) {
+                streamTwitch = true
+                editor.putBoolean("stream_twitch", true)
+            }
+            if (isValidStreamKey(kKey)) {
+                streamKick = true
+                editor.putBoolean("stream_kick", true)
+            }
+            editor.apply()
         }
-        if (prefs.getBoolean("stream_twitch", false)) {
-            val key = prefs.getString("key_twitch", "")?.trim() ?: ""
-            if (isValidStreamKey(key)) {
-                array.put(JSONObject().apply {
-                    put("platform", "Twitch")
-                    put("url", RTMP_TWITCH)
-                    put("key", key)
-                })
-            }
+
+        if (streamYoutube && isValidStreamKey(yKey)) {
+            array.put(JSONObject().apply {
+                put("platform", "YouTube")
+                put("url", RTMPS_YOUTUBE)
+                put("key", yKey)
+            })
         }
-        if (prefs.getBoolean("stream_kick", false)) {
-            val key = prefs.getString("key_kick", "")?.trim() ?: ""
-            if (isValidStreamKey(key)) {
-                array.put(JSONObject().apply {
-                    put("platform", "Kick")
-                    put("url", RTMP_KICK)
-                    put("key", key)
-                })
-            }
+        if (streamTwitch && isValidStreamKey(tKey)) {
+            array.put(JSONObject().apply {
+                put("platform", "Twitch")
+                put("url", RTMP_TWITCH)
+                put("key", tKey)
+            })
+        }
+        if (streamKick && isValidStreamKey(kKey)) {
+            array.put(JSONObject().apply {
+                put("platform", "Kick")
+                put("url", RTMP_KICK)
+                put("key", kKey)
+            })
         }
         return array.toString()
     }
@@ -68,18 +86,35 @@ object StreamingConfig {
     fun getSelectedPlatformsSummary(context: Context): List<String> {
         val prefs = context.getSharedPreferences("livenexus_capture_settings", Context.MODE_PRIVATE)
         val list = mutableListOf<String>()
-        if (prefs.getBoolean("stream_youtube", false) && isValidStreamKey(prefs.getString("key_youtube", ""))) {
+
+        val yKey = prefs.getString("key_youtube", "")?.trim() ?: ""
+        val tKey = prefs.getString("key_twitch", "")?.trim() ?: ""
+        val kKey = prefs.getString("key_kick", "")?.trim() ?: ""
+
+        var streamYoutube = prefs.getBoolean("stream_youtube", false)
+        var streamTwitch = prefs.getBoolean("stream_twitch", false)
+        var streamKick = prefs.getBoolean("stream_kick", false)
+
+        if (!streamYoutube && !streamTwitch && !streamKick) {
+            if (isValidStreamKey(yKey)) streamYoutube = true
+            if (isValidStreamKey(tKey)) streamTwitch = true
+            if (isValidStreamKey(kKey)) streamKick = true
+        }
+
+        if (streamYoutube && isValidStreamKey(yKey)) {
             val handle = prefs.getString("youtube_username", "")?.trim() ?: ""
             val formatted = if (handle.isNotBlank()) (if (handle.startsWith("@")) handle else "@$handle") else ""
             list.add(if (formatted.isNotBlank()) "YouTube ($formatted)" else "YouTube")
         }
-        if (prefs.getBoolean("stream_twitch", false) && isValidStreamKey(prefs.getString("key_twitch", ""))) {
+        if (streamTwitch && isValidStreamKey(tKey)) {
             val handle = prefs.getString("twitch_username", "")?.trim() ?: ""
-            list.add(if (handle.isNotBlank()) "Twitch ($handle)" else "Twitch")
+            val formatted = if (handle.isNotBlank()) (if (handle.startsWith("@")) handle else "@$handle") else ""
+            list.add(if (formatted.isNotBlank()) "Twitch ($formatted)" else "Twitch")
         }
-        if (prefs.getBoolean("stream_kick", false) && isValidStreamKey(prefs.getString("key_kick", ""))) {
+        if (streamKick && isValidStreamKey(kKey)) {
             val handle = prefs.getString("kick_username", "")?.trim() ?: ""
-            list.add(if (handle.isNotBlank()) "Kick ($handle)" else "Kick")
+            val formatted = if (handle.isNotBlank()) (if (handle.startsWith("@")) handle else "@$handle") else ""
+            list.add(if (formatted.isNotBlank()) "Kick ($formatted)" else "Kick")
         }
         return list
     }

@@ -68,6 +68,12 @@ class ScreenCaptureService : Service() {
 
         fun updateActiveSceneLayers(layers: List<CaptureLayer>?) {
             activeSceneLayers = layers?.toList()
+            activeInstance?.let { service ->
+                val currentCompositor = service.compositor
+                if (currentCompositor != null) {
+                    service.browserEngine?.updateLayers(activeSceneLayers ?: emptyList(), currentCompositor.width, currentCompositor.height)
+                }
+            }
         }
 
         fun updateCaptureOrientation(vertical: Boolean) {
@@ -101,6 +107,7 @@ class ScreenCaptureService : Service() {
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var compositor: SceneCompositor? = null
+    private var browserEngine: BrowserSourceEngine? = null
     private var videoEncoder: LocalVideoEncoder? = null
     private var audioEncoder: LocalAudioEncoder? = null
     private var publisher: StreamPublisher? = null
@@ -292,6 +299,7 @@ class ScreenCaptureService : Service() {
             videoEncoder = newEncoder
 
             val initialLayers = activeSceneLayers ?: loadPersistedSceneLayers(this)
+            browserEngine?.updateLayers(initialLayers, newW, newH)
             val newCompositor = SceneCompositor(
                 outputSurface = newEncoder.surface,
                 width = newW,
@@ -308,7 +316,8 @@ class ScreenCaptureService : Service() {
                     height = h,
                     layers = layers,
                     screenFrame = screenSourceBitmap,
-                    isLiveStream = true
+                    isLiveStream = true,
+                    browserFrameProvider = { id -> browserEngine?.getFrame(id) }
                 )
             }
             compositor = newCompositor
@@ -739,6 +748,11 @@ class ScreenCaptureService : Service() {
 
                 // Compositor de Cenário do LiveNEXUS: transmite o canvas do Editor de Cena.
                 val initialLayers = activeSceneLayers ?: loadPersistedSceneLayers(this)
+                val bEngine = BrowserSourceEngine(this@ScreenCaptureService)
+                browserEngine = bEngine
+                bEngine.start()
+                bEngine.updateLayers(initialLayers, evenWidth, evenHeight)
+
                 val sceneComp = SceneCompositor(
                     outputSurface = encoder.surface,
                     width = evenWidth,
@@ -755,7 +769,8 @@ class ScreenCaptureService : Service() {
                         height = h,
                         layers = layers,
                         screenFrame = screenSourceBitmap,
-                        isLiveStream = true
+                        isLiveStream = true,
+                        browserFrameProvider = { id -> browserEngine?.getFrame(id) }
                     )
                 }
                 compositor = sceneComp
@@ -853,6 +868,11 @@ class ScreenCaptureService : Service() {
             compositor?.close()
         } catch (_: Exception) {}
         compositor = null
+
+        try {
+            browserEngine?.stop()
+        } catch (_: Exception) {}
+        browserEngine = null
 
         try {
             audioEncoder?.close()
