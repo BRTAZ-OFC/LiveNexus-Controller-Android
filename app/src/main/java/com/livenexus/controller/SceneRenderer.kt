@@ -40,7 +40,7 @@ object SceneRenderer {
         isLiveStream: Boolean = true,
         selectedLayerId: String? = null,
         handleSize: Float = 0f,
-        browserFrameProvider: ((String) -> Bitmap?)? = null
+        browserFrameDrawer: ((String, Canvas, RectF, Paint) -> Boolean)? = null
     ) {
         val paint = paintLocal.get()!!
         val textPaint = textPaintLocal.get()!!
@@ -129,13 +129,13 @@ object SceneRenderer {
                     canvas.drawText(layer.name.take(60), box.left + 16f, textY, textPaint)
                 }
                 "browser" -> {
-                    val frame = browserFrameProvider?.invoke(layer.id)
-                    if (frame != null && !frame.isRecycled) {
-                        paint.reset()
-                        paint.isAntiAlias = true
-                        paint.isFilterBitmap = true
-                        canvas.drawBitmap(frame, null, box, paint)
-                    } else {
+                    paint.reset()
+                    paint.isAntiAlias = true
+                    paint.isFilterBitmap = true
+                    val hasFrame = browserFrameDrawer?.invoke(layer.id, canvas, box, paint) == true
+                    // A WebView real já está sobre a prévia. Não desenhar um bloco opaco
+                    // atrás dela, nem enviar o placeholder para o vídeo ao vivo.
+                    if (!hasFrame && !isLiveStream && layer.url.isBlank()) {
                         paint.style = Paint.Style.FILL
                         paint.color = Color.argb(215, 10, 26, 52)
                         canvas.drawRoundRect(box, 10f, 10f, paint)

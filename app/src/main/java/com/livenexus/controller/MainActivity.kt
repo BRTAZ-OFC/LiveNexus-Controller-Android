@@ -1267,7 +1267,16 @@ class MainActivity : Activity() {
             view.setBackgroundColor(Color.TRANSPARENT)
             view.settings.javaScriptEnabled = true
             view.settings.domStorageEnabled = true
-            view.webViewClient = WebViewClient()
+            view.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(web: WebView?, url: String?) {
+                    super.onPageFinished(web, url)
+                    if (web != null) {
+                        BrowserSourceTransparency.apply(web) {
+                            if (web === captureBrowserView) web.alpha = 1f
+                        }
+                    }
+                }
+            }
             view.isVerticalScrollBarEnabled = false
             view.isHorizontalScrollBarEnabled = false
 
@@ -1303,13 +1312,21 @@ class MainActivity : Activity() {
             val stageH = stage?.height() ?: height.toFloat()
             val w = (stageW * layer.width).toInt().coerceAtLeast(1)
             val h = (stageH * layer.height).toInt().coerceAtLeast(1)
-            web.layoutParams = FrameLayout.LayoutParams(w, h).apply {
-                leftMargin = (stageLeft + stageW * layer.x).toInt()
-                topMargin = (stageTop + stageH * layer.y).toInt()
+            val targetLeft = (stageLeft + stageW * layer.x).toInt()
+            val targetTop = (stageTop + stageH * layer.y).toInt()
+            val current = web.layoutParams as? FrameLayout.LayoutParams
+            // Evita um novo requestLayout a cada atualização do preview sem alteração real.
+            if (current == null || current.width != w || current.height != h ||
+                current.leftMargin != targetLeft || current.topMargin != targetTop) {
+                web.layoutParams = FrameLayout.LayoutParams(w, h).apply {
+                    leftMargin = targetLeft
+                    topMargin = targetTop
+                }
             }
         }
         if (captureBrowserUrl != formattedUrl) {
             captureBrowserUrl = formattedUrl
+            web.alpha = 0f // Evita mostrar fundo branco durante a navegação.
             web.loadUrl(formattedUrl)
         }
     }

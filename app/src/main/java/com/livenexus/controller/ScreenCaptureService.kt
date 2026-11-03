@@ -317,7 +317,9 @@ class ScreenCaptureService : Service() {
                     layers = layers,
                     screenFrame = screenSourceBitmap,
                     isLiveStream = true,
-                    browserFrameProvider = { id -> browserEngine?.getFrame(id) }
+                    browserFrameDrawer = { id, targetCanvas, targetRect, paint ->
+                        browserEngine?.drawFrame(id, targetCanvas, targetRect, paint) == true
+                    }
                 )
             }
             compositor = newCompositor
@@ -770,7 +772,9 @@ class ScreenCaptureService : Service() {
                         layers = layers,
                         screenFrame = screenSourceBitmap,
                         isLiveStream = true,
-                        browserFrameProvider = { id -> browserEngine?.getFrame(id) }
+                        browserFrameDrawer = { id, targetCanvas, targetRect, paint ->
+                        browserEngine?.drawFrame(id, targetCanvas, targetRect, paint) == true
+                    }
                     )
                 }
                 compositor = sceneComp
