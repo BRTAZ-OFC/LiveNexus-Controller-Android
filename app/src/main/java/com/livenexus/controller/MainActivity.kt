@@ -1271,9 +1271,8 @@ class MainActivity : Activity() {
                 override fun onPageFinished(web: WebView?, url: String?) {
                     super.onPageFinished(web, url)
                     if (web != null) {
-                        BrowserSourceTransparency.apply(web) {
-                            if (web === captureBrowserView) web.alpha = 1f
-                        }
+                        // Não condicionar a visibilidade do conteúdo ao callback JavaScript.
+                        BrowserSourceTransparency.apply(web)
                     }
                 }
             }
@@ -1326,7 +1325,6 @@ class MainActivity : Activity() {
         }
         if (captureBrowserUrl != formattedUrl) {
             captureBrowserUrl = formattedUrl
-            web.alpha = 0f // Evita mostrar fundo branco durante a navegação.
             web.loadUrl(formattedUrl)
         }
     }

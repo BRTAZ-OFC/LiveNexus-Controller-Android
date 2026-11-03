@@ -139,10 +139,13 @@ class BrowserSourceEngine(private val context: Context) {
 
                 override fun onPageFinished(view: WebView?, finishedUrl: String?) {
                     super.onPageFinished(view, finishedUrl)
-                    // Evita publicar o fundo HTML opaco antes de injetar a transparência.
+                    // A captura não pode depender do callback evaluateJavascript:
+                    // mesmo se o callback falhar, imagens e widgets devem continuar visíveis.
+                    if (isRunning && webViews[layer.id] === webView) {
+                        readyLayers.add(layer.id)
+                    }
                     BrowserSourceTransparency.apply(webView) {
                         if (isRunning && webViews[layer.id] === webView) {
-                            readyLayers.add(layer.id)
                             val dim = dimensions[layer.id] ?: Pair(w, h)
                             captureFrame(layer.id, webView, dim.first, dim.second)
                         }

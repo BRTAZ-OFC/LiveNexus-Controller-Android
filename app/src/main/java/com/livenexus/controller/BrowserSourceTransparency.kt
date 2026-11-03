@@ -6,7 +6,7 @@ import android.webkit.WebView
 
 /**
  * A transparência de uma WebView não remove o background HTML definido pela página.
- * Aplica transparência somente aos contêineres raiz do Browser Source;
+ * Aplica transparência somente ao fundo estrutural de HTML e BODY;
  * elementos internos (cards, texto, alertas, imagens) permanecem intactos.
  */
 internal object BrowserSourceTransparency {
@@ -22,10 +22,11 @@ internal object BrowserSourceTransparency {
             if (!style) {
                 style = doc.createElement('style');
                 style.id = id;
-                style.textContent = 'html, body, #root { background-color: transparent !important; background-image: none !important; }';
+                // Apenas o fundo estrutural; não apagar imagens ou fundos de widgets em #root.
+                style.textContent = 'html, body { background-color: transparent !important; background-image: none !important; }';
                 (doc.head || root).appendChild(style);
             }
-            [root, doc.body, doc.getElementById('root')].forEach(function(element) {
+            [root, doc.body].forEach(function(element) {
                 if (element) {
                     element.style.setProperty('background-color', 'transparent', 'important');
                     element.style.setProperty('background-image', 'none', 'important');
