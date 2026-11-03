@@ -943,18 +943,11 @@ class MainActivity : Activity() {
         capturePrefs.getString("capture_orientation", "horizontal") == "vertical"
 
     private fun syncActivityOrientationWithCaptureMode() {
-        val shouldAlignOrientation = (page == 1 || page == 2 || ScreenCaptureService.isCapturing || ScreenCaptureService.isLiveStreaming)
-        val desiredOrientation = if (shouldAlignOrientation) {
-            if (isVerticalCaptureMode()) {
-                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-            } else {
-                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            }
-        } else {
-            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        }
-        if (requestedOrientation != desiredOrientation) {
-            requestedOrientation = desiredOrientation
+        // O APK acompanha a rotação física do aparelho via sensor (quando o usuário vira o celular).
+        // A alternância do modelo de captura (Vertical 9:16 vs Horizontal 16:9) altera exclusivamente
+        // o canvas interno, sem forçar rotação do aparelho.
+        if (requestedOrientation != android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED) {
+            requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
     }
 
@@ -967,7 +960,7 @@ class MainActivity : Activity() {
         captureCanvas?.isVertical = nextVertical
         updateCaptureBrowserSource()
         val label = if (nextVertical) "Vertical (9:16)" else "Horizontal (16:9)"
-        Toast.makeText(this, "Modelo de captura alterado para: $label", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Canvas alterado para: $label", Toast.LENGTH_SHORT).show()
         if (page == 1) render()
     }
 
