@@ -16,6 +16,8 @@ import android.os.Looper
 import android.os.Message
 import android.provider.Settings
 import android.view.Gravity
+import android.view.GestureDetector
+import android.view.MotionEvent
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
@@ -982,10 +984,239 @@ class MainActivity : Activity() {
         updateCaptureBrowserSource()
     }
 
+    private fun normalizeUrl(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) return ""
+        if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
+            return trimmed
+        }
+        return "https://$trimmed"
+    }
+
+    private fun handleLayerDoubleClick(layer: CaptureLayer) {
+        when (layer.type) {
+            "browser" -> openBrowserSourceEditDialog(layer)
+            "text" -> openTextSourceEditDialog(layer)
+            "screen" -> {
+                Toast.makeText(this, "Captura de tela ativa.", Toast.LENGTH_SHORT).show()
+                if (!ScreenCaptureService.isCapturing) {
+                    ensureScreenCaptureStartedForActiveScene(forcePrompt = true)
+                }
+            }
+            else -> openBrowserSourceEditDialog(layer)
+        }
+    }
+
+    private fun openBrowserSourceEditDialog(layer: CaptureLayer, onDismiss: (() -> Unit)? = null) {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+            background = shape(Color.rgb(15, 14, 32), NeonTheme.purple, 14)
+        }
+
+        val titleView = text("Propriedades do Browser Source", 16f, NeonTheme.cyan).apply {
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(0, 0, 0, dp(12))
+        }
+        root.addView(titleView)
+
+        // Campo Nome
+        root.addView(text("Nome da Fonte:", 12.5f, Color.rgb(200, 200, 220)).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        val nameInput = EditText(this).apply {
+            setText(layer.name)
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            background = shape(Color.rgb(22, 20, 48), NeonTheme.purple, 8)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        root.addView(nameInput, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(12) })
+
+        // Campo URL
+        root.addView(text("URL da Página (Browser Source):", 12.5f, Color.rgb(200, 200, 220)).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        val urlInput = EditText(this).apply {
+            setText(layer.url)
+            hint = "https://.../alertas, chat ou overlay"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            background = shape(Color.rgb(22, 20, 48), NeonTheme.purple, 8)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        root.addView(urlInput, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(8) })
+
+        // Ações Rápidas (Colar, Limpar, Preset)
+        val quickActions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        fun smallButton(label: String, color: Int = NeonTheme.purple, onClick: () -> Unit): TextView = TextView(this).apply {
+            text = label
+            textSize = 11.5f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            gravity = Gravity.CENTER
+            background = shape(Color.argb(160, 30, 24, 60), color, 6)
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            setOnClickListener { onClick() }
+        }
+
+        val pasteBtn = smallButton("📋 Colar URL", NeonTheme.cyan) {
+            val clip = (getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)?.primaryClip
+            if (clip != null && clip.itemCount > 0) {
+                val pasted = clip.getItemAt(0)?.text?.toString()?.trim() ?: ""
+                if (pasted.isNotEmpty()) {
+                    urlInput.setText(pasted)
+                    urlInput.setSelection(urlInput.text.length)
+                }
+            } else {
+                Toast.makeText(this, "Área de transferência vazia.", Toast.LENGTH_SHORT).show()
+            }
+        }
+        quickActions.addView(pasteBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { rightMargin = dp(8) })
+
+        val clearBtn = smallButton("Limpar", Color.GRAY) {
+            urlInput.setText("")
+        }
+        quickActions.addView(clearBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { rightMargin = dp(8) })
+
+        val overlayPresetBtn = smallButton("LiveNexus Overlay", NeonTheme.purple) {
+            val liveNexusUrl = "${LiveNexusApi.baseUrl}/cenarios/receiver"
+            urlInput.setText(liveNexusUrl)
+            urlInput.setSelection(urlInput.text.length)
+        }
+        quickActions.addView(overlayPresetBtn)
+
+        root.addView(quickActions, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(14) })
+
+        // Ferramentas de ajuste e recarregamento
+        val toolRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val fitScreenBtn = smallButton("Tela Cheia (100%)", NeonTheme.blue) {
+            layer.x = 0f
+            layer.y = 0f
+            layer.width = 1f
+            layer.height = 1f
+            persistCaptureScenes()
+            refreshCaptureCanvas()
+            Toast.makeText(this, "Browser Source ajustado para tela cheia.", Toast.LENGTH_SHORT).show()
+        }
+        toolRow.addView(fitScreenBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { rightMargin = dp(8) })
+
+        val reloadBtn = smallButton("🔄 Recarregar", NeonTheme.cyan) {
+            captureBrowserUrl = null
+            captureBrowserView?.reload()
+            Toast.makeText(this, "Página recarregada.", Toast.LENGTH_SHORT).show()
+        }
+        toolRow.addView(reloadBtn)
+
+        root.addView(toolRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(16) })
+
+        AlertDialog.Builder(this)
+            .setView(root)
+            .setPositiveButton("Salvar") { _, _ ->
+                val newName = nameInput.text.toString().trim()
+                val rawUrl = urlInput.text.toString().trim()
+                layer.name = if (newName.isNotBlank()) newName else "Browser Source"
+                layer.url = if (rawUrl.isNotBlank()) normalizeUrl(rawUrl) else ""
+                persistCaptureScenes()
+                refreshCaptureCanvas()
+                onDismiss?.invoke()
+                Toast.makeText(this, "Browser Source salvo com sucesso!", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Fechar") { _, _ ->
+                onDismiss?.invoke()
+            }
+            .setNeutralButton("Excluir") { _, _ ->
+                val scene = activeCaptureScene()
+                scene?.sources?.remove(layer)
+                if (activeCaptureLayerId == layer.id) {
+                    activeCaptureLayerId = scene?.sources?.lastOrNull()?.id
+                }
+                persistCaptureScenes()
+                refreshCaptureCanvas()
+                onDismiss?.invoke()
+                Toast.makeText(this, "Browser Source removido.", Toast.LENGTH_SHORT).show()
+            }
+            .show()
+    }
+
+    private fun openTextSourceEditDialog(layer: CaptureLayer, onDismiss: (() -> Unit)? = null) {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+            background = shape(Color.rgb(15, 14, 32), NeonTheme.purple, 14)
+        }
+        root.addView(text("Editar Fonte de Texto", 16f, NeonTheme.cyan).apply {
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(0, 0, 0, dp(12))
+        })
+        root.addView(text("Conteúdo do Texto:", 12.5f, Color.rgb(200, 200, 220)).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        val textInput = EditText(this).apply {
+            setText(layer.name)
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            background = shape(Color.rgb(22, 20, 48), NeonTheme.purple, 8)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        root.addView(textInput, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(16) })
+
+        AlertDialog.Builder(this)
+            .setView(root)
+            .setPositiveButton("Salvar") { _, _ ->
+                val content = textInput.text.toString().trim()
+                if (content.isNotBlank()) {
+                    layer.name = content.take(80)
+                    persistCaptureScenes()
+                    refreshCaptureCanvas()
+                    onDismiss?.invoke()
+                }
+            }
+            .setNegativeButton("Fechar") { _, _ -> onDismiss?.invoke() }
+            .setNeutralButton("Excluir") { _, _ ->
+                val scene = activeCaptureScene()
+                scene?.sources?.remove(layer)
+                if (activeCaptureLayerId == layer.id) {
+                    activeCaptureLayerId = scene?.sources?.lastOrNull()?.id
+                }
+                persistCaptureScenes()
+                refreshCaptureCanvas()
+                onDismiss?.invoke()
+            }
+            .show()
+    }
+
     private fun updateCaptureBrowserSource() {
         val host = captureCanvasHost ?: return
         val layer = activeCaptureScene()?.sources?.lastOrNull {
-            it.type == "browser" && it.visible && it.url.startsWith("https://")
+            it.type == "browser" && it.visible && it.url.isNotBlank()
         }
         if (layer == null) {
             captureBrowserView?.let { host.removeView(it); it.destroy() }
@@ -993,6 +1224,7 @@ class MainActivity : Activity() {
             captureBrowserUrl = null
             return
         }
+        val formattedUrl = normalizeUrl(layer.url)
         val web = captureBrowserView ?: WebView(this).also { view ->
             view.setBackgroundColor(Color.TRANSPARENT)
             view.settings.javaScriptEnabled = true
@@ -1000,9 +1232,25 @@ class MainActivity : Activity() {
             view.webViewClient = WebViewClient()
             view.isVerticalScrollBarEnabled = false
             view.isHorizontalScrollBarEnabled = false
+
+            val webGestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+                override fun onDown(e: MotionEvent): Boolean = true
+                override fun onDoubleTap(e: MotionEvent): Boolean {
+                    val currentLayer = activeCaptureScene()?.sources?.firstOrNull { it.id == layer.id } ?: layer
+                    openBrowserSourceEditDialog(currentLayer)
+                    return true
+                }
+            })
+
             view.setOnTouchListener { _, event ->
-                captureCanvas?.dispatchTouchEvent(event)
-                true
+                if (webGestureDetector.onTouchEvent(event)) {
+                    return@setOnTouchListener true
+                }
+                val offsetEvent = MotionEvent.obtain(event)
+                offsetEvent.offsetLocation(view.left.toFloat(), view.top.toFloat())
+                val handled = captureCanvas?.dispatchTouchEvent(offsetEvent) ?: false
+                offsetEvent.recycle()
+                handled
             }
             host.addView(view)
             captureBrowserView = view
@@ -1022,9 +1270,9 @@ class MainActivity : Activity() {
                 topMargin = (stageTop + stageH * layer.y).toInt()
             }
         }
-        if (captureBrowserUrl != layer.url) {
-            captureBrowserUrl = layer.url
-            web.loadUrl(layer.url)
+        if (captureBrowserUrl != formattedUrl) {
+            captureBrowserUrl = formattedUrl
+            web.loadUrl(formattedUrl)
         }
     }
 
@@ -1416,6 +1664,9 @@ class MainActivity : Activity() {
             onChange = {
                 persistCaptureScenes()
                 refreshCaptureCanvas()
+            }
+            onLayerDoubleClick = { layer ->
+                handleLayerDoubleClick(layer)
             }
         }
         captureCanvas = canvas
@@ -1855,38 +2106,18 @@ class MainActivity : Activity() {
                                         input.requestFocus()
                                     }
                                     2 -> {
-                                        val input = EditText(this@MainActivity).apply {
-                                            hint = "https://.../cenarios/receiver/..."
-                                            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
-                                            setSingleLine(true)
-                                            setTextColor(Color.WHITE)
-                                            setHintTextColor(Color.GRAY)
-                                            background = shape(Color.rgb(14, 18, 44), NeonTheme.purple, 10)
-                                            setPadding(dp(12), dp(10), dp(12), dp(10))
+                                        val newLayer = CaptureLayer(
+                                            java.util.UUID.randomUUID().toString(), "browser", "Browser Source",
+                                            0f, 0f, 1f, 1f, url = ""
+                                        )
+                                        scene.sources.add(newLayer)
+                                        activeCaptureLayerId = newLayer.id
+                                        persistCaptureScenes()
+                                        refreshCaptureCanvas()
+                                        populate()
+                                        openBrowserSourceEditDialog(newLayer) {
+                                            populate()
                                         }
-                                        AlertDialog.Builder(this@MainActivity)
-                                            .setTitle("Browser Source - URL")
-                                            .setView(input)
-                                            .setPositiveButton("Adicionar") { _, _ ->
-                                                val url = input.text.toString().trim()
-                                                val uri = Uri.parse(url)
-                                                if (uri.scheme != "https" || uri.host.isNullOrBlank()) {
-                                                    Toast.makeText(this@MainActivity, "Informe uma URL HTTPS válida.", Toast.LENGTH_LONG).show()
-                                                } else {
-                                                    val layer = CaptureLayer(
-                                                        java.util.UUID.randomUUID().toString(), "browser", "Browser Source",
-                                                        0f, 0f, 1f, 1f, url = url
-                                                    )
-                                                    scene.sources.add(layer)
-                                                    activeCaptureLayerId = layer.id
-                                                    persistCaptureScenes()
-                                                    refreshCaptureCanvas()
-                                                    populate()
-                                                }
-                                            }
-                                            .setNegativeButton("Cancelar", null)
-                                            .show()
-                                        input.requestFocus()
                                     }
                                 }
                             }
@@ -1940,6 +2171,22 @@ class MainActivity : Activity() {
                             }
                         }
                         item.addView(nameLabel, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                        // Botão Editar (✎) para Browser Source e Texto
+                        if (layer.type == "browser" || layer.type == "text") {
+                            val editBtn = text("✎", 16f, NeonTheme.cyan).apply {
+                                gravity = Gravity.CENTER
+                                setPadding(dp(6), dp(4), dp(6), dp(4))
+                                setOnClickListener {
+                                    if (layer.type == "browser") {
+                                        openBrowserSourceEditDialog(layer) { populate() }
+                                    } else {
+                                        openTextSourceEditDialog(layer) { populate() }
+                                    }
+                                }
+                            }
+                            item.addView(editBtn)
+                        }
 
                         // Visibilidade
                         val visBtn = text(if (layer.visible) "◉" else "⊘", 16f, if (layer.visible) NeonTheme.purple else Color.GRAY).apply {

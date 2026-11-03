@@ -129,16 +129,27 @@ object SceneRenderer {
                 }
                 "browser" -> {
                     paint.style = Paint.Style.FILL
-                    paint.color = Color.argb(200, 12, 36, 68)
+                    paint.color = Color.argb(215, 10, 26, 52)
                     canvas.drawRoundRect(box, 10f, 10f, paint)
                     borderPaint.color = NeonTheme.cyan
                     borderPaint.strokeWidth = 2f
                     canvas.drawRoundRect(box, 10f, 10f, borderPaint)
 
                     textPaint.color = NeonTheme.cyan
-                    textPaint.textSize = (box.height() * 0.4f).coerceIn(12f, 32f)
-                    val textY = box.centerY() - (textPaint.descent() + textPaint.ascent()) / 2
-                    canvas.drawText("🌐 ${layer.name.take(40)}", box.left + 14f, textY, textPaint)
+                    textPaint.textSize = (box.height() * 0.28f).coerceIn(12f, 26f)
+                    val title = "🌐 ${layer.name.take(30)}"
+                    val hasSubtitle = box.height() >= 36f
+                    val titleY = if (hasSubtitle) box.centerY() - 6f else box.centerY() - (textPaint.descent() + textPaint.ascent()) / 2
+                    canvas.drawText(title, box.left + 14f, titleY, textPaint)
+
+                    if (hasSubtitle) {
+                        val subPaint = Paint(textPaint).apply {
+                            color = if (layer.url.isNotBlank()) Color.rgb(180, 225, 255) else Color.rgb(255, 185, 90)
+                            textSize = (textPaint.textSize * 0.75f).coerceIn(10f, 18f)
+                        }
+                        val subText = if (layer.url.isNotBlank()) layer.url.take(45) else "Duplo clique para adicionar URL"
+                        canvas.drawText(subText, box.left + 14f, titleY + subPaint.textSize + 8f, subPaint)
+                    }
                 }
                 else -> {
                     paint.style = Paint.Style.FILL

@@ -45,6 +45,40 @@ class CaptureSceneCanvas(context: Context) : View(context) {
     var onSelection: ((String?) -> Unit)? = null
     var onChange: (() -> Unit)? = null
     var onScreenSourceTap: (() -> Unit)? = null
+    var onLayerDoubleClick: ((CaptureLayer) -> Unit)? = null
+
+    private var lastTapTime = 0L
+    private var lastTapX = 0f
+    private var lastTapY = 0f
+    private var lastTappedLayerId: String? = null
+    private var lastTriggeredDoubleClickTime = 0L
+
+    private val gestureDetector = android.view.GestureDetector(context, object : android.view.GestureDetector.SimpleOnGestureListener() {
+        override fun onDown(e: MotionEvent): Boolean = true
+
+        override fun onDoubleTap(e: MotionEvent): Boolean {
+            val x = e.x
+            val y = e.y
+            val target = layers.asReversed().firstOrNull {
+                it.visible && bounds(it).contains(x, y)
+            }
+            if (target != null) {
+                selectedLayerId = target.id
+                onSelection?.invoke(target.id)
+                triggerLayerDoubleClick(target)
+                return true
+            }
+            return false
+        }
+    })
+
+    fun triggerLayerDoubleClick(layer: CaptureLayer) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastTriggeredDoubleClickTime > 300L) {
+            lastTriggeredDoubleClickTime = now
+            onLayerDoubleClick?.invoke(layer)
+        }
+    }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val area = RectF()
@@ -138,6 +172,7 @@ class CaptureSceneCanvas(context: Context) : View(context) {
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (area.isEmpty) return false
+        gestureDetector.onTouchEvent(event)
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 val x = event.x
@@ -238,6 +273,19 @@ class CaptureSceneCanvas(context: Context) : View(context) {
                 val tappedLayer = moving
                 if (tappedLayer != null && touched) {
                     onChange?.invoke()
+                } else if (tappedLayer != null && !touched) {
+                    val now = android.os.SystemClock.uptimeMillis()
+                    val dist = hypot(event.x - lastTapX, event.y - lastTapY)
+                    if (tappedLayer.id == lastTappedLayerId && (now - lastTapTime) < 450L && dist < handleSize * 2f) {
+                        lastTapTime = 0L
+                        lastTappedLayerId = null
+                        triggerLayerDoubleClick(tappedLayer)
+                    } else {
+                        lastTapTime = now
+                        lastTapX = event.x
+                        lastTapY = event.y
+                        lastTappedLayerId = tappedLayer.id
+                    }
                 }
                 moving = null
                 multiTouch = false
