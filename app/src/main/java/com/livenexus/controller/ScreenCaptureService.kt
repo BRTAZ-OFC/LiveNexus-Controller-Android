@@ -76,6 +76,13 @@ class ScreenCaptureService : Service() {
             }
         }
 
+        /** Fonte de preview ao vivo sem segunda WebView / segundo Consumer. */
+        fun drawBrowserPreviewFrame(id: String, canvas: Canvas, rect: RectF, paint: Paint): Boolean {
+            val service = activeInstance ?: return false
+            if (!isConnecting && !isLiveStreaming) return false
+            return service.browserEngine?.drawFrame(id, canvas, rect, paint) == true
+        }
+
         fun updateCaptureOrientation(vertical: Boolean) {
             val changed = (isVerticalMode != vertical)
             isVerticalMode = vertical
@@ -702,6 +709,22 @@ class ScreenCaptureService : Service() {
         stopServiceOnFailure: Boolean
     ) {
         stopStreamingOnly()
+        // PRISM-like: preparar a fonte web ANTES de esperar RTMP conectar.
+        // O encoder e o publicador continuam exatamente no fluxo original.
+        val earlyLayers = activeSceneLayers ?: loadPersistedSceneLayers(this)
+        if (earlyLayers.any { it.type == "browser" && it.visible && it.url.isNotBlank() }) {
+            try {
+                val engine = BrowserSourceEngine(this)
+                engine.start()
+                browserEngine = engine
+                engine.updateLayers(earlyLayers, evenWidth, evenHeight)
+                Log.i(TAG, "Browser Source inicializado em paralelo à conexão RTMP")
+            } catch (error: Throwable) {
+                Log.w(TAG, "Pré-inicialização de Browser Source indisponível", error)
+                try { browserEngine?.stop() } catch (_: Throwable) {}
+                browserEngine = null
+            }
+        }
         lastError = null
         isLiveStreaming = false
         activePlatforms = emptyList()
@@ -750,10 +773,13 @@ class ScreenCaptureService : Service() {
 
                 // Compositor de Cenário do LiveNEXUS: transmite o canvas do Editor de Cena.
                 val initialLayers = activeSceneLayers ?: loadPersistedSceneLayers(this)
-                val bEngine = BrowserSourceEngine(this@ScreenCaptureService)
-                browserEngine = bEngine
-                bEngine.start()
-                bEngine.updateLayers(initialLayers, evenWidth, evenHeight)
+                // Reutiliza a mesma WebView e sessão RTC já iniciadas, sem recarga.
+                if (browserEngine == null && initialLayers.any {
+                        it.type == "browser" && it.visible && it.url.isNotBlank()
+                    }) {
+                    browserEngine = BrowserSourceEngine(this@ScreenCaptureService).also { it.start() }
+                }
+                browserEngine?.updateLayers(initialLayers, evenWidth, evenHeight)
 
                 val sceneComp = SceneCompositor(
                     outputSurface = encoder.surface,
@@ -949,7 +975,8 @@ class ScreenCaptureService : Service() {
                             raw.optDouble("height", 1.0).toFloat().coerceIn(0.08f, 3f),
                             raw.optBoolean("visible", true),
                             raw.optBoolean("locked", false),
-                            raw.optString("url", "")
+                            raw.optString("url", ""),
+                            raw.optBoolean("desktop_mode", true)
                         ))
                     }
                 }

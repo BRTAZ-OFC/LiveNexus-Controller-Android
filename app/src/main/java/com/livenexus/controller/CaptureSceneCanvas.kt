@@ -23,7 +23,8 @@ data class CaptureLayer(
     var height: Float = 0.65f,
     var visible: Boolean = true,
     var locked: Boolean = false,
-    var url: String = ""
+    var url: String = "",
+    var desktopMode: Boolean = true
 )
 
 /** Canvas visual de cenas: arrastar para mover e usar o canto inferior direito para redimensionar. */
@@ -46,6 +47,8 @@ class CaptureSceneCanvas(context: Context) : View(context) {
     var onChange: (() -> Unit)? = null
     var onScreenSourceTap: (() -> Unit)? = null
     var onLayerDoubleClick: ((CaptureLayer) -> Unit)? = null
+    // Exibe a mesma imagem da WebView da transmissão, sem iniciar outro Consumer RTC.
+    var browserFrameDrawer: ((String, Canvas, RectF, Paint) -> Boolean)? = null
 
     private var lastTapTime = 0L
     private var lastTapX = 0f
@@ -150,7 +153,8 @@ class CaptureSceneCanvas(context: Context) : View(context) {
             screenFrame = frame,
             isLiveStream = false,
             selectedLayerId = selectedLayerId,
-            handleSize = handleSize
+            handleSize = handleSize,
+            browserFrameDrawer = browserFrameDrawer
         )
         canvas.restore()
     }

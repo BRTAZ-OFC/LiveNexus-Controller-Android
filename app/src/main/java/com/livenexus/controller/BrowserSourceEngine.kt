@@ -39,17 +39,35 @@ import kotlin.math.sqrt
  * Não usa MediaProjection, rede adicional ou bibliotecas externas.
  */
 class BrowserSourceEngine(private val context: Context) {
-    private companion object {
-        const val TAG = "BrowserSourceEngine"
-        const val FRAME_INTERVAL_MS = 66L
-        const val MAX_PIXELS = 1920 * 1080
+    companion object {
+        private const val TAG = "BrowserSourceEngine"
+        private const val FRAME_INTERVAL_MS = 66L
+        private const val MAX_PIXELS = 1920 * 1080
         // Cor-base incomum usada quando a tela virtual entrega pixels opacos.
         // O fundo de HTML/BODY é transparente; imagens e elementos não são alterados.
-        const val MATTE_R = 13
-        const val MATTE_G = 4
-        const val MATTE_B = 27
-        const val KEY_TOLERANCE = 2
-        val MATTE = Color.rgb(MATTE_R, MATTE_G, MATTE_B)
+        private const val MATTE_R = 13
+        private const val MATTE_G = 4
+        private const val MATTE_B = 27
+        private const val KEY_TOLERANCE = 2
+        private val MATTE = Color.rgb(MATTE_R, MATTE_G, MATTE_B)
+        private val CHROME_VERSION = Regex("""Chrome/([0-9]+(?:\.[0-9]+)*)""")
+
+        /** Modo de compatibilidade visual com o Browser Source para PC.
+         * Usa a versão real do Chromium do Android System WebView (não incorpora CEF).
+         */
+        internal fun configureBrowser(webView: WebView, desktopMode: Boolean) {
+            val settings = webView.settings
+            settings.useWideViewPort = true
+            settings.loadWithOverviewMode = true
+            val defaultAgent = WebSettings.getDefaultUserAgent(webView.context)
+            val version = CHROME_VERSION.find(defaultAgent)?.groupValues?.getOrNull(1)
+            settings.userAgentString = if (desktopMode && !version.isNullOrBlank()) {
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/$version Safari/537.36"
+            } else {
+                defaultAgent
+            }
+        }
     }
 
     private class Frames(val width: Int, val height: Int) {
@@ -69,6 +87,7 @@ class BrowserSourceEngine(private val context: Context) {
     private class BrowserLayer(
         val id: String,
         var url: String,
+        var desktopMode: Boolean,
         val width: Int,
         val height: Int,
         val reader: ImageReader,
@@ -78,6 +97,7 @@ class BrowserSourceEngine(private val context: Context) {
     ) {
         @Volatile var active = true
         var lastFrameAt = 0L // lido/escrito somente na thread de ImageReader
+        var loadStartedAt = 0L // thread principal; diagnóstico do tempo de carregamento
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -132,9 +152,12 @@ class BrowserSourceEngine(private val context: Context) {
                 // A tela virtual deve ser reconstruída apenas quando a resolução muda.
                 if (existing == null || existing.width != width || existing.height != height) {
                     if (existing != null) removeLayer(source.id)
-                    createLayer(source.id, url, width, height)
-                } else if (existing.url != url) {
+                    createLayer(source.id, url, width, height, source.desktopMode)
+                } else if (existing.url != url || existing.desktopMode != source.desktopMode) {
                     existing.url = url
+                    existing.desktopMode = source.desktopMode
+                    configureBrowser(existing.webView, source.desktopMode)
+                    existing.loadStartedAt = SystemClock.uptimeMillis()
                     synchronized(frameLock) {
                         frames[source.id]?.let {
                             it.front.eraseColor(Color.TRANSPARENT)
@@ -153,7 +176,7 @@ class BrowserSourceEngine(private val context: Context) {
         return if (url.startsWith("https://", true) || url.startsWith("http://", true)) url else "https://$url"
     }
 
-    private fun createLayer(id: String, url: String, width: Int, height: Int) {
+    private fun createLayer(id: String, url: String, width: Int, height: Int, sourceDesktopMode: Boolean) {
         val handler = readerHandler ?: return
         var reader: ImageReader? = null
         var virtualDisplay: VirtualDisplay? = null
@@ -187,6 +210,7 @@ class BrowserSourceEngine(private val context: Context) {
                 webChromeClient = WebChromeClient()
             }
             val browser = webView
+            configureBrowser(browser, desktopMode = sourceDesktopMode)
             root.addView(browser, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
             ))
@@ -200,9 +224,21 @@ class BrowserSourceEngine(private val context: Context) {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
             )
 
-            val layer = BrowserLayer(id, url, width, height, reader, virtualDisplay, presentation, browser)
+            val layer = BrowserLayer(id, url, sourceDesktopMode, width, height, reader, virtualDisplay, presentation, browser)
             browser.webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
+                    super.onPageStarted(view, pageUrl, favicon)
+                    if (layer.active && running) {
+                        layer.loadStartedAt = SystemClock.uptimeMillis()
+                        Log.i(TAG, "Navegação Browser Source iniciada: " + id)
+                    }
+                }
+
                 override fun onPageFinished(view: WebView?, pageUrl: String?) {
+                    if (layer.active && running) {
+                        Log.i(TAG, "Página Browser Source carregada: " + id +
+                            " em " + (SystemClock.uptimeMillis() - layer.loadStartedAt) + " ms")
+                    }
                     super.onPageFinished(view, pageUrl)
                     if (layer.active && running && view === layer.webView) {
                         BrowserSourceTransparency.apply(layer.webView)
@@ -214,7 +250,8 @@ class BrowserSourceEngine(private val context: Context) {
                 onImageAvailable(layer, source)
             }, handler)
             browser.loadUrl(url)
-            Log.i(TAG, "Browser Source na tela virtual: " + id + " (" + width + "x" + height + ")")
+            Log.i(TAG, "Browser Source na tela virtual: " + id + " (" + width + "x" + height +
+                ", modo PC=" + sourceDesktopMode + ")")
         } catch (error: Throwable) {
             Log.e(TAG, "Falha ao criar Browser Source: " + id, error)
             layers.remove(id)?.active = false

@@ -77,6 +77,15 @@ class MainActivity : Activity() {
     private var captureBrowserView: WebView? = null
     private var captureBrowserUrl: String? = null
 
+    private fun releaseCaptureBrowserPreview() {
+        val browser = captureBrowserView ?: return
+        captureBrowserView = null
+        captureBrowserUrl = null
+        try { browser.stopLoading() } catch (_: Throwable) {}
+        try { (browser.parent as? ViewGroup)?.removeView(browser) } catch (_: Throwable) {}
+        try { browser.destroy() } catch (_: Throwable) {}
+    }
+
     private open inner class LoginWebViewClient : WebViewClient() {
         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
             val destination = request?.url ?: return null
@@ -342,8 +351,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         uiHandler.removeCallbacks(captureRefreshRunnable)
         uiHandler.removeCallbacks(transmissionTimerRunnable)
-        captureBrowserView?.let { captureCanvasHost?.removeView(it); it.destroy() }
-        captureBrowserView = null
+        releaseCaptureBrowserPreview()
         panel?.dispose()
         loginDialogs.forEach { it.setOnDismissListener(null) }
         closeLoginBrowsers()
@@ -668,6 +676,10 @@ class MainActivity : Activity() {
         progress.show()
 
         try {
+            // A WebView do editor não pode disputar o mesmo runtimeId com
+            // o Browser Source da transmissão. O canvas mostrará os frames do Service.
+            releaseCaptureBrowserPreview()
+            captureCanvas?.invalidate()
             ScreenCaptureService.updateActiveSceneLayers(activeCaptureScene()?.sources)
             val size = capturePrefs.getInt("max_dimension", 1280)
             val fps = capturePrefs.getInt("capture_fps", 30)
@@ -902,7 +914,8 @@ class MainActivity : Activity() {
                             raw.optDouble("height", .65).toFloat().coerceIn(.08f, 3f),
                             raw.optBoolean("visible", true),
                             raw.optBoolean("locked", false),
-                            raw.optString("url", "")
+                            raw.optString("url", ""),
+                            raw.optBoolean("desktop_mode", true)
                         ))
                     }
                 }
@@ -944,7 +957,8 @@ class MainActivity : Activity() {
                     .put("height", layer.height)
                     .put("visible", layer.visible)
                     .put("locked", layer.locked)
-                    .put("url", layer.url))
+                    .put("url", layer.url)
+                    .put("desktop_mode", layer.desktopMode))
             }
             array.put(JSONObject().put("id", scene.id).put("name", scene.name)
                 .put("sources", sources))
@@ -1139,6 +1153,21 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { bottomMargin = dp(14) })
 
+        // Perfil de navegação desktop usado pelo PRISM/OBS no PC, sem CEF no Android.
+        val desktopModeCheckbox = CheckBox(this).apply {
+            text = "Modo Browser Source PC (teste)"
+            textSize = 12.5f
+            setTextColor(Color.WHITE)
+            isChecked = layer.desktopMode
+        }
+        root.addView(desktopModeCheckbox, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(8) })
+        root.addView(text(
+            "Usa identificação de navegador desktop. Desmarque para voltar ao modo Android.",
+            11f, Color.rgb(180, 175, 205)
+        ).apply { setPadding(0, 0, 0, dp(10)) })
+
         // Ferramentas de ajuste e recarregamento
         val toolRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1177,6 +1206,7 @@ class MainActivity : Activity() {
                 val rawUrl = urlInput.text.toString().trim()
                 layer.name = if (newName.isNotBlank()) newName else "Browser Source"
                 layer.url = if (rawUrl.isNotBlank()) normalizeUrl(rawUrl) else ""
+                layer.desktopMode = desktopModeCheckbox.isChecked
                 persistCaptureScenes()
                 refreshCaptureCanvas()
                 ScreenCaptureService.updateActiveSceneLayers(activeCaptureScene()?.sources)
@@ -1253,13 +1283,17 @@ class MainActivity : Activity() {
 
     private fun updateCaptureBrowserSource() {
         val host = captureCanvasHost ?: return
+        if (ScreenCaptureService.isConnecting || ScreenCaptureService.isLiveStreaming) {
+            // Enquanto transmite, o preview usa os mesmos frames da WebView do Service.
+            // Nunca abrir um segundo Consumer RTC oculto no editor.
+            releaseCaptureBrowserPreview()
+            return
+        }
         val layer = activeCaptureScene()?.sources?.lastOrNull {
             it.type == "browser" && it.visible && it.url.isNotBlank()
         }
         if (layer == null) {
-            captureBrowserView?.let { host.removeView(it); it.destroy() }
-            captureBrowserView = null
-            captureBrowserUrl = null
+            releaseCaptureBrowserPreview()
             return
         }
         val formattedUrl = normalizeUrl(layer.url)
@@ -1323,8 +1357,10 @@ class MainActivity : Activity() {
                 }
             }
         }
-        if (captureBrowserUrl != formattedUrl) {
-            captureBrowserUrl = formattedUrl
+        val identity = "$formattedUrl#desktop=${layer.desktopMode}"
+        if (captureBrowserUrl != identity) {
+            BrowserSourceEngine.configureBrowser(web, layer.desktopMode)
+            captureBrowserUrl = identity
             web.loadUrl(formattedUrl)
         }
     }
@@ -1335,6 +1371,9 @@ class MainActivity : Activity() {
             if (page == 1) {
                 val running = ScreenCaptureService.isCapturing
                 captureCanvas?.frame = if (running) ScreenCaptureService.previewFrame else null
+                if (ScreenCaptureService.isConnecting || ScreenCaptureService.isLiveStreaming) {
+                    captureCanvas?.invalidate()
+                }
             }
             uiHandler.postDelayed(this, 150L)
         }
@@ -1717,6 +1756,9 @@ class MainActivity : Activity() {
             onChange = {
                 persistCaptureScenes()
                 refreshCaptureCanvas()
+            }
+            browserFrameDrawer = { id, canvas, rect, paint ->
+                ScreenCaptureService.drawBrowserPreviewFrame(id, canvas, rect, paint)
             }
             onLayerDoubleClick = { layer ->
                 handleLayerDoubleClick(layer)
@@ -2942,6 +2984,11 @@ class MainActivity : Activity() {
 
     private fun render() {
         if (!authenticated || isDestroyed) return
+        // Cada render substitui a árvore de views; não manter a WebView anterior
+        // executando RTC ao fundo após troca de aba ou rotação.
+        releaseCaptureBrowserPreview()
+        captureCanvasHost = null
+        captureCanvas = null
         ControllerRuntime.signedIn = true
         closeLoginBrowsers()
         panel?.dispose()
