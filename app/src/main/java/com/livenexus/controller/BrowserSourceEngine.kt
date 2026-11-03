@@ -1,266 +1,350 @@
 package com.livenexus.controller
 
+import android.app.Presentation
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.drawable.ColorDrawable
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.Image
+import android.media.ImageReader
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
-import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import java.util.concurrent.ConcurrentHashMap
+import android.widget.FrameLayout
+import kotlin.math.abs
+import kotlin.math.sqrt
 
 /**
- * Motor de Browser Source em segundo plano para o LiveNEXUS.
- * Mantém instâncias de WebView renderizadas offscreen e extrai bitmaps
- * periódicos para compor diretamente no stream ao vivo (RTMP).
+ * Renderiza fontes HTML em uma janela real da tela virtual privada.
+ *
+ * WebView.draw(Canvas(bitmap)) fora de uma janela perde partes do conteúdo
+ * acelerado por hardware. A Presentation mantém o compositor do Chromium
+ * ativo e o ImageReader entrega os frames para o compositor RTMP existente.
+ *
+ * Não usa MediaProjection, rede adicional ou bibliotecas externas.
  */
 class BrowserSourceEngine(private val context: Context) {
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val webViews = ConcurrentHashMap<String, WebView>()
-    // A thread de composição nunca recebe um Bitmap que está sendo redesenhado.
-    // O par de buffers mantém o último frame completo disponível até a próxima troca.
-    private class FramePair(
-        val width: Int,
-        val height: Int,
-        var front: Bitmap,
-        var back: Bitmap
-    )
-    private val frames = HashMap<String, FramePair>()
-    private val frameLock = Any()
-    private val readyLayers = HashSet<String>() // Exclusivo da thread principal.
-    private val activeUrls = ConcurrentHashMap<String, String>()
-    private val dimensions = ConcurrentHashMap<String, Pair<Int, Int>>()
-    @Volatile private var isRunning = false
+    private companion object {
+        const val TAG = "BrowserSourceEngine"
+        const val FRAME_INTERVAL_MS = 66L
+        const val MAX_PIXELS = 1920 * 1080
+        // Cor-base incomum usada quando a tela virtual entrega pixels opacos.
+        // O fundo de HTML/BODY é transparente; imagens e elementos não são alterados.
+        const val MATTE_R = 13
+        const val MATTE_G = 4
+        const val MATTE_B = 27
+        const val KEY_TOLERANCE = 2
+        val MATTE = Color.rgb(MATTE_R, MATTE_G, MATTE_B)
+    }
 
-    private val captureRunnable = object : Runnable {
-        override fun run() {
-            if (!isRunning) return
-            captureAllFrames()
-            mainHandler.postDelayed(this, 66L) // ~15 FPS para overlays/alertas/chat
+    private class Frames(val width: Int, val height: Int) {
+        var front: Bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        var back: Bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        var padded: Bitmap? = null
+        val pixels = IntArray(width * height)
+
+        fun recycle() {
+            front.recycle()
+            back.recycle()
+            padded?.recycle()
+            padded = null
         }
     }
 
+    private class BrowserLayer(
+        val id: String,
+        var url: String,
+        val width: Int,
+        val height: Int,
+        val reader: ImageReader,
+        val virtualDisplay: VirtualDisplay,
+        val presentation: Presentation,
+        val webView: WebView
+    ) {
+        @Volatile var active = true
+        var lastFrameAt = 0L // lido/escrito somente na thread de ImageReader
+    }
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+    // As Presentation/WebView e este mapa são acessados somente na thread principal.
+    private val layers = HashMap<String, BrowserLayer>()
+    // O compositor RTMP só lê o frame dianteiro enquanto o lock está mantido.
+    private val frameLock = Any()
+    private val frames = HashMap<String, Frames>()
+    private var readerThread: HandlerThread? = null
+    private var readerHandler: Handler? = null
+    @Volatile private var running = false
+
     fun start() {
-        if (isRunning) return
-        isRunning = true
-        mainHandler.post {
-            mainHandler.post(captureRunnable)
-        }
-        Log.i("BrowserSourceEngine", "Engine iniciado para renderizar Browser Sources na live")
+        if (running) return
+        running = true
+        val thread = HandlerThread("LiveNexusBrowserFrames").apply { start() }
+        readerThread = thread
+        readerHandler = Handler(thread.looper)
     }
 
     fun stop() {
-        isRunning = false
-        mainHandler.removeCallbacks(captureRunnable)
+        running = false
         mainHandler.post {
             destroyAll()
+            readerHandler = null
+            readerThread?.quitSafely()
+            readerThread = null
         }
-        Log.i("BrowserSourceEngine", "Engine finalizado")
     }
 
-    fun updateLayers(layers: List<CaptureLayer>, stageWidth: Int, stageHeight: Int) {
-        val browserLayers = layers.filter { it.type == "browser" && it.visible && it.url.isNotBlank() }
+    fun updateLayers(sources: List<CaptureLayer>, stageWidth: Int, stageHeight: Int) {
+        val wanted = sources.filter { it.type == "browser" && it.visible && it.url.isNotBlank() }.toList()
         mainHandler.post {
-            if (!isRunning) return@post
-            val currentIds = browserLayers.map { it.id }.toSet()
+            if (!running) return@post
+            val wantedIds = wanted.map { it.id }.toSet()
+            layers.keys.toList().filter { it !in wantedIds }.forEach { removeLayer(it) }
 
-            // Remove layers que foram deletadas ou ocultadas
-            val toRemove = webViews.keys.filter { it !in currentIds }
-            for (id in toRemove) {
-                removeWebView(id)
-            }
+            for (source in wanted) {
+                val url = normalizeUrl(source.url)
+                if (url.isEmpty()) {
+                    removeLayer(source.id)
+                    continue
+                }
+                val rawWidth = (source.width.coerceIn(0.05f, 1f) * stageWidth).toInt().coerceAtLeast(64)
+                val rawHeight = (source.height.coerceIn(0.05f, 1f) * stageHeight).toInt().coerceAtLeast(64)
+                val scale = minOf(1.0, sqrt(MAX_PIXELS.toDouble() / (rawWidth.toDouble() * rawHeight)))
+                val width = (rawWidth * scale).toInt().coerceAtLeast(64)
+                val height = (rawHeight * scale).toInt().coerceAtLeast(64)
+                val existing = layers[source.id]
 
-            for (layer in browserLayers) {
-                val targetW = ((layer.width).coerceIn(0.05f, 1f) * stageWidth).toInt().coerceIn(64, 3840)
-                val targetH = ((layer.height).coerceIn(0.05f, 1f) * stageHeight).toInt().coerceIn(64, 3840)
-                val existing = webViews[layer.id]
-                val prevUrl = activeUrls[layer.id]
-                val prevDim = dimensions[layer.id]
-
-                if (existing == null) {
-                    createAndLoadWebView(layer, targetW, targetH)
-                } else {
-                    if (prevDim == null || prevDim.first != targetW || prevDim.second != targetH) {
-                        dimensions[layer.id] = Pair(targetW, targetH)
-                        existing.measure(
-                            View.MeasureSpec.makeMeasureSpec(targetW, View.MeasureSpec.EXACTLY),
-                            View.MeasureSpec.makeMeasureSpec(targetH, View.MeasureSpec.EXACTLY)
-                        )
-                        existing.layout(0, 0, targetW, targetH)
+                // A tela virtual deve ser reconstruída apenas quando a resolução muda.
+                if (existing == null || existing.width != width || existing.height != height) {
+                    if (existing != null) removeLayer(source.id)
+                    createLayer(source.id, url, width, height)
+                } else if (existing.url != url) {
+                    existing.url = url
+                    synchronized(frameLock) {
+                        frames[source.id]?.let {
+                            it.front.eraseColor(Color.TRANSPARENT)
+                            it.back.eraseColor(Color.TRANSPARENT)
+                        }
                     }
-                    val normalized = normalizeUrl(layer.url)
-                    if (prevUrl != normalized) {
-                        activeUrls[layer.id] = normalized
-                        existing.loadUrl(normalized)
-                    }
+                    existing.webView.loadUrl(url)
                 }
             }
         }
     }
 
     private fun normalizeUrl(raw: String): String {
-        var trimmed = raw.trim().replace("\n", "").replace("\r", "")
-        if (trimmed.isBlank()) return ""
-        if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
-            return trimmed
-        }
-        return "https://$trimmed"
+        val url = raw.trim().replace("\n", "").replace("\r", "")
+        if (url.isBlank()) return ""
+        return if (url.startsWith("https://", true) || url.startsWith("http://", true)) url else "https://$url"
     }
 
-    private fun createAndLoadWebView(layer: CaptureLayer, w: Int, h: Int) {
+    private fun createLayer(id: String, url: String, width: Int, height: Int) {
+        val handler = readerHandler ?: return
+        var reader: ImageReader? = null
+        var virtualDisplay: VirtualDisplay? = null
+        var presentation: Presentation? = null
+        var webView: WebView? = null
         try {
-            val url = normalizeUrl(layer.url)
-            if (url.isBlank()) return
+            reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
+            virtualDisplay = displayManager.createVirtualDisplay(
+                "LiveNEXUS Browser " + id, width, height,
+                context.resources.configuration.densityDpi.coerceAtLeast(1),
+                reader.surface,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
+            ) ?: throw IllegalStateException("Tela virtual não disponível para Browser Source")
 
-            val webView = WebView(context.applicationContext)
-            webView.setBackgroundColor(Color.TRANSPARENT)
-            webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-            val settings = webView.settings
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.databaseEnabled = true
-            settings.mediaPlaybackRequiresUserGesture = false
-            settings.loadWithOverviewMode = true
-            settings.useWideViewPort = true
-            settings.cacheMode = WebSettings.LOAD_DEFAULT
-
-            webView.webViewClient = object : WebViewClient() {
-                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                    super.onPageStarted(view, url, favicon)
-                    readyLayers.remove(layer.id)
-                }
-
-                override fun onPageFinished(view: WebView?, finishedUrl: String?) {
-                    super.onPageFinished(view, finishedUrl)
-                    // A captura não pode depender do callback evaluateJavascript:
-                    // mesmo se o callback falhar, imagens e widgets devem continuar visíveis.
-                    if (isRunning && webViews[layer.id] === webView) {
-                        readyLayers.add(layer.id)
-                    }
-                    BrowserSourceTransparency.apply(webView) {
-                        if (isRunning && webViews[layer.id] === webView) {
-                            val dim = dimensions[layer.id] ?: Pair(w, h)
-                            captureFrame(layer.id, webView, dim.first, dim.second)
-                        }
-                    }
-                }
+            presentation = Presentation(context, virtualDisplay.display)
+            val root = FrameLayout(presentation.context).apply {
+                setBackgroundColor(MATTE)
             }
-            webView.webChromeClient = WebChromeClient()
-
-            webView.measure(
-                View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY)
+            webView = WebView(presentation.context).apply {
+                setBackgroundColor(Color.TRANSPARENT)
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.databaseEnabled = true
+                settings.mediaPlaybackRequiresUserGesture = false
+                settings.loadWithOverviewMode = true
+                settings.useWideViewPort = true
+                settings.cacheMode = WebSettings.LOAD_DEFAULT
+                isVerticalScrollBarEnabled = false
+                isHorizontalScrollBarEnabled = false
+                webChromeClient = WebChromeClient()
+            }
+            val browser = webView
+            root.addView(browser, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+            presentation.setContentView(root)
+            presentation.window?.apply {
+                setBackgroundDrawable(ColorDrawable(MATTE))
+                clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            }
+            presentation.show()
+            presentation.window?.setLayout(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
             )
-            webView.layout(0, 0, w, h)
 
-            activeUrls[layer.id] = url
-            dimensions[layer.id] = Pair(w, h)
-            webViews[layer.id] = webView
-            webView.loadUrl(url)
-            Log.i("BrowserSourceEngine", "Carregando Browser Source (${layer.id}): $url (${w}x${h})")
-        } catch (e: Throwable) {
-            Log.e("BrowserSourceEngine", "Erro ao inicializar WebView para Browser Source ${layer.id}", e)
-        }
-    }
-
-    private fun captureAllFrames() {
-        for ((id, webView) in webViews) {
-            if (!readyLayers.contains(id)) continue
-            val dim = dimensions[id] ?: Pair(webView.width, webView.height)
-            captureFrame(id, webView, dim.first, dim.second)
-        }
-    }
-
-    private fun captureFrame(layerId: String, webView: WebView, w: Int, h: Int) {
-        if (!isRunning || w <= 0 || h <= 0) return
-        try {
-            val pair = synchronized(frameLock) {
-                val current = frames[layerId]
-                if (current != null && current.width == w && current.height == h) {
-                    current
-                } else {
-                    val replacement = FramePair(
-                        w, h,
-                        Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888),
-                        Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                    )
-                    frames[layerId] = replacement
-                    current?.front?.recycle()
-                    current?.back?.recycle()
-                    replacement
+            val layer = BrowserLayer(id, url, width, height, reader, virtualDisplay, presentation, browser)
+            browser.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, pageUrl: String?) {
+                    super.onPageFinished(view, pageUrl)
+                    if (layer.active && running && view === layer.webView) {
+                        BrowserSourceTransparency.apply(layer.webView)
+                    }
                 }
             }
-
-            // Somente o buffer traseiro é alterado; o compositor usa o dianteiro.
-            val back = pair.back
-            back.eraseColor(Color.TRANSPARENT)
-            webView.draw(Canvas(back))
-
-            synchronized(frameLock) {
-                if (frames[layerId] === pair && isRunning) {
-                    pair.back = pair.front
-                    pair.front = back
-                }
-            }
+            layers[id] = layer
+            reader.setOnImageAvailableListener({ source ->
+                onImageAvailable(layer, source)
+            }, handler)
+            browser.loadUrl(url)
+            Log.i(TAG, "Browser Source na tela virtual: " + id + " (" + width + "x" + height + ")")
         } catch (error: Throwable) {
-            Log.w("BrowserSourceEngine", "Falha ao compor frame de Browser Source: $layerId", error)
+            Log.e(TAG, "Falha ao criar Browser Source: " + id, error)
+            layers.remove(id)?.active = false
+            try { reader?.setOnImageAvailableListener(null, null) } catch (_: Throwable) {}
+            try { webView?.stopLoading() } catch (_: Throwable) {}
+            try { presentation?.dismiss() } catch (_: Throwable) {}
+            try { webView?.destroy() } catch (_: Throwable) {}
+            try { virtualDisplay?.release() } catch (_: Throwable) {}
+            try { reader?.close() } catch (_: Throwable) {}
+            synchronized(frameLock) {
+                frames.remove(id)?.recycle()
+            }
         }
     }
 
-    /** O desenho fica protegido durante a troca/reciclagem do bitmap. */
-    fun drawFrame(layerId: String, canvas: Canvas, destination: RectF, paint: Paint): Boolean {
+    private fun onImageAvailable(layer: BrowserLayer, reader: ImageReader) {
+        val image = try {
+            reader.acquireLatestImage()
+        } catch (_: IllegalStateException) {
+            null // Reader já fechado ou todos os buffers ocupados.
+        }
+        if (image == null) return
+
+        try {
+            if (!running || !layer.active) return
+            val now = SystemClock.uptimeMillis()
+            if (now - layer.lastFrameAt < FRAME_INTERVAL_MS) return
+            layer.lastFrameAt = now
+            publishImage(layer, image)
+        } catch (error: Throwable) {
+            Log.w(TAG, "Frame descartado do Browser Source: " + layer.id, error)
+        } finally {
+            image.close()
+        }
+    }
+
+    private fun publishImage(layer: BrowserLayer, image: Image) {
+        val plane = image.planes.firstOrNull() ?: return
+        val width = layer.width
+        val height = layer.height
+        val pixelStride = plane.pixelStride
+        val rowStride = plane.rowStride
+        if (pixelStride != 4 || rowStride < width * pixelStride || rowStride % pixelStride != 0) {
+            Log.w(TAG, "Formato de imagem incompatível para Browser Source: " + layer.id)
+            return
+        }
+        val paddedWidth = rowStride / pixelStride
+
         synchronized(frameLock) {
-            val bitmap = frames[layerId]?.front ?: return false
-            if (bitmap.isRecycled) return false
+            if (!running || !layer.active) return
+            val pair = frames[layer.id] ?: Frames(width, height).also { frames[layer.id] = it }
+            val buffer = plane.buffer
+            buffer.rewind()
+
+            if (paddedWidth == width) {
+                pair.back.copyPixelsFromBuffer(buffer)
+            } else {
+                if (pair.padded?.width != paddedWidth || pair.padded?.height != height) {
+                    pair.padded?.recycle()
+                    pair.padded = Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888)
+                }
+                val padded = pair.padded ?: return
+                padded.copyPixelsFromBuffer(buffer)
+                Canvas(pair.back).drawBitmap(
+                    padded,
+                    Rect(0, 0, width, height),
+                    Rect(0, 0, width, height),
+                    null
+                )
+            }
+
+            // Mantém objetos/fotos reais. Remove exclusivamente o matte do fundo
+            // quando o display retorna uma imagem opaca apesar do HTML transparente.
+            val pixels = pair.pixels
+            pair.back.getPixels(pixels, 0, width, 0, 0, width, height)
+            for (i in pixels.indices) {
+                val color = pixels[i]
+                if (Color.alpha(color) != 255) continue
+                if (abs(Color.red(color) - MATTE_R) <= KEY_TOLERANCE &&
+                    abs(Color.green(color) - MATTE_G) <= KEY_TOLERANCE &&
+                    abs(Color.blue(color) - MATTE_B) <= KEY_TOLERANCE) {
+                    pixels[i] = Color.TRANSPARENT
+                }
+            }
+            pair.back.setPixels(pixels, 0, width, 0, 0, width, height)
+
+            val completed = pair.back
+            pair.back = pair.front
+            pair.front = completed
+        }
+    }
+
+    /** Executa o desenho sob o mesmo lock usado para publicar os frames. */
+    fun drawFrame(id: String, canvas: Canvas, destination: RectF, paint: Paint): Boolean {
+        synchronized(frameLock) {
+            val front = frames[id]?.front ?: return false
+            if (front.isRecycled) return false
             return try {
-                canvas.drawBitmap(bitmap, null, destination, paint)
+                canvas.drawBitmap(front, null, destination, paint)
                 true
             } catch (error: RuntimeException) {
-                Log.w("BrowserSourceEngine", "Falha ao desenhar Browser Source: $layerId", error)
+                Log.w(TAG, "Falha ao desenhar Browser Source: " + id, error)
                 false
             }
         }
     }
 
-    private fun removeWebView(id: String) {
-        try {
-            webViews.remove(id)?.let { wv ->
-                wv.stopLoading()
-                wv.loadUrl("about:blank")
-                wv.destroy()
-            }
-            readyLayers.remove(id)
-            activeUrls.remove(id)
-            dimensions.remove(id)
-            synchronized(frameLock) {
-                frames.remove(id)?.let { pair ->
-                    pair.front.recycle()
-                    pair.back.recycle()
-                }
-            }
-        } catch (_: Exception) {}
+    private fun removeLayer(id: String) {
+        val layer = layers.remove(id) ?: return
+        layer.active = false
+        try { layer.reader.setOnImageAvailableListener(null, null) } catch (_: Throwable) {}
+        try { layer.webView.stopLoading() } catch (_: Throwable) {}
+        try { layer.presentation.dismiss() } catch (_: Throwable) {}
+        try { layer.webView.destroy() } catch (_: Throwable) {}
+        try { layer.virtualDisplay.release() } catch (_: Throwable) {}
+        try { layer.reader.close() } catch (_: Throwable) {}
+        synchronized(frameLock) {
+            frames.remove(id)?.recycle()
+        }
     }
 
     fun destroyAll() {
-        for (id in webViews.keys.toList()) {
-            removeWebView(id)
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { destroyAll() }
+            return
         }
+        for (id in layers.keys.toList()) removeLayer(id)
         synchronized(frameLock) {
-            for (pair in frames.values) {
-                pair.front.recycle()
-                pair.back.recycle()
-            }
+            frames.values.forEach { it.recycle() }
             frames.clear()
         }
-        readyLayers.clear()
-        activeUrls.clear()
-        dimensions.clear()
     }
 }
