@@ -24,6 +24,8 @@ object ControllerRuntime {
     @Volatile var signedIn = false
     @Volatile var isTransmitting = false
     @Volatile var transmissionStartTime = 0L
+    @Volatile var lastProjectionResultCode: Int = 0
+    @Volatile var lastProjectionData: Intent? = null
     val commands = Executors.newSingleThreadExecutor()
 }
 

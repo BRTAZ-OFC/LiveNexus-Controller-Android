@@ -133,6 +133,12 @@ class MainActivity : Activity() {
         ScreenCaptureService.updateCaptureOrientation(isVerticalCaptureMode())
         syncActivityOrientationWithCaptureMode()
         render()
+
+        if (intent?.getBooleanExtra("auto_start_stream", false) == true) {
+            uiHandler.postDelayed({
+                if (!isTransmitting) handleStartTransmissionClick()
+            }, 350L)
+        }
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -143,6 +149,11 @@ class MainActivity : Activity() {
             if (page == 1) capturePermissionDeclinedForSession = false
             syncActivityOrientationWithCaptureMode()
             render()
+        }
+        if (intent?.getBooleanExtra("auto_start_stream", false) == true) {
+            uiHandler.postDelayed({
+                if (!isTransmitting) handleStartTransmissionClick()
+            }, 350L)
         }
     }
 
@@ -337,6 +348,32 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
+    private fun startCaptureWithResult(resultCode: Int, data: Intent) {
+        lastMediaProjectionResultCode = resultCode
+        lastMediaProjectionData = data
+        ControllerRuntime.lastProjectionResultCode = resultCode
+        ControllerRuntime.lastProjectionData = data
+        val vertical = isVerticalCaptureMode()
+        ScreenCaptureService.updateCaptureOrientation(vertical)
+        ScreenCaptureService.updateActiveSceneLayers(activeCaptureScene()?.sources)
+        val size = capturePrefs.getInt("max_dimension", 1280)
+        val fps = capturePrefs.getInt("capture_fps", 30)
+        val bitrate = capturePrefs.getInt("capture_bitrate_kbps", 4500)
+        val intent = Intent(this, ScreenCaptureService::class.java).apply {
+            action = ScreenCaptureService.ACTION_START
+            putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
+            putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
+            putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
+            putExtra(ScreenCaptureService.EXTRA_FPS, fps)
+            putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
+            putExtra(ScreenCaptureService.EXTRA_VERTICAL_MODE, vertical)
+        }
+        startForegroundService(intent)
+        syncActivityOrientationWithCaptureMode()
+        refreshCaptureCanvas()
+        resumeCaptureRefresh()
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == CAPTURE_REQUEST) {
@@ -349,28 +386,8 @@ class MainActivity : Activity() {
                 return
             }
             capturePermissionDeclinedForSession = false
-            lastMediaProjectionResultCode = resultCode
-            lastMediaProjectionData = data
             try {
-                val vertical = isVerticalCaptureMode()
-                ScreenCaptureService.updateCaptureOrientation(vertical)
-                ScreenCaptureService.updateActiveSceneLayers(activeCaptureScene()?.sources)
-                val size = capturePrefs.getInt("max_dimension", 1280)
-                val fps = capturePrefs.getInt("capture_fps", 30)
-                val bitrate = capturePrefs.getInt("capture_bitrate_kbps", 4500)
-                val intent = Intent(this, ScreenCaptureService::class.java).apply {
-                    action = ScreenCaptureService.ACTION_START
-                    putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
-                    putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
-                    putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
-                    putExtra(ScreenCaptureService.EXTRA_FPS, fps)
-                    putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
-                    putExtra(ScreenCaptureService.EXTRA_VERTICAL_MODE, vertical)
-                }
-                startForegroundService(intent)
-                syncActivityOrientationWithCaptureMode()
-                refreshCaptureCanvas()
-                resumeCaptureRefresh()
+                startCaptureWithResult(resultCode, data)
                 if (startStreamAfterCaptureAuth) {
                     startStreamAfterCaptureAuth = false
                     uiHandler.postDelayed({ startLiveTransmission() }, 250L)
@@ -386,10 +403,18 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == AUDIO_PERMISSION_REQUEST) {
-            val hasScreenSource = activeCaptureScene()?.sources?.any { it.type == "screen" && it.visible } == true
-            if (hasScreenSource && !ScreenCaptureService.isCapturing) {
+            if (!ScreenCaptureService.isCapturing) {
                 startStreamAfterCaptureAuth = true
                 capturePermissionDeclinedForSession = false
+                val savedCode = ControllerRuntime.lastProjectionResultCode
+                val savedData = ControllerRuntime.lastProjectionData
+                if (savedCode == RESULT_OK && savedData != null) {
+                    try {
+                        startCaptureWithResult(savedCode, savedData)
+                        uiHandler.postDelayed({ startLiveTransmission() }, 250L)
+                        return
+                    } catch (_: Throwable) {}
+                }
                 requestScreenCaptureForSource(allowFromAnyPage = true)
             } else {
                 startLiveTransmission()
@@ -708,6 +733,8 @@ class MainActivity : Activity() {
         OverlayService.refreshVisibility()
         uiHandler.removeCallbacks(transmissionTimerRunnable)
 
+        stopScreenCaptureForSource()
+
         val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
             action = ScreenCaptureService.ACTION_STOP_STREAM
         }
@@ -752,11 +779,19 @@ class MainActivity : Activity() {
             return
         }
 
-        // Se a cena ativa possui fonte "Captura de tela" visível e ainda não está capturando, solicita autorização do Android e inicia em seguida
-        val hasScreenSource = activeCaptureScene()?.sources?.any { it.type == "screen" && it.visible } == true
-        if (hasScreenSource && !ScreenCaptureService.isCapturing) {
+        // Automaticamente garante que a captura de tela seja iniciada junto com a transmissão
+        if (!ScreenCaptureService.isCapturing) {
             startStreamAfterCaptureAuth = true
             capturePermissionDeclinedForSession = false
+            val savedCode = ControllerRuntime.lastProjectionResultCode
+            val savedData = ControllerRuntime.lastProjectionData
+            if (savedCode == RESULT_OK && savedData != null) {
+                try {
+                    startCaptureWithResult(savedCode, savedData)
+                    uiHandler.postDelayed({ startLiveTransmission() }, 250L)
+                    return
+                } catch (_: Throwable) {}
+            }
             requestScreenCaptureForSource(allowFromAnyPage = true)
             return
         }
@@ -766,8 +801,6 @@ class MainActivity : Activity() {
 
     private fun requestScreenCaptureForSource(allowFromAnyPage: Boolean = false) {
         if (!allowFromAnyPage && page != 1) return
-        val hasScreenSource = activeCaptureScene()?.sources?.any { it.type == "screen" && it.visible } == true
-        if (!hasScreenSource) return
         if (ScreenCaptureService.isCapturing || isRequestingMediaProjection) return
         try {
             val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
@@ -802,6 +835,8 @@ class MainActivity : Activity() {
     private fun stopScreenCaptureForSource() {
         lastMediaProjectionResultCode = 0
         lastMediaProjectionData = null
+        ControllerRuntime.lastProjectionResultCode = 0
+        ControllerRuntime.lastProjectionData = null
         isRequestingMediaProjection = false
         try {
             val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {

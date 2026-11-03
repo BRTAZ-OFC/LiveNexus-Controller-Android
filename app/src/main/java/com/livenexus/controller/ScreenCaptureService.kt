@@ -195,11 +195,8 @@ class ScreenCaptureService : Service() {
             }
             ACTION_STOP_STREAM -> {
                 stopStreamingOnly()
-                if (!isCapturing) {
-                    stopSelf()
-                } else {
-                    updateForegroundNotification()
-                }
+                stopCaptureOnly()
+                stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_START_STREAM -> {
@@ -611,8 +608,18 @@ class ScreenCaptureService : Service() {
         if (streamTargets.isEmpty()) {
             lastError = "Nenhuma plataforma configurada para transmissão."
             isConnecting = false
-            if (!isCapturing) stopSelf()
+            stopCaptureOnly()
+            stopSelf()
             return
+        }
+
+        // Inicia captura de tela automaticamente se os dados de projeção foram fornecidos
+        if (!isCapturing && intent.hasExtra(EXTRA_RESULT_CODE)) {
+            try {
+                handleStartCapture(intent)
+            } catch (e: Throwable) {
+                Log.w(TAG, "Falha ao iniciar captura automática de tela com a transmissão: ${e.message}")
+            }
         }
 
         val fps = intent.getIntExtra(EXTRA_FPS, 30).coerceIn(15, 60)
@@ -841,6 +848,7 @@ class ScreenCaptureService : Service() {
         ControllerRuntime.isTransmitting = false
         ControllerRuntime.transmissionStartTime = 0L
         OverlayService.refreshVisibility()
+        stopCaptureOnly()
         try {
             compositor?.close()
         } catch (_: Exception) {}

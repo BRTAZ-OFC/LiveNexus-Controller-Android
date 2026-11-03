@@ -93,6 +93,34 @@ object StreamingConfig {
         val bitrate = prefs.getInt("capture_bitrate_kbps", 4500)
         val isVertical = prefs.getString("capture_orientation", "horizontal") == "vertical"
 
+        // Inicia captura de tela automaticamente junto com a transmissão
+        if (!ScreenCaptureService.isCapturing) {
+            val savedCode = ControllerRuntime.lastProjectionResultCode
+            val savedData = ControllerRuntime.lastProjectionData
+            if (savedCode != 0 && savedData != null) {
+                try {
+                    val captureIntent = Intent(context, ScreenCaptureService::class.java).apply {
+                        action = ScreenCaptureService.ACTION_START
+                        putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, savedCode)
+                        putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, savedData)
+                        putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
+                        putExtra(ScreenCaptureService.EXTRA_FPS, fps)
+                        putExtra(ScreenCaptureService.EXTRA_BITRATE_KBPS, bitrate)
+                        putExtra(ScreenCaptureService.EXTRA_VERTICAL_MODE, isVertical)
+                    }
+                    context.startForegroundService(captureIntent)
+                } catch (_: Throwable) {}
+            } else {
+                // Abre o app para autorização de tela com início automático da live
+                val appIntent = Intent(context, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    putExtra("auto_start_stream", true)
+                }
+                context.startActivity(appIntent)
+                return true
+            }
+        }
+
         val intent = Intent(context, ScreenCaptureService::class.java).apply {
             action = ScreenCaptureService.ACTION_START_STREAM
             putExtra(ScreenCaptureService.EXTRA_MAX_DIMENSION, size)
