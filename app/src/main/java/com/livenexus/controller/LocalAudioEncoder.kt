@@ -1,7 +1,9 @@
 package com.livenexus.controller
 
 import android.annotation.SuppressLint
+import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
@@ -10,6 +12,8 @@ import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
+import android.media.projection.MediaProjection
+import android.os.Build
 import android.os.Process
 import android.util.Log
 import java.nio.ByteBuffer
@@ -17,16 +21,19 @@ import kotlin.math.abs
 import kotlin.math.sqrt
 
 /**
- * Capturador e codificador de áudio local com Supressão de Ruídos (Hardware + DSP).
- * Captura áudio do microfone com AudioRecord (PCM 16-bit), aplica supressão de ruído,
- * cancelamento de eco e filtro passa-alta + noise gate suave, e codifica em AAC com MediaCodec.
+ * Capturador e codificador de áudio local com mixagem de Microfone e Áudio Interno (Jogo/Sistema).
+ * - Microfone: AudioRecord (PCM 16-bit) com Supressão de Ruído de hardware e DSP (passa-alta e noise gate).
+ * - Áudio Interno: AudioPlaybackCaptureConfiguration via MediaProjection (Android 10+ / API 29+).
+ * - Mixagem em tempo real com controle de volume independente e codificação AAC via MediaCodec.
  */
 class LocalAudioEncoder(
     private val sampleRate: Int = 44100,
     private val channelCount: Int = 2,
     private val bitrateBps: Int = 128000,
-    private val volumeProvider: () -> Float = { 1.0f },
+    private val micVolumeProvider: () -> Float = { 1.0f },
+    private val internalVolumeProvider: () -> Float = { 1.0f },
     private val noiseSuppressionProvider: () -> Boolean = { true },
+    private val mediaProjectionProvider: (() -> MediaProjection?)? = null,
     private val onHeader: (ByteArray) -> Unit,
     private val onSample: (ByteArray, MediaCodec.BufferInfo) -> Unit
 ) : AutoCloseable {
@@ -41,6 +48,7 @@ class LocalAudioEncoder(
     }
 
     private var audioRecord: AudioRecord? = null
+    @Volatile private var internalRecord: AudioRecord? = null
     private var noiseSuppressor: NoiseSuppressor? = null
     private var echoCanceler: AcousticEchoCanceler? = null
     private var autoGainControl: AutomaticGainControl? = null
@@ -51,7 +59,7 @@ class LocalAudioEncoder(
     @Volatile var lastError: String? = null
         private set
 
-    // Estados contínuos do DSP de áudio (filtro passa-alta por canal e envelope do noise gate)
+    // Estados contínuos do DSP de áudio do microfone
     private var hpfPrevInL = 0f
     private var hpfPrevOutL = 0f
     private var hpfPrevInR = 0f
@@ -68,6 +76,7 @@ class LocalAudioEncoder(
         val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat).coerceAtLeast(4096)
         val bufferSize = maxOf(minBufferSize * 2, 4096)
 
+        // 1. Inicializa AudioRecord do Microfone
         var record: AudioRecord? = null
         val sourcesToTry = intArrayOf(
             MediaRecorder.AudioSource.VOICE_COMMUNICATION,
@@ -84,7 +93,7 @@ class LocalAudioEncoder(
                 )
                 if (candidate.state == AudioRecord.STATE_INITIALIZED) {
                     record = candidate
-                    Log.i(TAG, "AudioRecord inicializado com fonte=$source")
+                    Log.i(TAG, "AudioRecord (mic) inicializado com fonte=$source")
                     break
                 } else {
                     candidate.release()
@@ -93,15 +102,16 @@ class LocalAudioEncoder(
                 Log.w(TAG, "Falha ao tentar AudioSource $source: ${e.message}")
             }
         }
-        if (record == null) {
-            Log.w(TAG, "AudioRecord não inicializou; usando gerador PCM silencioso de fallback.")
-        }
         audioRecord = record
 
         if (record != null) {
             attachHardwareAudioEffects(record.audioSessionId)
         }
 
+        // 2. Inicializa AudioRecord de Áudio Interno (Android 10+)
+        initInternalAudioRecord(bufferSize, channelConfig, audioFormat)
+
+        // 3. Inicializa MediaCodec AAC
         val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channelCount).apply {
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
@@ -117,11 +127,13 @@ class LocalAudioEncoder(
             releaseAudioEffects()
             try { record?.release() } catch (_: Exception) {}
             audioRecord = null
+            try { internalRecord?.release() } catch (_: Exception) {}
+            internalRecord = null
             try { createdCodec.release() } catch (_: Exception) {}
             throw e
         }
 
-        // Gera e envia imediatamente o AudioSpecificConfig padrão para AAC-LC (44100Hz stereo: 0x12, 0x10)
+        // Gera e despacha o cabeçalho ASC para RTMP imediatamente
         val asc = createAudioSpecificConfig(sampleRate, channelCount)
         headerDispatched = true
         onHeader(asc)
@@ -130,11 +142,19 @@ class LocalAudioEncoder(
         try {
             record?.startRecording()
         } catch (e: Throwable) {
-            Log.w(TAG, "Falha em startRecording; mantendo trilha AAC silenciosa.", e)
+            Log.w(TAG, "Falha em startRecording do mic; prosseguindo sem microfone.", e)
             releaseAudioEffects()
             try { record?.release() } catch (_: Exception) {}
             audioRecord = null
             record = null
+        }
+
+        try {
+            internalRecord?.startRecording()
+        } catch (e: Throwable) {
+            Log.w(TAG, "Falha em startRecording do áudio interno.", e)
+            try { internalRecord?.release() } catch (_: Exception) {}
+            internalRecord = null
         }
 
         val activeRecord = record
@@ -145,7 +165,83 @@ class LocalAudioEncoder(
             encodeLoop(activeRecord, createdCodec, bufferSize)
         }, "LiveNexusAudioEncoder").apply { start() }
 
-        Log.i(TAG, "MediaCodec AAC iniciado ($sampleRate Hz, $channelCount canais, mic=${activeRecord != null})")
+        Log.i(TAG, "MediaCodec AAC iniciado ($sampleRate Hz, $channelCount canais, mic=${activeRecord != null}, interno=${internalRecord != null})")
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun initInternalAudioRecord(bufferSize: Int, channelConfig: Int, audioFormat: Int) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val projection = try { mediaProjectionProvider?.invoke() } catch (_: Throwable) { null }
+            if (projection != null) {
+                try {
+                    val config = AudioPlaybackCaptureConfiguration.Builder(projection)
+                        .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                        .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                        .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                        .build()
+                    val candidate = AudioRecord.Builder()
+                        .setAudioPlaybackCaptureConfig(config)
+                        .setAudioFormat(
+                            AudioFormat.Builder()
+                                .setEncoding(audioFormat)
+                                .setSampleRate(sampleRate)
+                                .setChannelMask(channelConfig)
+                                .build()
+                        )
+                        .setBufferSizeInBytes(bufferSize)
+                        .build()
+                    if (candidate.state == AudioRecord.STATE_INITIALIZED) {
+                        internalRecord = candidate
+                        Log.i(TAG, "AudioPlaybackCapture (áudio interno) inicializado com sucesso!")
+                    } else {
+                        candidate.release()
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "Falha ao inicializar AudioPlaybackCapture: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Atualiza a captura de áudio interno se o MediaProjection foi ativado após o início da live.
+     */
+    @SuppressLint("MissingPermission")
+    fun updateMediaProjection(projection: MediaProjection) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && internalRecord == null && running) {
+            try {
+                val channelConfig = if (channelCount == 1) AudioFormat.CHANNEL_IN_MONO else AudioFormat.CHANNEL_IN_STEREO
+                val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+                val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat).coerceAtLeast(4096)
+                val bufferSize = maxOf(minBufferSize * 2, 4096)
+
+                val config = AudioPlaybackCaptureConfiguration.Builder(projection)
+                    .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                    .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                    .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                    .build()
+                val candidate = AudioRecord.Builder()
+                    .setAudioPlaybackCaptureConfig(config)
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(audioFormat)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(channelConfig)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(bufferSize)
+                    .build()
+                if (candidate.state == AudioRecord.STATE_INITIALIZED) {
+                    candidate.startRecording()
+                    internalRecord = candidate
+                    Log.i(TAG, "AudioPlaybackCapture conectado via updateMediaProjection!")
+                } else {
+                    candidate.release()
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "Erro ao conectar AudioPlaybackCapture: ${e.message}")
+            }
+        }
     }
 
     private fun attachHardwareAudioEffects(audioSessionId: Int) {
@@ -212,12 +308,12 @@ class LocalAudioEncoder(
     }
 
     /**
-     * Processa o buffer PCM 16-bit in-place aplicando:
+     * Processa o buffer PCM 16-bit do Microfone aplicando:
      * 1. Filtro Passa-Alta (HPF ~85Hz) para cortar ruído grave, sopro e zumbido elétrico.
      * 2. Expander / Noise Gate suave baseado em RMS para eliminar chiado de fundo em silêncio.
-     * 3. Controle de volume e limitador suave (anti-clipping).
+     * 3. Ganho do microfone e limitador suave (anti-clipping).
      */
-    private fun processAudioDspInPlace(
+    private fun processMicDspInPlace(
         pcmBuffer: ByteArray,
         length: Int,
         userGain: Float,
@@ -242,7 +338,6 @@ class LocalAudioEncoder(
         val sampleCount = length / 2
         if (sampleCount <= 0) return
 
-        // Se a supressão de ruído estiver ativa, calcula o RMS da janela para o Noise Gate suave
         val targetGateGain = if (suppressNoise) {
             var sumSq = 0.0
             var idx = 0
@@ -266,12 +361,9 @@ class LocalAudioEncoder(
             1.0f
         }
 
-        // Suavização temporal de ataque rápido e release suave para nunca cortar sílabas da fala
         val smoothing = if (targetGateGain > gateEnvelopeGain) 0.45f else 0.12f
         gateEnvelopeGain += (targetGateGain - gateEnvelopeGain) * smoothing
         val effectiveGain = userGain * (if (suppressNoise) gateEnvelopeGain else 1.0f)
-
-        if (!suppressNoise && abs(effectiveGain - 1.0f) < 0.01f) return
 
         var i = 0
         var ch = 0
@@ -296,7 +388,6 @@ class LocalAudioEncoder(
             }
 
             var scaled = sample * effectiveGain
-            // Soft-clipping nos extremos para evitar distorção estourada
             if (scaled > 28000f) {
                 scaled = 28000f + (scaled - 28000f) * 0.25f
             } else if (scaled < -28000f) {
@@ -309,45 +400,109 @@ class LocalAudioEncoder(
         }
     }
 
+    private fun applyGainInPlace(pcmBuffer: ByteArray, length: Int, gain: Float) {
+        if (gain <= 0.001f) {
+            java.util.Arrays.fill(pcmBuffer, 0, length, 0.toByte())
+            return
+        }
+        if (gain in 0.99f..1.01f) return
+        var i = 0
+        while (i + 1 < length) {
+            val lo = pcmBuffer[i].toInt() and 0xFF
+            val hi = pcmBuffer[i + 1].toInt()
+            val sample = (hi shl 8) or lo
+            val scaled = (sample * gain).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            pcmBuffer[i] = (scaled and 0xFF).toByte()
+            pcmBuffer[i + 1] = ((scaled shr 8) and 0xFF).toByte()
+            i += 2
+        }
+    }
+
     private fun encodeLoop(record: AudioRecord?, mediaCodec: MediaCodec, bufferSize: Int) {
         val frameChunkBytes = 4096.coerceAtMost(bufferSize)
-        val pcmBuffer = ByteArray(frameChunkBytes)
+        val micBuffer = ByteArray(frameChunkBytes)
+        val internalBuffer = ByteArray(frameChunkBytes)
+        val mixedBuffer = ByteArray(frameChunkBytes)
         val info = MediaCodec.BufferInfo()
         val bytesPerFrame = (channelCount * 2).coerceAtLeast(2)
         var totalFramesSubmitted = 0L
 
         try {
             while (running) {
-                val readBytes = if (record != null) {
-                    val r = record.read(pcmBuffer, 0, pcmBuffer.size)
+                val micGain = try { micVolumeProvider().coerceIn(0f, 1f) } catch (_: Exception) { 1f }
+                val internalGain = try { internalVolumeProvider().coerceIn(0f, 1f) } catch (_: Exception) { 1f }
+                val suppressNoise = try { noiseSuppressionProvider() } catch (_: Exception) { true }
+
+                // Leitura do Microfone
+                val micRead = if (record != null && micGain > 0.001f) {
+                    val r = record.read(micBuffer, 0, micBuffer.size)
                     if (r > 0) {
-                        val gain = try { volumeProvider().coerceIn(0f, 1f) } catch (_: Exception) { 1f }
-                        val suppressNoise = try { noiseSuppressionProvider() } catch (_: Exception) { true }
-                        processAudioDspInPlace(pcmBuffer, r, gain, suppressNoise)
+                        processMicDspInPlace(micBuffer, r, micGain, suppressNoise)
                         r
-                    } else {
-                        java.util.Arrays.fill(pcmBuffer, 0.toByte())
-                        try { Thread.sleep(20L) } catch (_: InterruptedException) { break }
-                        pcmBuffer.size
+                    } else 0
+                } else 0
+
+                // Leitura do Áudio Interno (Jogo/Sistema)
+                val intRec = internalRecord
+                val internalRead = if (intRec != null && internalGain > 0.001f) {
+                    val r = intRec.read(internalBuffer, 0, internalBuffer.size)
+                    if (r > 0) {
+                        applyGainInPlace(internalBuffer, r, internalGain)
+                        r
+                    } else 0
+                } else 0
+
+                // Mixagem dos dois fluxos PCM 16-bit
+                val maxRead = maxOf(micRead, internalRead)
+                val toWrite: Int
+
+                if (maxRead > 0) {
+                    toWrite = maxRead
+                    var idx = 0
+                    while (idx + 1 < maxRead) {
+                        val sMic = if (idx + 1 < micRead) {
+                            val lo = micBuffer[idx].toInt() and 0xFF
+                            val hi = micBuffer[idx + 1].toInt()
+                            (hi shl 8) or lo
+                        } else 0
+
+                        val sInt = if (idx + 1 < internalRead) {
+                            val lo = internalBuffer[idx].toInt() and 0xFF
+                            val hi = internalBuffer[idx + 1].toInt()
+                            (hi shl 8) or lo
+                        } else 0
+
+                        var mixed = sMic + sInt
+                        // Limitador suave para evitar clipping estourado
+                        if (mixed > 30000) {
+                            mixed = 30000 + ((mixed - 30000) * 0.2f).toInt()
+                        } else if (mixed < -30000) {
+                            mixed = -30000 + ((mixed + 30000) * 0.2f).toInt()
+                        }
+                        val finalSample = mixed.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                        mixedBuffer[idx] = (finalSample and 0xFF).toByte()
+                        mixedBuffer[idx + 1] = ((finalSample shr 8) and 0xFF).toByte()
+                        idx += 2
                     }
                 } else {
-                    java.util.Arrays.fill(pcmBuffer, 0.toByte())
-                    val sleepMs = ((pcmBuffer.size / bytesPerFrame) * 1000L / sampleRate).coerceAtLeast(15L)
+                    // Trilha silenciosa quando ambos estão mutados ou indisponíveis
+                    java.util.Arrays.fill(mixedBuffer, 0.toByte())
+                    val sleepMs = ((mixedBuffer.size / bytesPerFrame) * 1000L / sampleRate).coerceAtLeast(15L)
                     try { Thread.sleep(sleepMs) } catch (_: InterruptedException) { break }
-                    pcmBuffer.size
+                    toWrite = mixedBuffer.size
                 }
 
-                if (readBytes > 0 && running) {
+                if (toWrite > 0 && running) {
                     val inputIndex = mediaCodec.dequeueInputBuffer(10000L)
                     if (inputIndex >= 0) {
                         val inputBuffer: ByteBuffer? = mediaCodec.getInputBuffer(inputIndex)
                         if (inputBuffer != null) {
-                            val toWrite = minOf(readBytes, inputBuffer.remaining())
+                            val len = minOf(toWrite, inputBuffer.remaining())
                             inputBuffer.clear()
-                            inputBuffer.put(pcmBuffer, 0, toWrite)
+                            inputBuffer.put(mixedBuffer, 0, len)
                             val ptsUs = (totalFramesSubmitted * 1_000_000L) / sampleRate
-                            totalFramesSubmitted += (toWrite / bytesPerFrame)
-                            mediaCodec.queueInputBuffer(inputIndex, 0, toWrite, ptsUs, 0)
+                            totalFramesSubmitted += (len / bytesPerFrame)
+                            mediaCodec.queueInputBuffer(inputIndex, 0, len, ptsUs, 0)
                         }
                     }
                 }
@@ -433,6 +588,14 @@ class LocalAudioEncoder(
             audioRecord?.release()
         } catch (_: Exception) {}
         audioRecord = null
+
+        try {
+            internalRecord?.stop()
+        } catch (_: Exception) {}
+        try {
+            internalRecord?.release()
+        } catch (_: Exception) {}
+        internalRecord = null
 
         try {
             codec?.stop()

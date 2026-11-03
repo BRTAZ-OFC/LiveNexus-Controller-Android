@@ -624,40 +624,7 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun buildActiveTargetsJson(): String {
-        val array = JSONArray()
-        if (capturePrefs.getBoolean("stream_youtube", false)) {
-            val key = capturePrefs.getString("key_youtube", "")?.trim() ?: ""
-            if (isValidStreamKey(key)) {
-                array.put(JSONObject().apply {
-                    put("platform", "YouTube")
-                    put("url", StreamingConfig.RTMPS_YOUTUBE)
-                    put("key", key)
-                })
-            }
-        }
-        if (capturePrefs.getBoolean("stream_twitch", false)) {
-            val key = capturePrefs.getString("key_twitch", "")?.trim() ?: ""
-            if (isValidStreamKey(key)) {
-                array.put(JSONObject().apply {
-                    put("platform", "Twitch")
-                    put("url", StreamingConfig.RTMP_TWITCH)
-                    put("key", key)
-                })
-            }
-        }
-        if (capturePrefs.getBoolean("stream_kick", false)) {
-            val key = capturePrefs.getString("key_kick", "")?.trim() ?: ""
-            if (isValidStreamKey(key)) {
-                array.put(JSONObject().apply {
-                    put("platform", "Kick")
-                    put("url", StreamingConfig.RTMP_KICK)
-                    put("key", key)
-                })
-            }
-        }
-        return array.toString()
-    }
+    private fun buildActiveTargetsJson(): String = StreamingConfig.buildActiveTargetsJson(this)
 
     private fun startLiveTransmission() {
         val targetsJson = buildActiveTargetsJson()

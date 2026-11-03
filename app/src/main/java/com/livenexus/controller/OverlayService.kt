@@ -347,15 +347,15 @@ class OverlayService : Service() {
         controls = view
         val screen = screenSize()
         val height = if (isLandscape) {
-            minOf(dp(300), (screen.y - dp(48)).coerceAtLeast(dp(120)))
+            minOf(dp(340), (screen.y - dp(36)).coerceAtLeast(dp(140)))
         } else {
-            minOf(dp(440), (screen.y - dp(100)).coerceAtLeast(dp(120)))
+            minOf(dp(520), (screen.y - dp(70)).coerceAtLeast(dp(160)))
         }
         root.addView(ScrollView(this).apply { addView(view) }, LinearLayout.LayoutParams(-1, height))
         val width = if (isLandscape) {
-            minOf(dp(520), screen.x - dp(32))
+            minOf(dp(540), screen.x - dp(24))
         } else {
-            minOf(dp(380), screen.x - dp(24))
+            minOf(dp(390), screen.x - dp(20))
         }
         try {
             manager.addView(root, params(width, WindowManager.LayoutParams.WRAP_CONTENT, Gravity.CENTER))

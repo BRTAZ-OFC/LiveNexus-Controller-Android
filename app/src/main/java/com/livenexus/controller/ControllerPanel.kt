@@ -27,14 +27,27 @@ object ControllerRuntime {
     val commands = Executors.newSingleThreadExecutor()
 }
 
-/** A mesma árvore de controles e as mesmas ações nos dois modos de apresentação. */
-class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLayout(context) {
+/** Painel de controle com Abas de Transmissão & Áudio e Ações, usado tanto no app quanto na sobreposição flutuante. */
+class ControllerPanel(context: Context, private val isOverlay: Boolean) : LinearLayout(context) {
     private val prefs = context.getSharedPreferences("buttons", Context.MODE_PRIVATE)
+    private val capturePrefs = context.getSharedPreferences("livenexus_capture_settings", Context.MODE_PRIVATE)
     private val main = Handler(Looper.getMainLooper())
     private val dialogs = mutableListOf<AlertDialog>()
+    private var activeTab = if (isOverlay && (ControllerRuntime.isTransmitting || ScreenCaptureService.isLiveStreaming)) 0 else prefs.getInt("active_tab", 0)
     private var player = false
     private var adding = false
     private var disposed = false
+
+    // Timer para atualizar o cronômetro da transmissão ao vivo em tempo real
+    private val liveTimerRunnable = object : Runnable {
+        override fun run() {
+            if (!disposed && activeTab == 0 && (ControllerRuntime.isTransmitting || ScreenCaptureService.isLiveStreaming)) {
+                updateLiveTimerText()
+                main.postDelayed(this, 1000L)
+            }
+        }
+    }
+    private var liveTimerView: TextView? = null
 
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
     private fun kind(index: Int) = prefs.getString("control_type_$index", "Cenário").orEmpty()
@@ -115,7 +128,7 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
     private fun show(builder: AlertDialog.Builder) {
         if (disposed) return
         val dialog = builder.create()
-        if (overlay) dialog.window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+        if (isOverlay) dialog.window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
         dialogs.add(dialog)
         dialog.setOnDismissListener { dialogs.remove(dialog) }
         dialog.show()
@@ -134,17 +147,512 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
         else -> Triple("▱", "cenario", NeonTheme.cyan)
     }
 
+    private fun formatElapsedTime(millis: Long): String {
+        val totalSec = (millis / 1000).coerceAtLeast(0)
+        val h = totalSec / 3600
+        val m = (totalSec % 3600) / 60
+        val s = totalSec % 60
+        return if (h > 0) String.format("%02d:%02d:%02d", h, m, s) else String.format("%02d:%02d", m, s)
+    }
+
+    private fun updateLiveTimerText() {
+        val view = liveTimerView ?: return
+        val isLive = ControllerRuntime.isTransmitting || ScreenCaptureService.isLiveStreaming
+        if (isLive) {
+            val start = if (ControllerRuntime.transmissionStartTime > 0) ControllerRuntime.transmissionStartTime else System.currentTimeMillis()
+            val elapsed = System.currentTimeMillis() - start
+            view.text = "● AO VIVO • ${formatElapsedTime(elapsed)}"
+        } else {
+            view.text = "○ Parado"
+        }
+    }
+
     private fun render() {
         if (disposed) return
+        main.removeCallbacks(liveTimerRunnable)
+        liveTimerView = null
         removeAllViews()
+
         if (player) {
             renderPlayer()
             return
         }
 
-        val isLandscape = !overlay &&
+        val isLandscape = !isOverlay &&
             resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-        val mainHeight = dp(if (isLandscape) 74 else if (overlay) 78 else 84)
+
+        // 1. BARRA DE NAVEGAÇÃO DE ABAS NO TOPO (Transmissão & Áudio vs Ações & Botões)
+        renderTabBar(isLandscape)
+
+        // 2. CONTEÚDO DA ABA SELECIONADA
+        if (activeTab == 0) {
+            renderLiveAndAudioTab(isLandscape)
+            if (ControllerRuntime.isTransmitting || ScreenCaptureService.isLiveStreaming) {
+                main.post(liveTimerRunnable)
+            }
+        } else {
+            renderActionsTab(isLandscape)
+        }
+    }
+
+    /** Barra de abas elegante e destacada para alternar entre Live/Áudio e o painel de Ações. */
+    private fun renderTabBar(isLandscape: Boolean) {
+        val tabRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(2), dp(4), dp(6))
+        }
+
+        val isLive = ControllerRuntime.isTransmitting || ScreenCaptureService.isLiveStreaming
+        val liveBadgeLabel = if (isLive) "🔴 Live & Áudio ●" else "🔴 Live & Áudio"
+
+        val tab0 = TextView(context).apply {
+            text = liveBadgeLabel
+            textSize = if (isOverlay) 12f else 13f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setTextColor(if (activeTab == 0) Color.WHITE else Color.rgb(180, 190, 225))
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            background = if (activeTab == 0) {
+                NeonTheme.tileCard(if (isLive) "minus" else "camera")
+            } else {
+                NeonTheme.card(violet = true)
+            }
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                if (activeTab != 0) {
+                    activeTab = 0
+                    prefs.edit().putInt("active_tab", 0).apply()
+                    render()
+                }
+            }
+        }
+
+        val tab1 = TextView(context).apply {
+            text = "🎮 Ações & Botões"
+            textSize = if (isOverlay) 12f else 13f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setTextColor(if (activeTab == 1) Color.WHITE else Color.rgb(180, 190, 225))
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            background = if (activeTab == 1) {
+                NeonTheme.tileCard("cenario")
+            } else {
+                NeonTheme.card(violet = false)
+            }
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                if (activeTab != 1) {
+                    activeTab = 1
+                    prefs.edit().putInt("active_tab", 1).apply()
+                    render()
+                }
+            }
+        }
+
+        val tabHeight = dp(if (isLandscape) 38 else 42)
+        tabRow.addView(tab0, LayoutParams(0, tabHeight, 1f).apply { rightMargin = dp(4) })
+        tabRow.addView(tab1, LayoutParams(0, tabHeight, 1f).apply { leftMargin = dp(4) })
+
+        addView(tabRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(6)
+        })
+    }
+
+    /** ABA 0: CONTROLE COMPLETO DE TRANSMISSÃO AO VIVO E ÁUDIO (MICROFONE + INTERNO + SUPRESSÃO). */
+    private fun renderLiveAndAudioTab(isLandscape: Boolean) {
+        val container = LinearLayout(context).apply {
+            orientation = VERTICAL
+            setPadding(dp(2), 0, dp(2), dp(4))
+        }
+
+        val isLive = ControllerRuntime.isTransmitting || ScreenCaptureService.isLiveStreaming
+
+        // === 1. CARD PRINCIPAL DA TRANSMISSÃO AO VIVO ===
+        val liveCard = LinearLayout(context).apply {
+            orientation = VERTICAL
+            background = NeonTheme.actionPanelBackground()
+            setPadding(dp(12), dp(10), dp(12), dp(12))
+        }
+
+        val headerRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val statusView = TextView(context).apply {
+            textSize = 12.5f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            if (isLive) {
+                val start = if (ControllerRuntime.transmissionStartTime > 0) ControllerRuntime.transmissionStartTime else System.currentTimeMillis()
+                val elapsed = System.currentTimeMillis() - start
+                text = "● AO VIVO • ${formatElapsedTime(elapsed)}"
+                setTextColor(Color.WHITE)
+                background = NeonTheme.tileCard("minus")
+            } else {
+                text = "○ Transmissão Parada"
+                setTextColor(Color.rgb(180, 195, 230))
+                background = NeonTheme.card()
+            }
+        }
+        liveTimerView = statusView
+        headerRow.addView(statusView, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+
+        liveCard.addView(headerRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(8)
+        })
+
+        // Resumo das plataformas conectadas / configuradas
+        val platforms = if (isLive) ScreenCaptureService.activePlatforms else StreamingConfig.getSelectedPlatformsSummary(context)
+        val targetsDesc = if (platforms.isNotEmpty()) {
+            "Canais: " + platforms.joinToString(", ")
+        } else {
+            "Nenhuma chave RTMP salva (configure no app)"
+        }
+        val targetsLabel = TextView(context).apply {
+            text = targetsDesc
+            textSize = 11f
+            setTextColor(if (platforms.isNotEmpty()) NeonTheme.cyan else Color.rgb(235, 120, 140))
+            setPadding(0, 0, 0, dp(8))
+        }
+        liveCard.addView(targetsLabel)
+
+        // BOTÃO DE AÇÃO: INICIAR OU ENCERRAR TRANSMISSÃO
+        if (isLive) {
+            val stopBtn = LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                gravity = Gravity.CENTER
+                background = NeonTheme.stopTransmitButtonBackground()
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    StreamingConfig.stopLiveStream(context)
+                    Toast.makeText(context, "Transmissão encerrada.", Toast.LENGTH_SHORT).show()
+                    render()
+                }
+            }
+            val stopIcon = TextView(context).apply {
+                text = "⬛"
+                textSize = 14f
+                setTextColor(Color.rgb(255, 64, 92))
+                setPadding(0, 0, dp(8), 0)
+            }
+            val stopLabel = TextView(context).apply {
+                text = "ENCERRAR TRANSMISSÃO"
+                textSize = 13.5f
+                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                setTextColor(Color.WHITE)
+            }
+            stopBtn.addView(stopIcon)
+            stopBtn.addView(stopLabel)
+            liveCard.addView(stopBtn, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        } else {
+            val startBtn = LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                gravity = Gravity.CENTER
+                background = NeonTheme.transmitButtonBackground()
+                setPadding(dp(14), dp(11), dp(14), dp(11))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    val started = StreamingConfig.startLiveStream(context)
+                    if (started) {
+                        Toast.makeText(context, "Iniciando transmissão ao vivo...", Toast.LENGTH_SHORT).show()
+                        render()
+                    } else {
+                        Toast.makeText(context, "Configure ao menos uma chave RTMP válida nas configurações do app.", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+            val startIcon = TextView(context).apply {
+                text = "🔴"
+                textSize = 14f
+                setPadding(0, 0, dp(8), 0)
+            }
+            val startLabel = TextView(context).apply {
+                text = "INICIAR TRANSMISSÃO AO VIVO"
+                textSize = 13.5f
+                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                setTextColor(Color.WHITE)
+            }
+            startBtn.addView(startIcon)
+            startBtn.addView(startLabel)
+            liveCard.addView(startBtn, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        }
+
+        container.addView(liveCard, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(10)
+        })
+
+        // === 2. CONTROLE DE ÁUDIO DO MICROFONE ===
+        renderAudioControlCard(
+            container = container,
+            title = "Microfone (Voz)",
+            iconSymbol = "🎙️",
+            key = "mic",
+            accentColor = NeonTheme.cyan,
+            defaultVol = 75
+        )
+
+        // === 3. CONTROLE DE ÁUDIO INTERNO (JOGO / SISTEMA) ===
+        renderAudioControlCard(
+            container = container,
+            title = "Áudio Interno (Jogo/Sistema)",
+            iconSymbol = "♫",
+            key = "internal",
+            accentColor = NeonTheme.purple,
+            defaultVol = 85
+        )
+
+        // === 4. SUPRESSÃO DE RUÍDOS ===
+        val nsCard = LinearLayout(context).apply {
+            orientation = VERTICAL
+            background = NeonTheme.actionPanelBackground()
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        val nsRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val nsTextContainer = LinearLayout(context).apply {
+            orientation = VERTICAL
+        }
+        nsTextContainer.addView(TextView(context).apply {
+            text = "🔇 Supressão de Ruídos"
+            textSize = 13f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setTextColor(Color.WHITE)
+        })
+        nsTextContainer.addView(TextView(context).apply {
+            text = "Filtro passa-alta e noise gate contra chiados no microfone"
+            textSize = 10.5f
+            setTextColor(Color.rgb(170, 185, 220))
+            setPadding(0, dp(2), 0, 0)
+        })
+        nsRow.addView(nsTextContainer, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+
+        val nsEnabled = capturePrefs.getBoolean("noise_suppression_enabled", true)
+        val nsSwitch = Switch(context).apply {
+            isChecked = nsEnabled
+            setOnCheckedChangeListener { _, isChecked ->
+                capturePrefs.edit().putBoolean("noise_suppression_enabled", isChecked).apply()
+            }
+        }
+        nsRow.addView(nsSwitch)
+        nsCard.addView(nsRow)
+
+        container.addView(nsCard, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(10)
+        })
+
+        // === 5. BOTÕES DE ATALHO RÁPIDO INFERIORES ===
+        val quickActionsRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val openAppBtn = TextView(context).apply {
+            text = "⚙️ Abrir App LiveNexus"
+            textSize = 11.5f
+            setTextColor(NeonTheme.cyan)
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = NeonTheme.card()
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                try {
+                    val intent = Intent(context, MainActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    }
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    error(e.message ?: "Não foi possível abrir o app.")
+                }
+            }
+        }
+        quickActionsRow.addView(openAppBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+            rightMargin = dp(4)
+        })
+
+        val refreshBtn = TextView(context).apply {
+            text = "↻ Atualizar Status"
+            textSize = 11.5f
+            setTextColor(Color.rgb(200, 210, 245))
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = NeonTheme.card(violet = true)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                render()
+            }
+        }
+        quickActionsRow.addView(refreshBtn, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+            leftMargin = dp(4)
+        })
+
+        container.addView(quickActionsRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+
+        addView(container, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+    }
+
+    /** Constrói um card de controle com toggle Mudo/Ativo, indicador de volume e SeekBar interativo. */
+    private fun renderAudioControlCard(
+        container: LinearLayout,
+        title: String,
+        iconSymbol: String,
+        key: String,
+        accentColor: Int,
+        defaultVol: Int
+    ) {
+        val card = LinearLayout(context).apply {
+            orientation = VERTICAL
+            background = NeonTheme.actionPanelBackground()
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+
+        val isEnabled = capturePrefs.getBoolean("${key}_enabled", true)
+        val currentVol = capturePrefs.getInt("${key}_volume", defaultVol).coerceIn(0, 100)
+
+        // Linha 1: Título com ícone, status (Ativo/Mudo) e porcentagem
+        val topRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val titleView = TextView(context).apply {
+            text = "$iconSymbol  $title"
+            textSize = 13f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setTextColor(Color.WHITE)
+        }
+        topRow.addView(titleView, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+
+        val volPercentLabel = TextView(context).apply {
+            text = if (isEnabled) "$currentVol%" else "MUDO"
+            textSize = 12.5f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setTextColor(if (isEnabled) accentColor else Color.rgb(255, 64, 92))
+            setPadding(dp(4), 0, dp(8), 0)
+        }
+        topRow.addView(volPercentLabel)
+
+        // Botão de alternância Mudo / Ativo
+        val muteToggleBtn = TextView(context).apply {
+            text = if (isEnabled) "Ativo" else "Mutado"
+            textSize = 11f
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            setTextColor(if (isEnabled) NeonTheme.green else Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            background = if (isEnabled) NeonTheme.tileCard("plus") else NeonTheme.tileCard("minus")
+            isClickable = true
+            isFocusable = true
+        }
+        topRow.addView(muteToggleBtn)
+        card.addView(topRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(6)
+        })
+
+        // Linha 2: Controles rápidos (-10%, SeekBar, +10%)
+        val sliderRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val minusBtn = TextView(context).apply {
+            text = "−10"
+            textSize = 11f
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+            background = NeonTheme.card()
+            isClickable = true
+            isFocusable = true
+        }
+        sliderRow.addView(minusBtn, LayoutParams(dp(36), dp(30)))
+
+        val seekBar = SeekBar(context).apply {
+            max = 100
+            progress = currentVol
+            setEnabled(isEnabled)
+        }
+        sliderRow.addView(seekBar, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
+            leftMargin = dp(4)
+            rightMargin = dp(4)
+        })
+
+        val plusBtn = TextView(context).apply {
+            text = "+10"
+            textSize = 11f
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+            background = NeonTheme.card()
+            isClickable = true
+            isFocusable = true
+        }
+        sliderRow.addView(plusBtn, LayoutParams(dp(36), dp(30)))
+
+        card.addView(sliderRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+
+        // Listeners
+        fun updateUi(enabled: Boolean, vol: Int) {
+            capturePrefs.edit()
+                .putBoolean("${key}_enabled", enabled)
+                .putInt("${key}_volume", vol)
+                .apply()
+            volPercentLabel.text = if (enabled) "$vol%" else "MUDO"
+            volPercentLabel.setTextColor(if (enabled) accentColor else Color.rgb(255, 64, 92))
+            muteToggleBtn.text = if (enabled) "Ativo" else "Mutado"
+            muteToggleBtn.setTextColor(if (enabled) NeonTheme.green else Color.WHITE)
+            muteToggleBtn.background = if (enabled) NeonTheme.tileCard("plus") else NeonTheme.tileCard("minus")
+            seekBar.isEnabled = enabled
+            if (seekBar.progress != vol) seekBar.progress = vol
+        }
+
+        muteToggleBtn.setOnClickListener {
+            val nextEnabled = !capturePrefs.getBoolean("${key}_enabled", true)
+            val vol = capturePrefs.getInt("${key}_volume", defaultVol)
+            updateUi(nextEnabled, vol)
+        }
+
+        minusBtn.setOnClickListener {
+            val vol = (capturePrefs.getInt("${key}_volume", defaultVol) - 10).coerceIn(0, 100)
+            updateUi(true, vol)
+        }
+
+        plusBtn.setOnClickListener {
+            val vol = (capturePrefs.getInt("${key}_volume", defaultVol) + 10).coerceIn(0, 100)
+            updateUi(true, vol)
+        }
+
+        seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    val enabled = progress > 0
+                    updateUi(enabled, progress)
+                }
+            }
+            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStopTrackingTouch(sb: SeekBar?) {}
+        })
+
+        container.addView(card, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(8)
+        })
+    }
+
+    /** ABA 1: PAINEL DE BOTÕES E AÇÕES (MÚSICA, CÂMERA, RELOAD RTC, ADICIONAR E CENÁRIOS). */
+    private fun renderActionsTab(isLandscape: Boolean) {
+        val mainHeight = dp(if (isLandscape) 74 else if (isOverlay) 78 else 84)
 
         // 1. Quatro botões principais na linha superior: Música, Câmera, Reload RTC, Adicionar
         val mainRowWrapper = LinearLayout(context).apply {
@@ -157,15 +665,15 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
         }
 
         val primaryButtons = listOf(
-             {
-                createTileView("Música", "♫", "cenario", NeonTheme.cyan, isLandscape || overlay) {
+            {
+                createTileView("Música", "♫", "cenario", NeonTheme.cyan, isLandscape || isOverlay) {
                     adding = false
                     player = true
                     render()
                 }
             },
             {
-                createTileView("Câmera", "▣", "camera", NeonTheme.purple, isLandscape || overlay) {
+                createTileView("Câmera", "▣", "camera", NeonTheme.purple, isLandscape || isOverlay) {
                     if (adding) {
                         adding = false
                         render()
@@ -174,7 +682,7 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
                 }
             },
             {
-                createTileView("Reload\nRTC", "↻", "cenario", NeonTheme.cyan, isLandscape || overlay) {
+                createTileView("Reload\nRTC", "↻", "cenario", NeonTheme.cyan, isLandscape || isOverlay) {
                     if (adding) {
                         adding = false
                         render()
@@ -183,7 +691,7 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
                 }
             },
             {
-                createTileView("Adicionar", "＋", "add_primary", Color.WHITE, isLandscape || overlay) {
+                createTileView("Adicionar", "＋", "add_primary", Color.WHITE, isLandscape || isOverlay) {
                     adding = !adding
                     render()
                 }
@@ -215,7 +723,7 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
             })
         }
 
-        // 2. Menu visual "Adicionar Ação" — exibido somente quando o usuário toca em Adicionar
+        // 2. Menu visual "Adicionar Ação" — exibido quando o usuário toca em Adicionar
         val addActionPanel = buildAddActionPanel(isLandscape).apply {
             visibility = if (adding) View.VISIBLE else View.GONE
         }
@@ -226,7 +734,7 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
             })
         }
 
-        // 3. Grade de controles adicionados pelo usuário (abaixo dos 4 botões principais)
+        // 3. Grade de controles adicionados pelo usuário
         val total = count()
         if (total > 0) {
             val columns = when {
@@ -247,7 +755,7 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
                     symbol = symbol,
                     cardStyle = cardStyle,
                     iconAccent = accentColor,
-                    compact = isLandscape || overlay,
+                    compact = isLandscape || isOverlay,
                     configure = {
                         if (adding) {
                             adding = false
@@ -333,14 +841,13 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
                 symbol = symbol,
                 cardStyle = tileStyle,
                 iconAccent = iconColor,
-                compact = isLandscape || overlay
+                compact = isLandscape || isOverlay
             ) {
                 selectAddOption(optionIndex, optionName)
             }
         }
 
         if (isLandscape) {
-            // Modo Horizontal (Paisagem): todas as 7 opções distribuídas na largura em linha única
             val row = LinearLayout(context).apply {
                 orientation = HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -356,8 +863,7 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
             }
             container.addView(row, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         } else {
-            // Modo Vertical (Retrato): 2 linhas de 3 botões + botão Chat centralizado abaixo
-            val tileHeight = dp(if (overlay) 72 else 78)
+            val tileHeight = dp(if (isOverlay) 72 else 78)
             for (rowIdx in 0..1) {
                 val row = LinearLayout(context).apply {
                     orientation = HORIZONTAL
@@ -377,7 +883,6 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
                     bottomMargin = dp(6)
                 })
             }
-            // Linha inferior com "Chat" centralizado, como na imagem de referência
             val chatRow = LinearLayout(context).apply {
                 orientation = HORIZONTAL
                 gravity = Gravity.CENTER
@@ -385,7 +890,7 @@ class ControllerPanel(context: Context, private val overlay: Boolean) : LinearLa
             chatRow.addView(View(context), LayoutParams(0, 1, 0.7f))
             chatRow.addView(
                 makeOptionTile(6, options[6]),
-                LayoutParams(0, dp(if (overlay) 64 else 70), 1.6f)
+                LayoutParams(0, dp(if (isOverlay) 64 else 70), 1.6f)
             )
             chatRow.addView(View(context), LayoutParams(0, 1, 0.7f))
             container.addView(chatRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))

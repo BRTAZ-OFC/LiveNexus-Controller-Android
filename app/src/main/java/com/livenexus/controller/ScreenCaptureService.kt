@@ -493,6 +493,9 @@ class ScreenCaptureService : Service() {
             }
 
             Log.i(TAG, "Captura nativa configurada em ${targetW}x${targetH} (display=${metrics.widthPixels}x${metrics.heightPixels})")
+            try {
+                audioEncoder?.updateMediaProjection(activeProjection)
+            } catch (_: Throwable) {}
         }
     }
 
@@ -707,6 +710,11 @@ class ScreenCaptureService : Service() {
                 publisher = streamPub
                 isLiveStreaming = true
                 activePlatforms = streamPub.connectedPlatforms
+                ControllerRuntime.isTransmitting = true
+                if (ControllerRuntime.transmissionStartTime <= 0L) {
+                    ControllerRuntime.transmissionStartTime = System.currentTimeMillis()
+                }
+                OverlayService.refreshVisibility()
                 updateForegroundNotification()
 
                 // Encoder de Vídeo H.264
@@ -745,20 +753,25 @@ class ScreenCaptureService : Service() {
                 }
                 compositor = sceneComp
 
-                // Encoder de Áudio AAC (Microfone)
+                // Encoder de Áudio AAC (Microfone e Áudio Interno do Sistema/Jogo)
                 try {
                     val audioPrefs = getSharedPreferences("livenexus_capture_settings", Context.MODE_PRIVATE)
                     val aEncoder = LocalAudioEncoder(
                         sampleRate = 44100,
                         channelCount = 2,
                         bitrateBps = 128000,
-                        volumeProvider = {
+                        micVolumeProvider = {
                             val micOn = audioPrefs.getBoolean("mic_enabled", true)
                             if (!micOn) 0f else (audioPrefs.getInt("mic_volume", 75).coerceIn(0, 100) / 100f)
+                        },
+                        internalVolumeProvider = {
+                            val intOn = audioPrefs.getBoolean("internal_enabled", true)
+                            if (!intOn) 0f else (audioPrefs.getInt("internal_volume", 85).coerceIn(0, 100) / 100f)
                         },
                         noiseSuppressionProvider = {
                             audioPrefs.getBoolean("noise_suppression_enabled", true)
                         },
+                        mediaProjectionProvider = { projection },
                         onHeader = { asc -> streamPub.onAudioHeader(asc) },
                         onSample = { bytes, info -> streamPub.onAudioSample(bytes, info) }
                     )
@@ -825,6 +838,9 @@ class ScreenCaptureService : Service() {
     private fun stopStreamingOnly() {
         isLiveStreaming = false
         activePlatforms = emptyList()
+        ControllerRuntime.isTransmitting = false
+        ControllerRuntime.transmissionStartTime = 0L
+        OverlayService.refreshVisibility()
         try {
             compositor?.close()
         } catch (_: Exception) {}
