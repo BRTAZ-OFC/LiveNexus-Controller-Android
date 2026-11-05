@@ -24,7 +24,9 @@ checks = {
     "TTS ainda não conectado": "speechSynthesis" not in html,
     "login obrigatório": 'login.html' in main and 'if (!authorized) return' in main,
     "sessão validada pelo servidor": '"/api/auth/me"' in main,
-    "provedores externos": 'Intent.ACTION_VIEW' in main and '"/api/auth/steam"' in main,
+    "provedores externos": 'Intent.ACTION_VIEW' in main and '"/api/auth/mobile/start"' in main,
+    "callback do aplicativo": 'com.livenexus.controller' in main and 'android:scheme="com.livenexus.controller"' in (root / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8"),
+    "PKCE": 'sha256Challenge(verifier)' in main and '"/api/auth/mobile/exchange"' in main,
     "ícones incorporados": all(word in icons for word in ('"menu"', '"settings"', '"layers"', '"radio"')),
     "fontes incorporadas": all((asset / "fonts" / f).is_file() for f in ("dm-sans.ttf", "space-mono-regular.ttf", "space-mono-bold.ttf")),
     "sem arquivo Kotlin legado": sorted(p.name for p in (root / "app/src/main/java/com/livenexus/controller").glob("*.kt")) == ["MainActivity.kt"]
