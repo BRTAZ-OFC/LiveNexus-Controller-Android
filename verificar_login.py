@@ -40,7 +40,7 @@ checks = {
     "sessão AES-GCM no AndroidKeyStore": all(
         part in auth for part in ("AndroidKeyStore", "AES/GCM/NoPadding", "GCMParameterSpec")
     ),
-    "tela pós-login vazia": "private fun showBlankScreen()" in activity and "setContentView(View(this)" in activity,
+    "tela pós-login nativa": "private fun showBlankScreen()" in activity and "NativeTemplate(this).show()" in activity and (source / "NativeTemplate.kt").exists(),
     "pacote e assinatura original": 'applicationId = "com.livenexus.controller"' in gradle
         and "LIVENEXUS_KEYSTORE_PATH" in gradle,
 }
