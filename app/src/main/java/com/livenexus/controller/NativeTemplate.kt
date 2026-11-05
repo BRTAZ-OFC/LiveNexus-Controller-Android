@@ -147,6 +147,15 @@ internal class NativeTemplate(private val activity: Activity) {
         if(page=="transmission" && !wide)add(shell,Space(activity),(availableHeight/density*.14f).toInt())
     }
 
+    private fun editorHeader():View = row().apply {
+        addView(TemplateStyle.Brand(activity,""),LinearLayout.LayoutParams(dp(135),dp(46)))
+        addView(label("│  Editor de Cenário / Overlay",12f,true),LinearLayout.LayoutParams(0,-2,1f))
+        addView(iconAction("back","Desfazer"),LinearLayout.LayoutParams(dp(38),dp(38)))
+        addView(iconAction("refresh","Refazer"),LinearLayout.LayoutParams(dp(38),dp(38)))
+        addView(action("Visualizar","eye") { showExpandedPreview() },LinearLayout.LayoutParams(dp(102),dp(40)))
+        addView(action("Salvar","save",true),LinearLayout.LayoutParams(dp(88),dp(40)))
+    }
+
     private fun header():View = row().apply {
         if(wide && page=="transmission") {
             addView(TemplateStyle.Brand(activity,""),LinearLayout.LayoutParams(dp(140),dp(48)))
@@ -446,66 +455,72 @@ internal class NativeTemplate(private val activity: Activity) {
     }
 
     private fun editor():LinearLayout=column().apply {
-        val tabs=row()
-        listOf("Cenário / Overlay" to "layers","Editor" to "grid","Visualizar" to "eye","Salvar" to "save").forEach { (s,i)->
-            weighted(tabs,action(s,i,s==editorTab){if(s=="Salvar")unavailable() else {editorTab=s;rememberScroll();render()}},if(s=="Cenário / Overlay")1.5f else 1f,48,0)
-        };add(this,tabs)
-        val content=if(wide)row().apply {gravity=Gravity.TOP} else column()
-        val canvas=card()
-        val frame=editorPreview()
-        add(canvas,frame,top=3)
-        val tools=row()
-        val canvasLabel=if(wide)"Canvas: 1920 × 1080 (16:9)" else "16:9 · 1920×1080"
-        tools.addView(action(canvasLabel),LinearLayout.LayoutParams(0,dp(48),1f))
-        tools.addView(action("−"){zoom=maxOf(10,zoom-10);rememberScroll();render()},
-            LinearLayout.LayoutParams(dp(48),dp(48)))
-        tools.addView(label("$zoom%",11f).apply{gravity=Gravity.CENTER},
-            LinearLayout.LayoutParams(dp(48),dp(48)))
-        tools.addView(action("+"){zoom=minOf(200,zoom+10);rememberScroll();render()},
-            LinearLayout.LayoutParams(dp(48),dp(48)))
-        tools.addView(iconAction("expand","Tela cheia"){showExpandedPreview()},
-            LinearLayout.LayoutParams(dp(48),dp(48)))
-        add(canvas,tools,top=6)
-        val elements=card();sectionHeader(elements,"Elementos","layers")
-        val filters=row();listOf("Todos","Cenários","Overlays").forEach { s-> weighted(filters,action(s,selected=filter==s){filter=s;rememberScroll();render()},height=30,gap=0) };add(elements,filters,top=4)
-        val items=listOf("Texto" to "text","Imagem" to "image","Vídeo / Fonte" to "video","Alertas" to "bell","Widgets" to "grid","Mídia Social" to "share","Formas" to "shape","Cenas Salvas" to "folder","Browser Source" to "globe","WebCam" to "video")
-        val count=if(wide)2 else if(availableWidth/density<360)4 else 5
-        items.chunked(count).forEach { group ->
-            val line=row();group.forEach { (s,i)->weighted(line,action(s,i,stacked=true),height=55,gap=0) }
-            repeat(count-group.size){weighted(line,Space(activity))};add(elements,line,top=3)
+        val workspace=row().apply {gravity=Gravity.TOP}
+        val sidebar=column().apply {
+            background=TemplateStyle.Panel(density,radius=3f,glow=false)
+            setPadding(dp(3),dp(4),dp(3),dp(4))
         }
-        // 48 dp por controle: rolagem horizontal evita esmagar os ícones.
-        val toolbar=row()
-        listOf("cursor","move","expand","refresh","copy","layers","lock","trash").forEach { key ->
-            val selected=(key==editorMode) || (key=="lock" && editorLocked)
-            val description=when(key) {
-                "cursor"->"Selecionar"
-                "move"->"Mover elemento"
-                "expand"->"Ampliar prévia"
-                "refresh"->"Restaurar posição"
-                "copy"->"Duplicar"
-                "layers"->"Camadas"
-                "lock"->if(editorLocked)"Destravar elemento" else "Travar elemento"
-                else->"Excluir"
-            }
-            val button=action("",key,selected) {
+        listOf("cursor","move","text","image","video","layers","trash").forEach { key ->
+            val item=action("",key,editorMode==key) {
                 when(key) {
-                    "cursor","move" -> { editorMode=key;rememberScroll();render() }
-                    "lock" -> { editorLocked=!editorLocked;rememberScroll();render() }
-                    "refresh" -> { editorPositionX=.5f;editorPositionY=.5f;rememberScroll();render() }
-                    "expand" -> showExpandedPreview()
+                    "cursor","move" -> {editorMode=key;render()}
                     else -> unavailable()
                 }
-            }.apply { contentDescription=description }
-            toolbar.addView(button,LinearLayout.LayoutParams(dp(48),dp(48)).apply { marginEnd=dp(4) })
+            }
+            item.contentDescription=key
+            add(sidebar,item,40,2)
         }
-        val toolbarScroll=HorizontalScrollView(activity).apply {
-            isHorizontalScrollBarEnabled=false;overScrollMode=View.OVER_SCROLL_NEVER
-            addView(toolbar)
+        workspace.addView(sidebar,LinearLayout.LayoutParams(dp(53),-1))
+        val center=column().apply {
+            setPadding(dp(5),dp(4),dp(5),dp(4))
+            gravity=Gravity.CENTER_VERTICAL
         }
-        add(elements,toolbarScroll,top=6)
-        if(wide){weighted(content,canvas,2.8f);weighted(content,elements,1f)}else{add(content,canvas,top=6);add(content,elements,top=6)}
-        add(this,content,top=4)
+        val previewBox=FrameLayout(activity)
+        val preview=editorPreview()
+        previewBox.addView(preview,FrameLayout.LayoutParams(-1,-1,Gravity.CENTER))
+        center.addView(previewBox,LinearLayout.LayoutParams(-1,0,1f))
+        val footer=row()
+        footer.addView(label("Ajuste do canvas",10f),LinearLayout.LayoutParams(0,-2,1f))
+        footer.addView(label("1920 x 1080 (16:9)",10f,true),LinearLayout.LayoutParams(dp(145),-2))
+        footer.addView(iconAction("back","Diminuir zoom") {zoom=maxOf(10,zoom-10);render()},LinearLayout.LayoutParams(dp(36),dp(36)))
+        footer.addView(label("$zoom%",10f).apply {gravity=Gravity.CENTER},LinearLayout.LayoutParams(dp(44),-2))
+        footer.addView(iconAction("next","Aumentar zoom") {zoom=minOf(200,zoom+10);render()},LinearLayout.LayoutParams(dp(36),dp(36)))
+        footer.addView(iconAction("expand","Tela cheia") {showExpandedPreview()},LinearLayout.LayoutParams(dp(36),dp(36)))
+        add(center,footer,40,2)
+        workspace.addView(center,LinearLayout.LayoutParams(0,-1,1f))
+        val elements=column().apply {
+            background=TemplateStyle.Panel(density,radius=3f,glow=false)
+            setPadding(dp(5),dp(5),dp(5),dp(5))
+        }
+        sectionHeader(elements,"Elementos","layers")
+        val filters=row()
+        listOf("Todos","Cenas","Overlays").forEach { value ->
+            weighted(filters,action(value,selected=filter==value) {filter=value;render()},height=31,gap=0)
+        }
+        add(elements,filters,34,3)
+        val search=EditText(activity).apply {
+            hint="Buscar elemento..."
+            setSingleLine(true)
+            textSize=10f
+            setTextColor(TemplateStyle.white)
+            setHintTextColor(TemplateStyle.muted)
+            background=TemplateStyle.Panel(density,radius=4f,glow=false)
+        }
+        add(elements,search,37,4)
+        val elementItems=column()
+        listOf("Texto" to "text","Imagem" to "image","Vídeo / Fonte" to "video",
+            "Alertas" to "bell","Widgets" to "grid","Mídia Social" to "share",
+            "Formas" to "shape","Cenas Salvas" to "folder").forEach { (name,symbol) ->
+            add(elementItems,action("$name    ›",symbol),37,2)
+        }
+        val scroll=ScrollView(activity).apply {
+            isVerticalScrollBarEnabled=false
+            addView(elementItems)
+        }
+        elements.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
+        add(elements,action("Voltar","back",true) {navigate("transmission")},42,4)
+        workspace.addView(elements,LinearLayout.LayoutParams(dp(184),-1))
+        addView(workspace,LinearLayout.LayoutParams(-1,-1))
     }
 
     private fun positionEditorArtwork(frame:View) {
@@ -521,7 +536,12 @@ internal class NativeTemplate(private val activity: Activity) {
 
     private fun editorPreview(): View {
         val frame=SixteenByNine(activity)
-        frame.addView(art("LiveNEXUS"),FrameLayout.LayoutParams(-1,-1))
+        frame.background=TemplateStyle.Backdrop()
+        val artwork=TemplateStyle.Brand(activity,"")
+        frame.addView(artwork,FrameLayout.LayoutParams(-1,-1).apply {
+            leftMargin=dp(25);rightMargin=dp(25);topMargin=dp(18);bottomMargin=dp(18)
+        })
+        editorArtwork=artwork
         if(editorTab!="Visualizar") frame.foreground=SelectionBorder(density,editorLocked)
         frame.isClickable=true
         var previousX=0f
