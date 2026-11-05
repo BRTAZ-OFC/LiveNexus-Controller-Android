@@ -13,8 +13,13 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import org.json.JSONObject
 import java.io.IOException
+import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.net.URL
+import javax.net.ssl.SSLException
+import android.util.Log
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.Executors
@@ -119,8 +124,17 @@ class MainActivity : Activity() {
                             }
                         }
                     }
-                } catch (_: Exception) {
-                    showError("Falha ao iniciar o login externo. Verifique a internet.")
+                } catch (e: Exception) {
+                    Log.e("LiveNexusAuth", "Falha ao iniciar autenticacao externa ($provider)", e)
+                    val message = when (e) {
+                        is HttpStatusException -> "Servidor LiveNEXUS respondeu HTTP ${e.status} no login externo."
+                        is UnknownHostException -> "Nao foi possivel localizar o servidor LiveNEXUS (DNS)."
+                        is SocketTimeoutException -> "O servidor LiveNEXUS nao respondeu no prazo (timeout)."
+                        is SSLException -> "Falha na conexao HTTPS com o servidor LiveNEXUS."
+                        is ConnectException -> "Nao foi possivel conectar ao servidor LiveNEXUS."
+                        else -> "Erro de autenticacao: ${e.javaClass.simpleName}. Consulte o diagnostico."
+                    }
+                    showError(message)
                 } finally {
                     pendingLogin = false
                 }
@@ -179,6 +193,8 @@ class MainActivity : Activity() {
         }
     }
 
+    private class HttpStatusException(val status: Int) : IOException("HTTP $status")
+
     private fun apiRequest(
         path: String,
         method: String,
@@ -198,7 +214,11 @@ class MainActivity : Activity() {
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             }
-            if (connection.responseCode !in 200..299) throw IOException("Autenticação recusada")
+            val status = connection.responseCode
+            if (status !in 200..299) {
+                Log.w("LiveNexusAuth", "Falha HTTP $status em $path")
+                throw HttpStatusException(status)
+            }
             val text = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
             return JSONObject(text)
         } finally {
