@@ -1,6 +1,7 @@
 package com.livenexus.controller
 
 import android.app.Activity
+import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
@@ -71,7 +72,7 @@ internal class NativeTemplate(private val activity: Activity) {
 
     private fun rememberScroll() { currentScroll?.let { scrollPositions[page]=it.scrollY } }
     private fun navigate(destination: String) {
-        rememberScroll(); popup?.dismiss(); page=destination; render()
+        rememberScroll(); popup?.dismiss(); page=destination; activity.requestedOrientation=if(destination=="editor") ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED; render()
     }
     private fun column() = LinearLayout(activity).apply { orientation=LinearLayout.VERTICAL; clipChildren=false; clipToPadding=false }
     private fun row() = LinearLayout(activity).apply { orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL; clipChildren=false; clipToPadding=false }
@@ -120,8 +121,10 @@ internal class NativeTemplate(private val activity: Activity) {
         currentScroll=null;expandedPreview=null;root.removeAllViews()
         val shell=column().apply { setPadding(dp(if(wide)12 else 8),dp(3),dp(if(wide)12 else 8),dp(8)) }
         root.addView(shell,FrameLayout.LayoutParams(-1,-1))
-        add(shell,header(),if(wide)54 else 72)
-        if(page=="transmission") {
+        add(shell,if(page=="editor") editorHeader() else header(),if(wide)54 else 72)
+        if(page=="editor") {
+            shell.addView(editor(),LinearLayout.LayoutParams(-1,0,1f))
+        } else if(page=="transmission") {
             shell.addView(home(),LinearLayout.LayoutParams(-1,0,1f))
         } else {
             val scroll=ScrollView(activity).apply {
@@ -140,7 +143,7 @@ internal class NativeTemplate(private val activity: Activity) {
             shell.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
             scroll.post { scroll.scrollTo(0,scrollPositions[page]?:0) }
         }
-        if(page!="encoder")add(shell,navigation(),if(wide)48 else 66,6)
+        if(page!="encoder" && page!="editor")add(shell,navigation(),if(wide)48 else 66,6)
         if(page=="transmission" && !wide)add(shell,Space(activity),(availableHeight/density*.14f).toInt())
     }
 
