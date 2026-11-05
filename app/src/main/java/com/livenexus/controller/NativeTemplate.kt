@@ -144,7 +144,7 @@ internal class NativeTemplate(private val activity: Activity) {
             if(canGoBack)"Voltar à transmissão" else "Abrir menu") {
             if(canGoBack) navigate("transmission") else showMenu()
         }
-        addView(left,LinearLayout.LayoutParams(dp(40),dp(40)))
+        addView(left,LinearLayout.LayoutParams(dp(48),dp(48)))
         val brand=TemplateStyle.Brand(activity)
         addView(brand,LinearLayout.LayoutParams(0,dp(if(wide)52 else 62),1f).apply { marginStart=dp(8);marginEnd=dp(8) })
         // A login session does not establish a stream connection.
@@ -162,7 +162,7 @@ internal class NativeTemplate(private val activity: Activity) {
             val button=action(title,symbol,selected,stacked=!wide) {
                 if(destination=="menu")showMenu() else navigate(destination)
             }
-            weighted(this,button,height=if(wide)46 else 64,gap=0)
+            weighted(this,button,height=if(wide)48 else 64,gap=0)
             if(destination=="menu")menuAnchor=button
         }
     }
@@ -173,10 +173,10 @@ internal class NativeTemplate(private val activity: Activity) {
         val panel=card(18f).apply { setPadding(dp(12),dp(8),dp(12),dp(14)) }
         val heading=row()
         weighted(heading,TemplateStyle.Brand(activity,"MENU RÁPIDO"),height=51,gap=0)
-        heading.addView(iconAction("close","Fechar menu") { popup?.dismiss() },LinearLayout.LayoutParams(dp(32),dp(36)))
+        heading.addView(iconAction("close","Fechar menu") { popup?.dismiss() },LinearLayout.LayoutParams(dp(48),dp(48)))
         add(panel,heading)
-        add(panel,action("Cenários     ›","layers",true){navigate("editor")},44,4)
-        add(panel,action("Controles     ›","game"){navigate("controls")},44,5)
+        add(panel,action("Cenários     ›","layers",true){navigate("editor")},48,4)
+        add(panel,action("Controles     ›","game"){navigate("controls")},48,5)
         popup=PopupWindow(panel,min(dp(285),(availableWidth*.66f).toInt()),ViewGroup.LayoutParams.WRAP_CONTENT,true).apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT));isOutsideTouchable=true;elevation=dp(8).toFloat()
             panel.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(availableHeight,View.MeasureSpec.AT_MOST))
@@ -229,12 +229,12 @@ internal class NativeTemplate(private val activity: Activity) {
     private fun title(title:String,symbol:String):View = row().apply {
         background=TemplateStyle.Panel(density,radius=18f)
         setPadding(dp(8),dp(4),dp(8),dp(4))
-        addView(iconAction("back","Voltar à transmissão"){navigate("transmission")},LinearLayout.LayoutParams(dp(34),dp(36)))
+        addView(iconAction("back","Voltar à transmissão"){navigate("transmission")},LinearLayout.LayoutParams(dp(48),dp(48)))
         val center=row().apply { gravity=Gravity.CENTER }
         center.addView(icon(symbol),LinearLayout.LayoutParams(dp(28),dp(28)))
         center.addView(label(title,20f,true),LinearLayout.LayoutParams(-2,-2).apply { marginStart=dp(9) })
         weighted(this,center)
-        addView(Space(activity),LinearLayout.LayoutParams(dp(34),1))
+        addView(Space(activity),LinearLayout.LayoutParams(dp(48),1))
     }
     private fun sectionHeader(parent:LinearLayout,title:String,symbol:String,subtitle:String?=null) {
         val heading=row()
@@ -245,7 +245,7 @@ internal class NativeTemplate(private val activity: Activity) {
     }
 
     private fun controls():LinearLayout = column().apply {
-        add(this,title("Controles","game"),43,0)
+        add(this,title("Controles","game"),54,0)
         if(wide) {
             val columns=row().apply { gravity=Gravity.TOP }
             val left=column();add(left,hotkeys());add(left,player(),top=5)
@@ -256,10 +256,10 @@ internal class NativeTemplate(private val activity: Activity) {
     }
     private fun hotkeys():View = card().apply {
         sectionHeader(this,"Hotkeys","keyboard","Atalhos de cenas, subcenas e ações rápidas")
-        val keys=row();listOf("Cena 1  F1","Cena 2  F2","Subcena  F3").forEachIndexed { i,s -> weighted(keys,action(s,if(i==2)"layers" else "video"),height=34,gap=1) }
+        val keys=row();listOf("Cena 1  F1","Cena 2  F2","Subcena  F3").forEachIndexed { i,s -> weighted(keys,action(s,if(i==2)"layers" else "video"),height=48,gap=1) }
         add(this,keys,top=5)
         val commands=row()
-        listOf("Iniciar Transmissão" to "play","Parar Transmissão" to "stop","Reiniciar" to "refresh").forEach { (s,i)->weighted(commands,action(s,i),height=34,gap=1) }
+        listOf("Iniciar Transmissão" to "play","Parar Transmissão" to "stop","Reiniciar" to "refresh").forEach { (s,i)->weighted(commands,action(s,i),height=48,gap=1) }
         add(this,commands,top=3)
     }
     private fun player():View = card().apply {
@@ -269,8 +269,8 @@ internal class NativeTemplate(private val activity: Activity) {
         media.addView(cover,LinearLayout.LayoutParams(dp(50),dp(50)))
         val track=column();add(track,label("Nenhuma mídia carregada",11f,true));add(track,label("--:-- / --:--",10f),top=3)
         val transport=row()
-        listOf("back" to "Anterior","pause" to "Pausar","next" to "Próxima").forEach { (i,s)-> weighted(transport,iconAction(i,s),height=36,gap=1) }
-        weighted(media,track,gap=5);media.addView(transport,LinearLayout.LayoutParams(dp(105),dp(38)))
+        listOf("back" to "Anterior","pause" to "Pausar","next" to "Próxima").forEach { (i,s)-> weighted(transport,iconAction(i,s),height=48,gap=1) }
+        weighted(media,track,gap=5);media.addView(transport,LinearLayout.LayoutParams(dp(144),dp(48)))
         add(this,media,top=5)
         add(this,volumeRow("",75){},top=1)
     }
@@ -292,7 +292,7 @@ internal class NativeTemplate(private val activity: Activity) {
                 override fun afterTextChanged(s:android.text.Editable?) {}
             })
         }
-        weighted(input,field,3f,35,0);weighted(input,action("Ler","play",true),1f,35,0);add(this,input,top=3)
+        weighted(input,field,3f,48,0);weighted(input,action("Ler","play",true),1f,48,0);add(this,input,top=3)
         val duck=row();weighted(duck,label("Ducking (reduzir áudio da mídia)",10f));duck.addView(label("-12 dB",11f,true))
         add(this,duck,27,3)
     }
@@ -320,7 +320,7 @@ internal class NativeTemplate(private val activity: Activity) {
         val list=column()
         listOf("OBS (WebSocket)","StreamElements","Streamlabs").forEach { name ->
             val item=action("$name     ›","link")
-            add(list,item,32,2)
+            add(list,item,48,2)
         }
         if(wide){weighted(content,heading,1f);weighted(content,list,2f)}else{add(content,heading);add(content,list,top=5)}
         add(this,content)
@@ -329,7 +329,7 @@ internal class NativeTemplate(private val activity: Activity) {
     private fun choices(title:String,symbol:String,options:List<String>,value:String,changed:(String)->Unit):View=card(prominent=false).apply {
         val head=row();head.addView(icon(symbol),LinearLayout.LayoutParams(dp(19),dp(19)));weighted(head,label(title,12f,true));add(this,head)
         val optionsRow=row()
-        options.forEach { option -> weighted(optionsRow,action(option,selected=option==value) { rememberScroll();changed(option);render() },height=31,gap=1) }
+        options.forEach { option -> weighted(optionsRow,action(option,selected=option==value) { rememberScroll();changed(option);render() },height=48,gap=1) }
         add(this,optionsRow,top=3)
     }
     private fun volumeRow(name:String,value:Int,changed:(Int)->Unit):View=row().apply {
@@ -352,7 +352,7 @@ internal class NativeTemplate(private val activity: Activity) {
         val content=row().apply { gravity=Gravity.TOP }
         if(wide) {
             val side=card()
-            listOf("Ajuste Encoder" to "gear","Vídeo" to "screen","Áudio" to "mic","Avançado" to "gear","Pré-visualização" to "eye").forEachIndexed { i,(s,k)->add(side,action(s,k,i==0),44,3) }
+            listOf("Ajuste Encoder" to "gear","Vídeo" to "screen","Áudio" to "mic","Avançado" to "gear","Pré-visualização" to "eye").forEachIndexed { i,(s,k)->add(side,action(s,k,i==0),48,3) }
             content.addView(side,LinearLayout.LayoutParams(dp(135),-2))
         }
         val main=card()
@@ -367,7 +367,7 @@ internal class NativeTemplate(private val activity: Activity) {
         val rateRow=row();val number=label("$bitrate Kbps",11f,true)
         weighted(rateRow,seek(bitrate-2000,8000){bitrate=it+2000;number.text="$bitrate Kbps"},height=29);rateRow.addView(number)
         add(rate,rateRow);val limits=row();weighted(limits,label("2000 Kbps",9f));limits.addView(label("10000 Kbps",9f));add(rate,limits)
-        val codec=card(prominent=false);sectionHeader(codec,"Codec de Vídeo","grid");add(codec,action("H.264     ⌄"),32,3)
+        val codec=card(prominent=false);sectionHeader(codec,"Codec de Vídeo","grid");add(codec,action("H.264     ⌄"),48,3)
         if(wide){val line=row();weighted(line,rate,1.8f);weighted(line,codec);add(main,line,top=4)}else{add(main,rate,top=3);add(main,codec,top=3)}
         val audio=card(prominent=false);sectionHeader(audio,"Áudio","mic")
         val external=row();weighted(external,label("Microfone (Áudio Externo)",10f));external.addView(toggle(mic){mic=it});add(audio,external,28)
@@ -389,7 +389,7 @@ internal class NativeTemplate(private val activity: Activity) {
         val content=row().apply {gravity=Gravity.TOP}
         if(wide){
             val side=card()
-            listOf(Triple("Ajuste Encoder","gear","encoder"),Triple("Plataformas","layers","platforms"),Triple("Transmissão","broadcast","transmission"),Triple("Visualização","screen","transmission"),Triple("Cenário / Overlay","layers","editor")).forEach { (s,i,d)->add(side,action(s,i,d==page){navigate(d)},44,4) }
+            listOf(Triple("Ajuste Encoder","gear","encoder"),Triple("Plataformas","layers","platforms"),Triple("Transmissão","broadcast","transmission"),Triple("Visualização","screen","transmission"),Triple("Cenário / Overlay","layers","editor")).forEach { (s,i,d)->add(side,action(s,i,d==page){navigate(d)},48,4) }
             content.addView(side,LinearLayout.LayoutParams(dp(135),-2))
         }
         val main=column()
@@ -413,27 +413,33 @@ internal class NativeTemplate(private val activity: Activity) {
         // No stream backend exists in this repository; do not present fabricated connected states or keys.
         add(this,label("Não conectado",9f).apply{setTextColor(TemplateStyle.muted)},top=1)
         add(this,label("URL do Servidor (RTMP / RTMPS)",10f,true),top=6)
-        add(this,action("Configuração não disponível","copy"),30,2)
+        add(this,action("Configuração não disponível","copy"),48,2)
         add(this,label("Stream Key",10f,true),top=5)
-        add(this,action("Não configurada","eye"),30,2)
-        val buttons=row();weighted(buttons,action("Testar","broadcast",true),height=33,gap=0);weighted(buttons,action("Conectar","link"),height=33,gap=0)
+        add(this,action("Não configurada","eye"),48,2)
+        val buttons=row();weighted(buttons,action("Testar","broadcast",true),height=48,gap=0);weighted(buttons,action("Conectar","link"),height=48,gap=0)
         add(this,buttons,top=5)
     }
 
     private fun editor():LinearLayout=column().apply {
         val tabs=row()
         listOf("Cenário / Overlay" to "layers","Editor" to "grid","Visualizar" to "eye","Salvar" to "save").forEach { (s,i)->
-            weighted(tabs,action(s,i,s==editorTab){if(s=="Salvar")unavailable() else {editorTab=s;rememberScroll();render()}},if(s=="Cenário / Overlay")1.5f else 1f,39,0)
+            weighted(tabs,action(s,i,s==editorTab){if(s=="Salvar")unavailable() else {editorTab=s;rememberScroll();render()}},if(s=="Cenário / Overlay")1.5f else 1f,48,0)
         };add(this,tabs)
         val content=if(wide)row().apply {gravity=Gravity.TOP} else column()
         val canvas=card()
         val frame=editorPreview()
         add(canvas,frame,top=3)
-        val tools=row();weighted(tools,action("Canvas: 1080 × 1920 (9:16)"),2.7f,34,0)
-        weighted(tools,action("−"){zoom=maxOf(10,zoom-10);rememberScroll();render()},.5f,34,0)
-        weighted(tools,label("$zoom%",11f).apply{gravity=Gravity.CENTER},.6f,34,0)
-        weighted(tools,action("+"){zoom=minOf(200,zoom+10);rememberScroll();render()},.5f,34,0)
-        weighted(tools,iconAction("expand","Tela cheia"),.5f,34,0)
+        val tools=row()
+        val canvasLabel=if(wide)"Canvas: 1920 × 1080 (16:9)" else "16:9 · 1920×1080"
+        tools.addView(action(canvasLabel),LinearLayout.LayoutParams(0,dp(48),1f))
+        tools.addView(action("−"){zoom=maxOf(10,zoom-10);rememberScroll();render()},
+            LinearLayout.LayoutParams(dp(48),dp(48)))
+        tools.addView(label("$zoom%",11f).apply{gravity=Gravity.CENTER},
+            LinearLayout.LayoutParams(dp(48),dp(48)))
+        tools.addView(action("+"){zoom=minOf(200,zoom+10);rememberScroll();render()},
+            LinearLayout.LayoutParams(dp(48),dp(48)))
+        tools.addView(iconAction("expand","Tela cheia"){showExpandedPreview()},
+            LinearLayout.LayoutParams(dp(48),dp(48)))
         add(canvas,tools,top=6)
         val elements=card();sectionHeader(elements,"Elementos","layers")
         val filters=row();listOf("Todos","Cenários","Overlays").forEach { s-> weighted(filters,action(s,selected=filter==s){filter=s;rememberScroll();render()},height=30,gap=0) };add(elements,filters,top=4)
@@ -483,6 +489,9 @@ internal class NativeTemplate(private val activity: Activity) {
         val freeY=(frame.height-element.height).coerceAtLeast(0)
         element.translationX=(editorPositionX-.5f)*freeX
         element.translationY=(editorPositionY-.5f)*freeY
+        val zoomScale=zoom/66f
+        element.scaleX=zoomScale
+        element.scaleY=zoomScale
     }
 
     private fun editorPreview(): View {
