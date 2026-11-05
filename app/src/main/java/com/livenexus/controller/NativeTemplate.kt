@@ -11,6 +11,7 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.MotionEvent
 import android.widget.*
 import kotlin.math.min
 
@@ -36,6 +37,12 @@ internal class NativeTemplate(private val activity: Activity) {
     private var zoom = 66
     private var filter = "Todos"
     private var editorTab = "Cenário / Overlay"
+    private var editorMode = "cursor"
+    private var editorLocked = false
+    private var editorPositionX = .5f
+    private var editorPositionY = .5f
+    private var editorArtwork: View? = null
+    private var expandedPreview: View? = null
     private val scrollPositions = mutableMapOf<String, Int>()
     private var currentScroll: ScrollView? = null
 
@@ -50,7 +57,7 @@ internal class NativeTemplate(private val activity: Activity) {
             if (width > 0 && height > 0 && (width != availableWidth || height != availableHeight)) {
                 rememberScroll()
                 availableWidth=width; availableHeight=height
-                wide=width>height && width/density>=600f
+                wide=width>height
                 root.post { render() }
             }
         }
@@ -104,7 +111,7 @@ internal class NativeTemplate(private val activity: Activity) {
 
     private fun render() {
         if(availableWidth==0)return
-        popup?.dismiss();currentScroll=null;root.removeAllViews()
+        popup?.dismiss();currentScroll=null;expandedPreview=null;root.removeAllViews()
         val shell=column().apply { setPadding(dp(if(wide)12 else 8),dp(3),dp(if(wide)12 else 8),dp(8)) }
         root.addView(shell,FrameLayout.LayoutParams(-1,-1))
         add(shell,header(),if(wide)54 else 72)
@@ -132,9 +139,10 @@ internal class NativeTemplate(private val activity: Activity) {
     }
 
     private fun header():View = row().apply {
-        val left=iconAction(if(page=="encoder"||page=="platforms")"back" else "menu",
-            if(page=="encoder"||page=="platforms")"Voltar" else "Abrir menu") {
-            if(page=="encoder"||page=="platforms")navigate("transmission") else showMenu()
+        val canGoBack=page=="encoder" || page=="platforms" || page=="editor"
+        val left=iconAction(if(canGoBack)"back" else "menu",
+            if(canGoBack)"Voltar à transmissão" else "Abrir menu") {
+            if(canGoBack) navigate("transmission") else showMenu()
         }
         addView(left,LinearLayout.LayoutParams(dp(40),dp(40)))
         val brand=TemplateStyle.Brand(activity)
@@ -177,19 +185,29 @@ internal class NativeTemplate(private val activity: Activity) {
         }
     }
 
-    private fun home(): View = FrameLayout(activity).apply {
-        val preview=art("MINIATURA")
-        addView(preview,FrameLayout.LayoutParams(-1,-1,Gravity.CENTER))
-        addOnLayoutChangeListener { _,l,t,r,b,_,_,_,_ ->
-            val freeW=r-l-dp(if(wide)72 else 18)
-            val freeH=b-t-dp(if(wide)16 else 48)
-            if(freeW>0&&freeH>0) {
-                val pw=if(wide)min(freeW,(freeH*16f/9f).toInt()) else min(freeW,freeH)
-                val ph=if(wide)(pw*9f/16f).toInt() else pw
-                val params=preview.layoutParams as FrameLayout.LayoutParams
-                if(params.width!=pw||params.height!=ph){params.width=pw;params.height=ph;preview.layoutParams=params}
-            }
+    /** Mede a prévia dentro do espaço disponível e preserva 16:9 nos dois eixos. */
+    private class SixteenByNine(context: android.content.Context): FrameLayout(context) {
+        override fun onMeasure(widthMeasureSpec:Int,heightMeasureSpec:Int) {
+            val availableWidth=View.MeasureSpec.getSize(widthMeasureSpec).coerceAtLeast(0)
+            val heightMode=View.MeasureSpec.getMode(heightMeasureSpec)
+            val availableHeight=if(heightMode==View.MeasureSpec.UNSPECIFIED) Int.MAX_VALUE
+                                else View.MeasureSpec.getSize(heightMeasureSpec).coerceAtLeast(0)
+            val fittedWidth=if(availableHeight==Int.MAX_VALUE) availableWidth else
+                min(availableWidth,(availableHeight.toLong()*16L/9L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+            val fittedHeight=(fittedWidth.toLong()*9L/16L).toInt()
+            super.onMeasure(
+                View.MeasureSpec.makeMeasureSpec(fittedWidth,View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(fittedHeight,View.MeasureSpec.EXACTLY)
+            )
         }
+    }
+
+    private fun home(): View = FrameLayout(activity).apply {
+        // A miniatura da transmissão jamais vira quadrada em retrato.
+        val preview=SixteenByNine(activity).apply {
+            addView(art("MINIATURA"),FrameLayout.LayoutParams(-1,-1))
+        }
+        addView(preview,FrameLayout.LayoutParams(-1,-1,Gravity.CENTER))
     }
     private fun art(title:String):View = FrameLayout(activity).apply {
         background=TemplateStyle.Panel(density,radius=24f)
@@ -201,11 +219,12 @@ internal class NativeTemplate(private val activity: Activity) {
         val inner=FrameLayout(activity).apply { background=TemplateStyle.Backdrop() }
         addView(inner,FrameLayout.LayoutParams(-1,-1))
         val content=column().apply { gravity=Gravity.CENTER }
-        inner.addView(content,FrameLayout.LayoutParams(-1,-1))
+        inner.addView(content,FrameLayout.LayoutParams(-2,-2,Gravity.CENTER))
         content.addView(icon("play"),LinearLayout.LayoutParams(dp(58),dp(58)))
-        add(content,label(title,if(title=="MINIATURA")30f else 27f,true).apply {
+        content.addView(label(title,if(title=="MINIATURA")30f else 27f,true).apply {
             gravity=Gravity.CENTER;typeface=Typeface.create("sans-serif",if(title=="MINIATURA")Typeface.BOLD else Typeface.BOLD_ITALIC)
-        },top=16)
+        },LinearLayout.LayoutParams(-2,-2).apply { topMargin=dp(16) })
+        if(title=="LiveNEXUS") editorArtwork=content
     }
     private fun title(title:String,symbol:String):View = row().apply {
         background=TemplateStyle.Panel(density,radius=18f)
@@ -408,9 +427,8 @@ internal class NativeTemplate(private val activity: Activity) {
         };add(this,tabs)
         val content=if(wide)row().apply {gravity=Gravity.TOP} else column()
         val canvas=card()
-        val preview=art("LiveNEXUS")
-        val frame=FrameLayout(activity).apply {addView(preview,FrameLayout.LayoutParams(-1,-1));foreground=SelectionBorder(density)}
-        add(canvas,frame,if(wide)190 else ((availableWidth/density-40)*9/16).toInt(),3)
+        val frame=editorPreview()
+        add(canvas,frame,top=3)
         val tools=row();weighted(tools,action("Canvas: 1080 × 1920 (9:16)"),2.7f,34,0)
         weighted(tools,action("−"){zoom=maxOf(10,zoom-10);rememberScroll();render()},.5f,34,0)
         weighted(tools,label("$zoom%",11f).apply{gravity=Gravity.CENTER},.6f,34,0)
@@ -425,16 +443,118 @@ internal class NativeTemplate(private val activity: Activity) {
             val line=row();group.forEach { (s,i)->weighted(line,action(s,i,stacked=true),height=55,gap=0) }
             repeat(count-group.size){weighted(line,Space(activity))};add(elements,line,top=3)
         }
-        val toolbar=row();listOf("cursor","move","expand","refresh","copy","layers","lock","trash").forEach { i->weighted(toolbar,iconAction(i,i),height=33,gap=0) };add(elements,toolbar,top=6)
+        // 48 dp por controle: rolagem horizontal evita esmagar os ícones.
+        val toolbar=row()
+        listOf("cursor","move","expand","refresh","copy","layers","lock","trash").forEach { key ->
+            val selected=(key==editorMode) || (key=="lock" && editorLocked)
+            val description=when(key) {
+                "cursor"->"Selecionar"
+                "move"->"Mover elemento"
+                "expand"->"Ampliar prévia"
+                "refresh"->"Restaurar posição"
+                "copy"->"Duplicar"
+                "layers"->"Camadas"
+                "lock"->if(editorLocked)"Destravar elemento" else "Travar elemento"
+                else->"Excluir"
+            }
+            val button=action("",key,selected) {
+                when(key) {
+                    "cursor","move" -> { editorMode=key;rememberScroll();render() }
+                    "lock" -> { editorLocked=!editorLocked;rememberScroll();render() }
+                    "refresh" -> { editorPositionX=.5f;editorPositionY=.5f;rememberScroll();render() }
+                    "expand" -> showExpandedPreview()
+                    else -> unavailable()
+                }
+            }.apply { contentDescription=description }
+            toolbar.addView(button,LinearLayout.LayoutParams(dp(48),dp(48)).apply { marginEnd=dp(4) })
+        }
+        val toolbarScroll=HorizontalScrollView(activity).apply {
+            isHorizontalScrollBarEnabled=false;overScrollMode=View.OVER_SCROLL_NEVER
+            addView(toolbar)
+        }
+        add(elements,toolbarScroll,top=6)
         if(wide){weighted(content,canvas,2.8f);weighted(content,elements,1f)}else{add(content,canvas,top=6);add(content,elements,top=6)}
         add(this,content,top=4)
     }
 
-    private class SelectionBorder(private val density:Float):android.graphics.drawable.Drawable() {
+    private fun positionEditorArtwork(frame:View) {
+        val element=editorArtwork ?: return
+        val freeX=(frame.width-element.width).coerceAtLeast(0)
+        val freeY=(frame.height-element.height).coerceAtLeast(0)
+        element.translationX=(editorPositionX-.5f)*freeX
+        element.translationY=(editorPositionY-.5f)*freeY
+    }
+
+    private fun editorPreview(): View {
+        val frame=SixteenByNine(activity)
+        frame.addView(art("LiveNEXUS"),FrameLayout.LayoutParams(-1,-1))
+        if(editorTab!="Visualizar") frame.foreground=SelectionBorder(density,editorLocked)
+        frame.isClickable=true
+        var previousX=0f
+        var previousY=0f
+        frame.setOnTouchListener { target,event ->
+            if(editorLocked || editorMode!="move" || editorTab=="Visualizar") {
+                false
+            } else {
+                when(event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        previousX=event.x;previousY=event.y
+                        target.parent?.requestDisallowInterceptTouchEvent(true)
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val element=editorArtwork
+                        if(element!=null) {
+                            val freeX=(frame.width-element.width).coerceAtLeast(1)
+                            val freeY=(frame.height-element.height).coerceAtLeast(1)
+                            editorPositionX=(editorPositionX+(event.x-previousX)/freeX).coerceIn(0f,1f)
+                            editorPositionY=(editorPositionY+(event.y-previousY)/freeY).coerceIn(0f,1f)
+                            positionEditorArtwork(frame)
+                        }
+                        previousX=event.x;previousY=event.y
+                        true
+                    }
+                    MotionEvent.ACTION_UP,MotionEvent.ACTION_CANCEL -> {
+                        target.parent?.requestDisallowInterceptTouchEvent(false)
+                        if(event.actionMasked==MotionEvent.ACTION_UP) target.performClick()
+                        true
+                    }
+                    else -> true
+                }
+            }
+        }
+        frame.post { positionEditorArtwork(frame) }
+        return frame
+    }
+
+    private fun showExpandedPreview() {
+        if(expandedPreview!=null || availableWidth<=0 || availableHeight<=0)return
+        popup?.dismiss()
+        val cover=FrameLayout(activity).apply {
+            setBackgroundColor(0xee010315.toInt())
+            isClickable=true
+        }
+        val maxWidth=min(availableWidth-dp(24),
+            ((availableHeight-dp(100)).coerceAtLeast(dp(90))*16f/9f).toInt()).coerceAtLeast(dp(120))
+        val panel=column().apply {
+            setPadding(dp(4),dp(4),dp(4),dp(4))
+        }
+        val preview=SixteenByNine(activity).apply {
+            addView(art("MINIATURA"),FrameLayout.LayoutParams(-1,-1))
+        }
+        add(panel,preview)
+        add(panel,action("Voltar","back"){ root.removeView(cover);expandedPreview=null },48,8)
+        cover.addView(panel,FrameLayout.LayoutParams(maxWidth,-2,Gravity.CENTER))
+        root.addView(cover,FrameLayout.LayoutParams(-1,-1))
+        expandedPreview=cover
+    }
+
+    private class SelectionBorder(private val density:Float,private val locked:Boolean):android.graphics.drawable.Drawable() {
         private val p=android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
         override fun draw(c:android.graphics.Canvas){
             val inset=10*density;val r=android.graphics.RectF(bounds).apply{inset(inset,inset)}
-            p.color=TemplateStyle.cyan;p.style=android.graphics.Paint.Style.STROKE;p.strokeWidth=density
+            p.color=if(locked) TemplateStyle.pink else TemplateStyle.cyan
+            p.style=android.graphics.Paint.Style.STROKE;p.strokeWidth=density
             c.drawRect(r,p);p.style=android.graphics.Paint.Style.FILL
             for(x in listOf(r.left,r.centerX(),r.right))for(y in listOf(r.top,r.centerY(),r.bottom)){
                 if(x==r.centerX()&&y==r.centerY())continue
