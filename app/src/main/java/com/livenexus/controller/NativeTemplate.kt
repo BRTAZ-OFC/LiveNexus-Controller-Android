@@ -143,7 +143,7 @@ internal class NativeTemplate(private val activity: Activity) {
             shell.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
             scroll.post { scroll.scrollTo(0,scrollPositions[page]?:0) }
         }
-        if(page!="encoder" && page!="editor")add(shell,navigation(),if(wide)48 else 66,6)
+        if(page!="encoder" && page!="editor" && !(page=="platforms" && wide))add(shell,navigation(),if(wide)48 else 66,6)
         if(page=="transmission" && !wide)add(shell,Space(activity),(availableHeight/density*.14f).toInt())
     }
 
@@ -493,14 +493,22 @@ internal class NativeTemplate(private val activity: Activity) {
                 Triple("Cenário / Overlay","layers","editor")).forEach { (name,symbol,dest) ->
                 add(side,action(name,symbol,dest==page){navigate(dest)},45,3)
             }
-            content.addView(side,LinearLayout.LayoutParams(dp(135),-2))
+            content.addView(side,LinearLayout.LayoutParams(dp(185),-2))
         }
         val main=column()
         val heading=row()
         heading.addView(icon("layers",TemplateStyle.white),LinearLayout.LayoutParams(dp(24),dp(24)))
         weighted(heading,label("Plataformas de Transmissão",if(wide)17f else 16f,true),gap=4)
-        add(main,heading,34)
-        add(main,action("Conexão via RTMP / RTMPS","link"),36,2)
+        if(wide) {
+            val titleRow=row()
+            weighted(titleRow,heading,1f,gap=0)
+            titleRow.addView(action("Conexão via RTMP / RTMPS","link"),
+                LinearLayout.LayoutParams(dp(220),dp(38)))
+            add(main,titleRow,43)
+        } else {
+            add(main,heading,34)
+            add(main,action("Conexão via RTMP / RTMPS","link"),36,2)
+        }
         val items=if(wide)row().apply {gravity=Gravity.TOP} else column()
         listOf("Twitch","YouTube","Kick").forEach { name ->
             if(wide) weighted(items,platform(name),gap=1)
