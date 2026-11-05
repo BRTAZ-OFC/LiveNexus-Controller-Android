@@ -2,6 +2,17 @@ package com.livenexus.controller
 
 import android.app.Activity
 import android.content.Intent
+import android.content.Context
+import android.content.res.Configuration
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.view.Gravity
+import android.widget.TextView
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
@@ -36,6 +47,7 @@ class MainActivity : Activity() {
     private val worker = Executors.newSingleThreadExecutor()
     private val random = SecureRandom()
     private val authPrefs by lazy { getSharedPreferences("mobile_auth_pending", MODE_PRIVATE) }
+    private val sessionCache by lazy { SecureSessionCache(applicationContext) }
     private var browser: WebView? = null
     @Volatile private var authorized = false
     @Volatile private var pendingLogin = false
@@ -182,14 +194,23 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun verifyAndOpen(token: String) {
+    private fun verifyAndOpen(token: String, restoring: Boolean = false): Boolean {
         val response = apiRequest("/api/auth/me", "GET", null, token)
-        if (!response.optBoolean("ok") ||
-            response.optJSONObject("user")?.optString("user_id").isNullOrBlank()) {
-            showError("O servidor não confirmou sua sessão.")
-            return
-        }
         val userId = response.optJSONObject("user")?.optString("user_id").orEmpty()
+        if (!response.optBoolean("ok") || userId.isBlank()) {
+            if (!restoring) showError("O servidor não confirmou sua sessão.")
+            return false
+        }
+        if (!restoring) {
+            // Cache criptografado; a API já confirmou a sessão antes de armazenar.
+            try {
+                if (!sessionCache.save(token)) {
+                    Log.w("LiveNexusAuth", "Não foi possível persistir a sessão.")
+                }
+            } catch (error: Exception) {
+                Log.e("LiveNexusAuth", "Armazenamento protegido indisponível", error)
+            }
+        }
         runOnUiThread {
             if (!isFinishing && !isDestroyed) {
                 sessionToken = token
@@ -198,6 +219,7 @@ class MainActivity : Activity() {
                 showMainTemplate()
             }
         }
+        return true
     }
 
     internal class HttpStatusException(val status: Int) : IOException("HTTP $status")
@@ -249,8 +271,60 @@ class MainActivity : Activity() {
             WindowManager.LayoutParams.FLAG_FULLSCREEN,
             WindowManager.LayoutParams.FLAG_FULLSCREEN
         )
-        showLogin()
-        processExternalReturn(intent?.data)
+        // Login externo tem prioridade; o deep link não pode ser perdido.
+        if (intent?.data?.scheme == "com.livenexus.controller") {
+            showLogin()
+            processExternalReturn(intent?.data)
+        } else {
+            restoreOrRequestLogin()
+        }
+    }
+
+    private fun restoreOrRequestLogin() {
+        val loading = TextView(this).apply {
+            text = "Verificando sessão LiveNEXUS…"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.rgb(2, 3, 19))
+            gravity = Gravity.CENTER
+        }
+        setContentView(loading)
+        worker.execute {
+            val cached = try {
+                sessionCache.load()
+            } catch (error: Exception) {
+                Log.e("LiveNexusAuth", "Falha ao recuperar sessão protegida", error)
+                null
+            }
+            if (cached.isNullOrBlank()) {
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) showLogin()
+                }
+                return@execute
+            }
+            val validated = try {
+                verifyAndOpen(cached, restoring = true)
+            } catch (error: Exception) {
+                // Erro HTTP de sessão inválida revoga o cache; falha de rede não.
+                if (error is HttpStatusException && (error.status == 401 || error.status == 403)) {
+                    sessionCache.clear()
+                }
+                Log.w("LiveNexusAuth", "Não foi possível restaurar a sessão: " + error.javaClass.simpleName)
+                false
+            }
+            if (!validated) {
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed && !authorized) showLogin()
+                }
+            }
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Mantém a WebView e sua página; apenas reconfigura o tamanho.
+        browser?.invalidate()
+        browser?.requestLayout()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -326,12 +400,8 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Android")
     override fun onBackPressed() {
-        if (authorized) {
-            clearPendingExternal()
-            showLogin()
-        } else {
-            moveTaskToBack(true)
-        }
+        // Voltar apenas deixa o APK em segundo plano: não é um comando de logout.
+        moveTaskToBack(true)
     }
 
     override fun onDestroy() {
@@ -339,6 +409,72 @@ class MainActivity : Activity() {
         browser?.apply { stopLoading(); destroy() }
         browser = null
         super.onDestroy()
+    }
+}
+
+/**
+ * Guarda somente o token da sessão do APK em armazenamento privado, criptografado
+ * com chave AES-GCM não exportável do AndroidKeyStore. Sem dependências adicionais.
+ */
+private class SecureSessionCache(context: Context) {
+    private val prefs = context.getSharedPreferences(
+        "livenexus_secure_session", Context.MODE_PRIVATE
+    )
+    private val alias = "livenexus_controller_session_aes_v1"
+    private val name = "encrypted_token"
+
+    private fun key(): SecretKey {
+        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        val existing = store.getKey(alias, null) as? SecretKey
+        if (existing != null) return existing
+        val generator = KeyGenerator.getInstance(
+            KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore"
+        )
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build()
+        )
+        return generator.generateKey()
+    }
+
+    fun save(token: String): Boolean {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, key())
+        val ciphertext = cipher.doFinal(token.toByteArray(Charsets.UTF_8))
+        val payload = cipher.iv + ciphertext
+        return prefs.edit().putString(
+            name, Base64.encodeToString(payload, Base64.NO_WRAP)
+        ).commit()
+    }
+
+    fun load(): String? {
+        val stored = prefs.getString(name, null) ?: return null
+        return try {
+            val payload = Base64.decode(stored, Base64.NO_WRAP)
+            if (payload.size <= 12 + 16) throw IllegalArgumentException("Sessão inválida")
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                key(),
+                GCMParameterSpec(128, payload.copyOfRange(0, 12))
+            )
+            String(cipher.doFinal(payload.copyOfRange(12, payload.size)), Charsets.UTF_8)
+                .takeIf { it.isNotBlank() }
+        } catch (error: Exception) {
+            Log.w("LiveNexusAuth", "Sessão armazenada inválida; descartando cache", error)
+            clear()
+            null
+        }
+    }
+
+    fun clear() {
+        prefs.edit().remove(name).commit()
     }
 }
 

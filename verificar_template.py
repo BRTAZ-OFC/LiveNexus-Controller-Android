@@ -28,6 +28,21 @@ checks = {
     "TTS ainda não conectado": "speechSynthesis" not in html,
     "login obrigatório": 'login.html' in main and 'if (!authorized) return' in main,
     "sessão validada pelo servidor": '"/api/auth/me"' in main,
+    "sessão criptografada no AndroidKeyStore": all(
+        fragment in main for fragment in (
+            'SecureSessionCache', 'AndroidKeyStore',
+            'AES/GCM/NoPadding', 'GCMParameterSpec',
+            'sessionCache.save(token)', 'sessionCache.load()'
+        )
+    ),
+    "restauração valida API antes do menu": 'verifyAndOpen(cached, restoring = true)' in main,
+    "rotação preserva Activity e WebView": (
+        'android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"' in
+        (root / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
+        and 'onConfigurationChanged(newConfig: Configuration)' in main
+        and 'browser?.invalidate()' in main
+    ),
+    "botão voltar não apaga sessão": 'override fun onBackPressed()' in main and 'moveTaskToBack(true)' in main,
     "provedores externos": 'Intent.ACTION_VIEW' in main and '"/api/auth/mobile/start"' in main,
     "callback do aplicativo": 'com.livenexus.controller' in main and 'android:scheme="com.livenexus.controller"' in (root / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8"),
     "PKCE": 'sha256Challenge(verifier)' in main and '"/api/auth/mobile/exchange"' in main,
