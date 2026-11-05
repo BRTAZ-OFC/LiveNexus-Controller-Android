@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.livenexus.controller"
-    compileSdk = 35
+    compileSdk = 36
     defaultConfig {
         applicationId = "com.livenexus.controller"
         minSdk = 29
