@@ -1,6 +1,8 @@
 package com.livenexus.controller
 
 import android.app.Activity
+import androidx.activity.ComponentActivity
+import androidx.browser.auth.AuthTabIntent
 import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Canvas
@@ -39,7 +41,14 @@ import javax.net.ssl.SSLException
  * Login por usuário/senha ou navegador externo (Google/Steam).
  * Após autenticação, exibe uma tela vazia para a próxima etapa.
  */
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
+    private val authTabLauncher = AuthTabIntent.registerActivityResultLauncher(this) { result ->
+        if (result.resultCode == AuthTabIntent.RESULT_OK) {
+            handleExternalReturn(result.resultUri)
+        } else if (result.resultCode == AuthTabIntent.RESULT_CANCELED && !authenticated) {
+            status("Autenticação cancelada ou navegador fechado.")
+        }
+    }
     private val backend = LiveNexusAuth()
     private val executor = Executors.newSingleThreadExecutor()
     private val working = AtomicBoolean(false)
@@ -176,11 +185,10 @@ class MainActivity : Activity() {
                 }
                 ui {
                     try {
-                        startActivity(
-                            Intent(Intent.ACTION_VIEW, authorizationUrl)
-                                .addCategory(Intent.CATEGORY_BROWSABLE)
+                        AuthTabIntent.Builder().build().launch(
+                            authTabLauncher, authorizationUrl, "com.livenexus.controller"
                         )
-                        status("Conclua a autenticação no navegador para retornar ao aplicativo.")
+                        status("Conclua a autenticação para retornar ao aplicativo.")
                     } catch (_: Exception) {
                         pendingAuth.clear()
                         status("Não foi possível abrir o navegador.")
