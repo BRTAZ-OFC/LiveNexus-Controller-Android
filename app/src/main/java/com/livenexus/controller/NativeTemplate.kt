@@ -63,8 +63,9 @@ internal class NativeTemplate(private val activity: Activity) {
     }
 
     private fun add(parent: LinearLayout, view: View, top: Int = 6) {
+        val originalHeight = view.layoutParams?.height ?: ViewGroup.LayoutParams.WRAP_CONTENT
         parent.addView(view, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ViewGroup.LayoutParams.MATCH_PARENT, originalHeight
         ).apply { topMargin = dp(top) })
     }
 
