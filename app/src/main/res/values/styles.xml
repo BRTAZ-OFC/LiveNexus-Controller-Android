@@ -1,13 +1,11 @@
 <resources>
-    <style name="LiveNexusTheme" parent="android:style/Theme.Material.NoActionBar">
+    <style name="UiLabTheme" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans-serif</item>
         <item name="android:colorAccent">#00DFFF</item>
-        <item name="android:colorBackground">#020316</item>
-        <item name="android:windowBackground">#020316</item>
-        <item name="android:textColorPrimary">#FFFFFF</item>
-        <item name="android:textColorSecondary">#A5A1C0</item>
-        <item name="android:statusBarColor">#020316</item>
-        <item name="android:navigationBarColor">#020316</item>
+        <item name="android:colorBackground">#040818</item>
+        <item name="android:windowBackground">#040818</item>
+        <item name="android:statusBarColor">#040818</item>
+        <item name="android:navigationBarColor">#040818</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
     </style>

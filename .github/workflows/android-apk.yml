@@ -46,6 +46,8 @@ jobs:
           done
           printf '%s' "$LIVENEXUS_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/livenexus-release.jks"
           keytool -list -keystore "$RUNNER_TEMP/livenexus-release.jks" -storepass "$LIVENEXUS_KEYSTORE_PASSWORD" -alias "$LIVENEXUS_KEY_ALIAS" >/dev/null
+      - name: Verificar template visual do Canva
+        run: python3 verificar_template.py
       - name: Compilar APK release assinado
         env:
           LIVENEXUS_KEYSTORE_PATH: ${{ runner.temp }}/livenexus-release.jks
