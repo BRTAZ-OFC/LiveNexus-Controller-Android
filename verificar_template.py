@@ -2,6 +2,7 @@
 """Verifica o APK visual sem alegar equivalência pixel a pixel."""
 from pathlib import Path
 import re
+import subprocess
 import xml.etree.ElementTree as ET
 
 root = Path(__file__).resolve().parent
@@ -17,7 +18,10 @@ checks = {
     "somente uma Activity": len(manifest.find("application").findall("activity")) == 1,
     "interface HTML/CSS local": 'file:///android_asset/livenexus/index.html' in main,
     "WebView sem rede": "settings.blockNetworkLoads = true" in main,
-    "ponte apenas para login": 'addJavascriptInterface(LoginBridge(), "AndroidLogin")' in main and 'removeJavascriptInterface("AndroidLogin")' in main,
+    "ponte de login isolada": 'addJavascriptInterface(LoginBridge(), "AndroidLogin")' in main and 'removeJavascriptInterface("AndroidLogin")' in main,
+    "Controller usa APIs existentes": '"/api/cenarios"' in main and '"/api/controller/commands"' in main and '"AndroidController"' in main,
+    "template liga comandos reais": 'window.LiveNexusControls' in html and "controllerCommand('rtc-reload')" in html and "controllerCommand('music-next')" in html,
+    "selecao pelo nome do subcenario": 'hotkey-scene-child' in html and 'sub.name' in html,
     "seis telas Canva": all(f'id="{name}-view"' in html for name in ("menu", "editor", "encoder", "controls", "platforms", "dashboard")),
     "CSS Canva preservado": all(word in html for word in (".platform-grid", ".mini-frame", "function navigate(name)")),
     "sem dependências Canva CDN": all(word not in html for word in ("__codeletBootstrap__", "/_sdk/", "cdn.tailwindcss.com", "cdn.jsdelivr.net", "fonts.googleapis.com")),
@@ -31,6 +35,23 @@ checks = {
     "fontes incorporadas": all((asset / "fonts" / f).is_file() for f in ("dm-sans.ttf", "space-mono-regular.ttf", "space-mono-bold.ttf")),
     "sem arquivo Kotlin legado": sorted(p.name for p in (root / "app/src/main/java/com/livenexus/controller").glob("*.kt")) == ["MainActivity.kt"]
 }
+scripts = [
+    script for script in re.findall(r"<script[^>]*>(.*?)</script>", html, flags=re.DOTALL)
+    if script.strip()
+]
+if not scripts:
+    checks["JS do template presente"] = False
+else:
+    validation = subprocess.run(
+        ["node", "--check"],
+        input="\n".join(scripts),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    checks["JS do template sem erro de sintaxe"] = validation.returncode == 0
+    if validation.returncode:
+        print(validation.stderr)
 for label,valid in checks.items():
     print(("PASS " if valid else "FAIL ") + label)
 if not all(checks.values()):

@@ -12,6 +12,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import org.json.JSONObject
+import org.json.JSONArray
+import java.util.concurrent.ExecutorService
 import java.io.IOException
 import java.net.ConnectException
 import java.net.HttpURLConnection
@@ -37,6 +39,8 @@ class MainActivity : Activity() {
     private var browser: WebView? = null
     @Volatile private var authorized = false
     @Volatile private var pendingLogin = false
+    @Volatile private var sessionToken: String? = null
+    @Volatile private var sessionUserId: String? = null
 
     private fun randomUrlSafe(): String {
         val bytes = ByteArray(32)
@@ -185,15 +189,18 @@ class MainActivity : Activity() {
             showError("O servidor não confirmou sua sessão.")
             return
         }
+        val userId = response.optJSONObject("user")?.optString("user_id").orEmpty()
         runOnUiThread {
             if (!isFinishing && !isDestroyed) {
+                sessionToken = token
+                sessionUserId = userId
                 authorized = true
                 showMainTemplate()
             }
         }
     }
 
-    private class HttpStatusException(val status: Int) : IOException("HTTP $status")
+    internal class HttpStatusException(val status: Int) : IOException("HTTP $status")
 
     private fun apiRequest(
         path: String,
@@ -273,6 +280,8 @@ class MainActivity : Activity() {
 
     private fun showLogin() {
         authorized = false
+        sessionToken = null
+        sessionUserId = null
         browser?.apply { stopLoading(); destroy() }
         val loginView = localBrowser()
         loginView.addJavascriptInterface(LoginBridge(), "AndroidLogin")
@@ -289,6 +298,27 @@ class MainActivity : Activity() {
             destroy()
         }
         val mainView = localBrowser()
+        mainView.addJavascriptInterface(
+            ControllerBridge(
+                context = this,
+                executor = worker,
+                isAuthorized = { authorized },
+                token = { sessionToken },
+                userId = { sessionUserId },
+                request = ::apiRequest,
+                deliver = { name, payload ->
+                    runOnUiThread {
+                        if (authorized && browser === mainView && !isFinishing && !isDestroyed) {
+                            mainView.evaluateJavascript(
+                                "window.LiveNexusControls && window.LiveNexusControls." + name +
+                                    "(" + JSONObject.quote(payload.toString()) + ");",
+                                null
+                            )
+                        }
+                    }
+                }
+            ), "AndroidController"
+        )
         browser = mainView
         setContentView(mainView)
         mainView.loadUrl("file:///android_asset/livenexus/index.html")
@@ -309,5 +339,166 @@ class MainActivity : Activity() {
         browser?.apply { stopLoading(); destroy() }
         browser = null
         super.onDestroy()
+    }
+}
+
+/**
+ * Ponte restrita à interface local do Controller; não duplica a lógica do dashboard.
+ * Utiliza SOMENTE GET /api/cenarios e POST /api/controller/commands.
+ * Nenhuma informação de sessão é enviada à página HTML.
+ */
+private class ControllerBridge(
+    private val context: Activity,
+    private val executor: ExecutorService,
+    private val isAuthorized: () -> Boolean,
+    private val token: () -> String?,
+    private val userId: () -> String?,
+    private val request: (String, String, String?, String?) -> JSONObject,
+    private val deliver: (String, JSONObject) -> Unit
+) {
+    private val preferences = context.getSharedPreferences(
+        "livenexus_controller_scene_buttons", Activity.MODE_PRIVATE
+    )
+    private val supportedActions = setOf(
+        "rtc-reload", "scenario-select", "music-toggle", "music-next",
+        "music-previous", "music-volume-up", "music-volume-down"
+    )
+    // Chaves dos subcenários recebidos do próprio servidor para este usuário.
+    private var validSubscenes = emptySet<String>()
+
+    private fun fault(action: String, message: String) =
+        JSONObject().put("ok", false).put("action", action).put("message", message)
+
+    private fun message(error: Exception): String = when (error) {
+        is MainActivity.HttpStatusException -> "Servidor respondeu HTTP " + error.status + "."
+        is SocketTimeoutException -> "Tempo esgotado ao consultar o LiveNEXUS."
+        is UnknownHostException -> "Servidor LiveNEXUS não encontrado."
+        else -> "Falha ao comunicar com o LiveNEXUS."
+    }
+
+    @JavascriptInterface
+    fun loadScenes() {
+        executor.execute {
+            val bearer = token()
+            val uid = userId()
+            if (!isAuthorized() || bearer.isNullOrEmpty() || uid.isNullOrEmpty()) return@execute
+            try {
+                val answer = request("/api/cenarios", "GET", null, bearer)
+                if (!answer.optBoolean("ok")) {
+                    deliver("onCatalog", fault("catalog", "Servidor não retornou seus cenários."))
+                    return@execute
+                }
+                val raw = answer.optJSONArray("items") ?: JSONArray()
+                val scenes = JSONArray()
+                val pairs = mutableSetOf<String>()
+                for (i in 0 until raw.length()) {
+                    val row = raw.optJSONObject(i) ?: continue
+                    val sceneId = row.optString("id").trim()
+                    if (sceneId.isBlank()) continue
+                    val sources = listOfNotNull(
+                        row.optJSONObject("settings"),
+                        row.optJSONObject("config"),
+                        row.optJSONObject("data"),
+                        row
+                    )
+                    val src = sources.firstOrNull {
+                        it.optJSONArray("subScenarios") != null
+                    } ?: row
+                    val sceneName = src.optString("name").ifBlank {
+                        row.optString("name").ifBlank { "Cenário sem nome" }
+                    }
+                    val actualSubs = src.optJSONArray("subScenarios") ?: JSONArray()
+                    val subs = JSONArray()
+                    for (j in 0 until actualSubs.length()) {
+                        val sub = actualSubs.optJSONObject(j) ?: continue
+                        val subId = sub.optString("id").trim()
+                        if (subId.isBlank()) continue
+                        val subName = sub.optString("name").ifBlank { "Subcenário sem nome" }
+                        subs.put(JSONObject().put("id", subId).put("name", subName))
+                        pairs.add(sceneId + ":" + subId)
+                    }
+                    scenes.put(
+                        JSONObject().put("id", sceneId)
+                            .put("name", sceneName)
+                            .put("subScenarios", subs)
+                    )
+                }
+                validSubscenes = pairs
+                val saved = try {
+                    JSONObject(preferences.getString(uid, "{}") ?: "{}")
+                } catch (_: Exception) { JSONObject() }
+                deliver(
+                    "onCatalog",
+                    JSONObject().put("ok", true).put("scenarios", scenes)
+                        .put("bindings", saved)
+                )
+            } catch (e: Exception) {
+                Log.e("LiveNexusController", "Erro ao buscar cenários", e)
+                deliver("onCatalog", fault("catalog", message(e)))
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun saveScene(slot: Int, sceneId: String, subId: String) {
+        executor.execute {
+            val uid = userId()
+            if (!isAuthorized() || uid.isNullOrEmpty()) return@execute
+            if (slot < 1 || slot > 1000 || !validSubscenes.contains(sceneId + ":" + subId)) {
+                deliver("onSaved", fault("save", "Selecione um subcenário real."))
+                return@execute
+            }
+            try {
+                val saved = try {
+                    JSONObject(preferences.getString(uid, "{}") ?: "{}")
+                } catch (_: Exception) { JSONObject() }
+                saved.put(slot.toString(), JSONObject()
+                    .put("scenarioId", sceneId).put("subcenarioId", subId))
+                if (!preferences.edit().putString(uid, saved.toString()).commit()) {
+                    deliver("onSaved", fault("save", "Falha ao gravar o botão."))
+                    return@execute
+                }
+                deliver(
+                    "onSaved",
+                    JSONObject().put("ok", true).put("slot", slot)
+                        .put("scenarioId", sceneId).put("subcenarioId", subId)
+                )
+            } catch (e: Exception) {
+                deliver("onSaved", fault("save", "Falha ao salvar o botão no Android."))
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun sendCommand(action: String, sceneId: String, subId: String) {
+        executor.execute {
+            val bearer = token()
+            if (!isAuthorized() || bearer.isNullOrEmpty()) return@execute
+            if (action !in supportedActions) {
+                deliver("onCommand", fault(action, "Comando não disponível na API existente."))
+                return@execute
+            }
+            if (action == "scenario-select" &&
+                !validSubscenes.contains(sceneId + ":" + subId)) {
+                deliver("onCommand", fault(action, "Subcenário não encontrado. Atualize a lista."))
+                return@execute
+            }
+            try {
+                val body = JSONObject().put("action", action)
+                if (action == "scenario-select") {
+                    body.put("scenarioId", sceneId).put("subcenarioId", subId)
+                }
+                val result = request("/api/controller/commands", "POST", body.toString(), bearer)
+                deliver(
+                    "onCommand",
+                    if (result.optBoolean("ok"))
+                        JSONObject().put("ok", true).put("action", action)
+                    else fault(action, "O servidor não aceitou o comando.")
+                )
+            } catch (e: Exception) {
+                Log.e("LiveNexusController", "Comando recusado: " + action, e)
+                deliver("onCommand", fault(action, message(e)))
+            }
+        }
     }
 }
