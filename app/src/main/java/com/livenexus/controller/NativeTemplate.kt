@@ -145,19 +145,22 @@ internal class NativeTemplate(private val activity: Activity) {
     }
 
     private fun header():View = row().apply {
-        val canGoBack=page=="encoder" || page=="platforms" || page=="editor"
-        val left=iconAction(if(canGoBack)"back" else "menu",
-            if(canGoBack)"Voltar à transmissão" else "Abrir menu") {
-            if(canGoBack) navigate("transmission") else showMenu()
+        if(wide && page=="transmission") {
+            addView(TemplateStyle.Brand(activity,""),LinearLayout.LayoutParams(dp(140),dp(48)))
+            addView(label("│  ▦  Painel de Controle (APK)",12f,true))
+            addView(Space(activity),LinearLayout.LayoutParams(0,1,1f))
+            addView(icon("gear",TemplateStyle.white),LinearLayout.LayoutParams(dp(23),dp(23)))
+        } else {
+            val back=page=="encoder" || page=="platforms" || page=="editor"
+            addView(iconAction(if(back)"back" else "menu",if(back)"Voltar à transmissão" else "Abrir menu") {
+                if(back)navigate("transmission") else showMenu()
+            },LinearLayout.LayoutParams(dp(48),dp(48)))
+            addView(TemplateStyle.Brand(activity),LinearLayout.LayoutParams(0,dp(if(wide)52 else 62),1f))
+            if(wide && page!="transmission") addView(label("Sessão ativa",11f).apply {
+                setTextColor(0xff00e8b4.toInt())
+                background=TemplateStyle.Panel(density,radius=20f,glow=false)
+            }) else addView(Space(activity),LinearLayout.LayoutParams(dp(12),1))
         }
-        addView(left,LinearLayout.LayoutParams(dp(48),dp(48)))
-        val brand=TemplateStyle.Brand(activity)
-        addView(brand,LinearLayout.LayoutParams(0,dp(if(wide)52 else 62),1f).apply { marginStart=dp(8);marginEnd=dp(8) })
-        // A login session does not establish a stream connection.
-        if(wide && page!="transmission") addView(label("Sessão ativa",11f).apply {
-            setTextColor(0xff00e8b4.toInt());setPadding(dp(9),dp(6),dp(9),dp(6))
-            background=TemplateStyle.Panel(density,radius=20f,glow=false)
-        }) else addView(Space(activity),LinearLayout.LayoutParams(dp(12),1))
     }
 
     private fun navigation():View = row().apply {
@@ -165,10 +168,10 @@ internal class NativeTemplate(private val activity: Activity) {
             Triple(if(wide)"AJUSTE ENCODER" else "AJUSTE\nENCODER","gear","encoder"),Triple("PLATAFORMAS","layers","platforms"))
         items.forEach { (title,symbol,destination) ->
             val selected=if(destination=="transmission")page!="platforms"&&page!="encoder" else destination==page
-            val button=action(title,symbol,selected,stacked=!wide) {
+            val button=action(title,symbol,selected,stacked=true) {
                 if(destination=="menu")showMenu() else navigate(destination)
             }
-            weighted(this,button,height=if(wide)48 else 64,gap=0)
+            weighted(this,button,height=64,gap=0)
             if(destination=="menu")menuAnchor=button
         }
     }
@@ -211,9 +214,9 @@ internal class NativeTemplate(private val activity: Activity) {
     private fun home(): View = FrameLayout(activity).apply {
         // A miniatura da transmissão jamais vira quadrada em retrato.
         val preview=SixteenByNine(activity).apply {
-            addView(art("MINIATURA"),FrameLayout.LayoutParams(-1,-1))
+            addView(if(wide)TemplateStyle.Brand(activity,"CENTRAL DE TRANSMISSÃO") else art("MINIATURA"),FrameLayout.LayoutParams(-1,-1))
         }
-        addView(preview,FrameLayout.LayoutParams(-1,-1,Gravity.CENTER))
+        addView(preview,FrameLayout.LayoutParams(if(wide)(availableWidth*.76f).toInt() else -1,if(wide)(availableHeight*.7f).toInt() else -1,Gravity.CENTER))
     }
     private fun art(title:String):View = FrameLayout(activity).apply {
         background=TemplateStyle.Panel(density,radius=24f)
