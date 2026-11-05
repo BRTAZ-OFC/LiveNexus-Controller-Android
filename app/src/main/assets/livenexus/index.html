@@ -76,7 +76,7 @@ window.lucide={createIcons:function(){document.querySelectorAll("i[data-lucide]"
          <span class="logo-symbol" aria-hidden="true">▷</span><strong data-template-id="mini-title" class="canva-text" style="color: rgb(247, 249, 255); font-weight: 800; font-style: normal; font-size: 40px;">MINIATURA</strong>
         </div>
        </div>
-       <aside id="quick-panel" data-template-id="quick-panel" class="canva-panel panel quick-panel" style="background: linear-gradient(150deg, rgb(14, 18, 52), rgb(5, 8, 30));">
+       <aside id="quick-panel" data-template-id="quick-panel" class="canva-panel panel quick-panel hidden" style="background: linear-gradient(150deg, rgb(14, 18, 52), rgb(5, 8, 30));">
         <div class="row between">
          <div class="brandline">
           <span class="logo-symbol" aria-hidden="true">▷</span>Live<b>NEXUS</b>
@@ -86,7 +86,7 @@ window.lucide={createIcons:function(){document.querySelectorAll("i[data-lucide]"
        </aside>
       </div>
       <div class="row between">
-       <button id="open-quick" data-template-id="open-quick-label" class="canva-button btn hidden" type="button" style="color: rgb(255, 255, 255); font-weight: 400; font-style: normal; font-size: 14px;">Abrir menu rápido</button><button id="open-dashboard" data-template-id="dashboard-link" class="canva-button btn" type="button" style="color: rgb(255, 255, 255); font-weight: 400; font-style: normal; font-size: 10px;">VISÃO GERAL HORIZONTAL →</button>
+       <button id="open-quick" data-template-id="open-quick-label" class="canva-button btn" aria-controls="quick-panel" aria-expanded="false" type="button" style="color: rgb(255, 255, 255); font-weight: 400; font-style: normal; font-size: 14px;">Abrir menu rápido</button><button id="open-dashboard" data-template-id="dashboard-link" class="canva-button btn" type="button" style="color: rgb(255, 255, 255); font-weight: 400; font-style: normal; font-size: 10px;">VISÃO GERAL HORIZONTAL →</button>
       </div>
      </section>
      <section id="editor-view" class="view" hidden="" aria-labelledby="editor-title">
@@ -366,8 +366,8 @@ function navigate(name){current=name;views.forEach(v=>$(v+'-view').hidden=v!==na
 function setLayout(value){layout=value;$('app').classList.toggle('vertical',value==='vertical');document.querySelectorAll('.layout-button').forEach(b=>{b.classList.toggle('active',b.dataset.layout===value);b.setAttribute('aria-pressed',String(b.dataset.layout===value))});$('canvas-size').value=value;notify('Composição '+(value==='vertical'?'vertical 9:16':'horizontal 16:9')+' selecionada.')}
 ['menu-top','back','nav-menu'].forEach(id=>$(id).addEventListener('click',()=>navigate('menu')));
 [['nav-stream','controls'],['nav-encoder','encoder'],['nav-platforms','platforms'],['quick-editor','editor'],['quick-controls','controls'],['open-dashboard','dashboard'],['dashboard-open-editor','editor'],['dashboard-open-controls','controls']].forEach(([id,view])=>$(id).addEventListener('click',()=>navigate(view)));
-$('close-quick').addEventListener('click',()=>{$('quick-panel').classList.add('hidden');$('open-quick').classList.remove('hidden')});
-$('open-quick').addEventListener('click',()=>{$('quick-panel').classList.remove('hidden');$('open-quick').classList.add('hidden')});
+$('close-quick').addEventListener('click',()=>{$('quick-panel').classList.add('hidden');$('open-quick').classList.remove('hidden');$('open-quick').setAttribute('aria-expanded','false')});
+$('open-quick').addEventListener('click',()=>{$('quick-panel').classList.remove('hidden');$('open-quick').classList.add('hidden');$('open-quick').setAttribute('aria-expanded','true')});
 document.querySelectorAll('.layout-button').forEach(b=>b.addEventListener('click',()=>setLayout(b.dataset.layout)));
 $('canvas-size').addEventListener('change',e=>setLayout(e.target.value));
 function updateConnection(){$('connection').classList.toggle('off',!connected);$('connection').setAttribute('aria-pressed',String(connected));$('connected-label').classList.toggle('hidden',!connected);$('disconnected-label').classList.toggle('hidden',connected)}
