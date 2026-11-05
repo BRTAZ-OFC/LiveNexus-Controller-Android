@@ -384,6 +384,15 @@ internal class NativeTemplate(private val activity: Activity) {
     }
     private fun encoder():LinearLayout=column().apply {
         // Configurações: tela própria, sem navegação inferior. Voltar fica no cabeçalho.
+        val content=row().apply { gravity=Gravity.TOP }
+        if(wide) {
+            val side=card(radius=5f)
+            listOf("Configurações" to "gear","Vídeo" to "screen","Áudio" to "mic",
+                "Avançado" to "gear","Pré-visualização" to "eye").forEachIndexed { index,item ->
+                add(side,action(item.first,item.second,index==0),45,3)
+            }
+            content.addView(side,LinearLayout.LayoutParams(dp(165),-2))
+        }
         val main=card(radius=5f)
         val heading=row()
         heading.addView(icon("gear",TemplateStyle.white),LinearLayout.LayoutParams(dp(30),dp(30)))
@@ -393,11 +402,17 @@ internal class NativeTemplate(private val activity: Activity) {
         add(main,heading,52)
 
         val res=choices("Resolução","screen",listOf("720p","1080p"),resolution){resolution=it}
-        add(main,res,top=5)
+        if(!wide) add(main,res,top=5)
         val orient=choices("Orientação","copy",listOf("Horizontal (16:9)","Vertical (9:16)"),streamOrientation){streamOrientation=it}
-        add(main,orient,top=4)
+        if(!wide) add(main,orient,top=4)
         val frames=choices("FPS (Taxa de Quadros)","layers",listOf("30 FPS","60 FPS"),fps){fps=it}
-        add(main,frames,top=4)
+        if(wide) {
+            val top=row().apply {gravity=Gravity.TOP}
+            weighted(top,res,1f,gap=1)
+            weighted(top,orient,1.2f,gap=1)
+            weighted(top,frames,1f,gap=1)
+            add(main,top,top=4)
+        } else add(main,frames,top=4)
 
         val rate=card(radius=5f,prominent=false)
         sectionHeader(rate,"Bitrate de Vídeo","broadcast")
@@ -413,12 +428,17 @@ internal class NativeTemplate(private val activity: Activity) {
         weighted(limits,label("2000 Kbps",10f))
         limits.addView(label("10000 Kbps",10f))
         add(rate,limits)
-        add(main,rate,top=4)
+        if(!wide) add(main,rate,top=4)
 
         val codec=card(radius=5f,prominent=false)
         sectionHeader(codec,"Codec de Vídeo","grid")
         add(codec,action("H.264     ⌄"),44,3)
-        add(main,codec,top=4)
+        if(wide) {
+            val middle=row().apply {gravity=Gravity.TOP}
+            weighted(middle,rate,1.8f,gap=1)
+            weighted(middle,codec,1f,gap=1)
+            add(main,middle,top=4)
+        } else add(main,codec,top=4)
 
         val audio=card(radius=5f,prominent=false)
         sectionHeader(audio,"Áudio","mic")
@@ -430,14 +450,20 @@ internal class NativeTemplate(private val activity: Activity) {
         weighted(internal,label("Áudio Interno (Som do Dispositivo)",11f))
         internal.addView(toggle(internalAudio){internalAudio=it})
         add(audio,internal,38,2)
-        add(main,audio,top=4)
+        if(!wide) add(main,audio,top=4)
 
         val volume=card(radius=5f,prominent=false)
         sectionHeader(volume,"Volume","volume")
         add(volume,volumeRow("Microfone:",micVolume){micVolume=it},top=5)
         add(volume,volumeRow("Áudio Interno:",internalVolume){internalVolume=it},top=5)
-        add(main,volume,top=4)
-        add(this,main)
+        if(wide) {
+            val lower=row().apply {gravity=Gravity.TOP}
+            weighted(lower,audio,1.25f,gap=1)
+            weighted(lower,volume,1f,gap=1)
+            add(main,lower,top=4)
+        } else add(main,volume,top=4)
+        weighted(content,main,1f,gap=2)
+        add(this,content)
 
         // Estes três botões pertencem à página, não à barra de menu do aplicativo.
         val footer=row()
