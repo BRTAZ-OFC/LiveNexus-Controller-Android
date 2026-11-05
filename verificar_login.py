@@ -20,7 +20,7 @@ checks = {
         part in activity for part in ('"Usuário"', '"Senha"', '"ENTRAR"')
     ) and "e-mail" not in activity.lower() and "email" not in activity.lower(),
     "Google e Steam externos": all(
-        part in activity for part in ('"google"', '"steam"', "Intent.ACTION_VIEW")
+        part in activity for part in ('"google"', '"steam"', "AuthTabIntent.Builder().build().launch")
     ),
     "rotas originais do servidor": all(
         part in auth for part in (
