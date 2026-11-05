@@ -177,7 +177,7 @@ internal class NativeTemplate(private val activity: Activity) {
 
     private fun navigation():View = row().apply {
         val items=listOf(Triple("MENU","menu","menu"),Triple("TRANSMISSÃO","broadcast","transmission"),
-            Triple(if(wide)"AJUSTE ENCODER" else "AJUSTE\nENCODER","gear","encoder"),Triple("PLATAFORMAS","layers","platforms"))
+            Triple("CONFIGURAÇÃO","gear","encoder"),Triple("PLATAFORMAS","layers","platforms"))
         items.forEach { (title,symbol,destination) ->
             val selected=if(destination=="transmission")page!="platforms"&&page!="encoder" else destination==page
             val button=action(title,symbol,selected,stacked=true) {
@@ -386,11 +386,11 @@ internal class NativeTemplate(private val activity: Activity) {
         val content=row().apply { gravity=Gravity.TOP }
         if(wide) {
             val side=card()
-            listOf("Ajuste Encoder" to "gear","Vídeo" to "screen","Áudio" to "mic","Avançado" to "gear","Pré-visualização" to "eye").forEachIndexed { i,(s,k)->add(side,action(s,k,i==0),48,3) }
+            listOf("Configurações" to "gear","Vídeo" to "screen","Áudio" to "mic","Avançado" to "gear","Pré-visualização" to "eye").forEachIndexed { i,(s,k)->add(side,action(s,k,i==0),48,3) }
             content.addView(side,LinearLayout.LayoutParams(dp(135),-2))
         }
         val main=card()
-        sectionHeader(main,"Ajuste Encoder","gear")
+        sectionHeader(main,"Configurações","gear")
         val res=choices("Resolução","screen",listOf("720p","1080p"),resolution){resolution=it}
         val orient=choices("Orientação","copy",listOf("Horizontal (16:9)","Vertical (9:16)"),streamOrientation){streamOrientation=it}
         val frames=choices("FPS (Taxa de Quadros)","layers",listOf("30 FPS","60 FPS"),fps){fps=it}
@@ -423,7 +423,7 @@ internal class NativeTemplate(private val activity: Activity) {
         val content=row().apply {gravity=Gravity.TOP}
         if(wide){
             val side=card()
-            listOf(Triple("Ajuste Encoder","gear","encoder"),Triple("Plataformas","layers","platforms"),Triple("Transmissão","broadcast","transmission"),Triple("Visualização","screen","transmission"),Triple("Cenário / Overlay","layers","editor")).forEach { (s,i,d)->add(side,action(s,i,d==page){navigate(d)},48,4) }
+            listOf(Triple("Configuração","gear","encoder"),Triple("Plataformas","layers","platforms"),Triple("Transmissão","broadcast","transmission"),Triple("Visualização","screen","transmission"),Triple("Cenário / Overlay","layers","editor")).forEach { (s,i,d)->add(side,action(s,i,d==page){navigate(d)},48,4) }
             content.addView(side,LinearLayout.LayoutParams(dp(135),-2))
         }
         val main=column()
