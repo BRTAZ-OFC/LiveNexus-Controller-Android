@@ -383,40 +383,79 @@ internal class NativeTemplate(private val activity: Activity) {
         })
     }
     private fun encoder():LinearLayout=column().apply {
-        val content=row().apply { gravity=Gravity.TOP }
-        if(wide) {
-            val side=card()
-            listOf("Configurações" to "gear","Vídeo" to "screen","Áudio" to "mic","Avançado" to "gear","Pré-visualização" to "eye").forEachIndexed { i,(s,k)->add(side,action(s,k,i==0),48,3) }
-            content.addView(side,LinearLayout.LayoutParams(dp(135),-2))
-        }
-        val main=card()
-        sectionHeader(main,"Configurações","gear")
+        // Configurações: tela própria, sem navegação inferior. Voltar fica no cabeçalho.
+        val main=card(radius=5f)
+        val heading=row()
+        heading.addView(icon("gear",TemplateStyle.white),LinearLayout.LayoutParams(dp(30),dp(30)))
+        weighted(heading,label("Configurações",20f,true),gap=6)
+        heading.addView(action("Configuração de\nVídeo e Áudio","video"),
+            LinearLayout.LayoutParams(dp(145),dp(48)))
+        add(main,heading,52)
+
         val res=choices("Resolução","screen",listOf("720p","1080p"),resolution){resolution=it}
+        add(main,res,top=5)
         val orient=choices("Orientação","copy",listOf("Horizontal (16:9)","Vertical (9:16)"),streamOrientation){streamOrientation=it}
+        add(main,orient,top=4)
         val frames=choices("FPS (Taxa de Quadros)","layers",listOf("30 FPS","60 FPS"),fps){fps=it}
-        if(wide) {val line=row();weighted(line,res);weighted(line,orient,1.3f);weighted(line,frames);add(main,line,top=5)}
-        else {add(main,res,top=5);add(main,orient,top=3);add(main,frames,top=3)}
-        val rate=card(prominent=false)
+        add(main,frames,top=4)
+
+        val rate=card(radius=5f,prominent=false)
         sectionHeader(rate,"Bitrate de Vídeo","broadcast")
-        val rateRow=row();val number=label("$bitrate Kbps",11f,true)
-        weighted(rateRow,seek(bitrate-2000,8000){bitrate=it+2000;number.text="$bitrate Kbps"},height=29);rateRow.addView(number)
-        add(rate,rateRow);val limits=row();weighted(limits,label("2000 Kbps",9f));limits.addView(label("10000 Kbps",9f));add(rate,limits)
-        val codec=card(prominent=false);sectionHeader(codec,"Codec de Vídeo","grid");add(codec,action("H.264     ⌄"),48,3)
-        if(wide){val line=row();weighted(line,rate,1.8f);weighted(line,codec);add(main,line,top=4)}else{add(main,rate,top=3);add(main,codec,top=3)}
-        val audio=card(prominent=false);sectionHeader(audio,"Áudio","mic")
-        val external=row();weighted(external,label("Microfone (Áudio Externo)",10f));external.addView(toggle(mic){mic=it});add(audio,external,28)
-        val device=row();weighted(device,label("Áudio Interno (Som do Dispositivo)",10f));device.addView(toggle(internalAudio){internalAudio=it});add(audio,device,28)
-        val volume=card(prominent=false);sectionHeader(volume,"Volume","volume")
-        add(volume,volumeRow("Microfone:",micVolume){micVolume=it});add(volume,volumeRow("Áudio Interno:",internalVolume){internalVolume=it})
-        if(wide){val line=row();weighted(line,audio);weighted(line,volume);add(main,line,top=4)}else{add(main,audio,top=3);add(main,volume,top=3)}
-        weighted(content,main,gap=3);add(this,content)
+        val rateRow=row()
+        val bitrateLabel=label("$bitrate Kbps",12f,true)
+        weighted(rateRow,seek(bitrate-2000,8000){
+            bitrate=it+2000
+            bitrateLabel.text="$bitrate Kbps"
+        },height=33)
+        rateRow.addView(bitrateLabel,LinearLayout.LayoutParams(dp(85),-2))
+        add(rate,rateRow,top=3)
+        val limits=row()
+        weighted(limits,label("2000 Kbps",10f))
+        limits.addView(label("10000 Kbps",10f))
+        add(rate,limits)
+        add(main,rate,top=4)
+
+        val codec=card(radius=5f,prominent=false)
+        sectionHeader(codec,"Codec de Vídeo","grid")
+        add(codec,action("H.264     ⌄"),44,3)
+        add(main,codec,top=4)
+
+        val audio=card(radius=5f,prominent=false)
+        sectionHeader(audio,"Áudio","mic")
+        val external=row()
+        weighted(external,label("Microfone (Áudio Externo)",11f))
+        external.addView(toggle(mic){mic=it})
+        add(audio,external,38,3)
+        val internal=row()
+        weighted(internal,label("Áudio Interno (Som do Dispositivo)",11f))
+        internal.addView(toggle(internalAudio){internalAudio=it})
+        add(audio,internal,38,2)
+        add(main,audio,top=4)
+
+        val volume=card(radius=5f,prominent=false)
+        sectionHeader(volume,"Volume","volume")
+        add(volume,volumeRow("Microfone:",micVolume){micVolume=it},top=5)
+        add(volume,volumeRow("Áudio Interno:",internalVolume){internalVolume=it},top=5)
+        add(main,volume,top=4)
+        add(this,main)
+
+        // Estes três botões pertencem à página, não à barra de menu do aplicativo.
         val footer=row()
-        weighted(footer,action("Restaurar Padrão","refresh"){
-            resolution="1080p";streamOrientation="Horizontal (16:9)";fps="60 FPS";bitrate=6000;mic=true;internalAudio=true;micVolume=100;internalVolume=100;rememberScroll();render()
-        },height=45)
-        weighted(footer,action("Salvar Configurações","save",true),1.3f,45)
-        weighted(footer,action("Aplicar","check"),height=45)
-        add(this,footer,top=7)
+        weighted(footer,action("Restaurar\nPadrão","refresh") {
+            resolution="1080p"
+            streamOrientation="Horizontal (16:9)"
+            fps="60 FPS"
+            bitrate=6000
+            mic=true
+            internalAudio=true
+            micVolume=100
+            internalVolume=100
+            rememberScroll()
+            render()
+        },height=62,gap=1)
+        weighted(footer,action("Salvar\nConfigurações","save",true),1.4f,62,1)
+        weighted(footer,action("Aplicar","check"),height=62,gap=1)
+        add(this,footer,62,top=12)
     }
 
     private fun platforms():LinearLayout=column().apply {
