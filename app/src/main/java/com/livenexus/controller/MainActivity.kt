@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.os.Message
 import android.provider.Settings
 import android.view.Gravity
@@ -61,6 +62,9 @@ class MainActivity : Activity() {
     @Volatile private var isRequestingMediaProjection = false
     @Volatile private var startStreamAfterCaptureAuth = false
     @Volatile private var capturePermissionDeclinedForSession = false
+    private var liveStartCountdownDialog: AlertDialog? = null
+    private var liveStartCountdownRunnable: Runnable? = null
+    private var liveStartPollRunnable: Runnable? = null
 
     private val platformConnected = mutableMapOf(
         "youtube" to false,
@@ -331,7 +335,9 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         super.onStop()
+        // Sair manualmente do app durante a contagem cancela somente o início pendente.
         if (!isChangingConfigurations) {
+            cancelLiveStartCountdown()
             ControllerRuntime.foreground = false
             OverlayService.refreshVisibility()
         }
@@ -349,6 +355,9 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        cancelLiveStartCountdown()
+        liveStartPollRunnable?.let { uiHandler.removeCallbacks(it) }
+        liveStartPollRunnable = null
         uiHandler.removeCallbacks(captureRefreshRunnable)
         uiHandler.removeCallbacks(transmissionTimerRunnable)
         releaseCaptureBrowserPreview()
@@ -400,7 +409,7 @@ class MainActivity : Activity() {
                 startCaptureWithResult(resultCode, data)
                 if (startStreamAfterCaptureAuth) {
                     startStreamAfterCaptureAuth = false
-                    uiHandler.postDelayed({ startLiveTransmission() }, 250L)
+                    uiHandler.postDelayed({ beginLiveStartCountdown() }, 250L)
                 }
             } catch (e: Throwable) {
                 startStreamAfterCaptureAuth = false
@@ -421,13 +430,14 @@ class MainActivity : Activity() {
                 if (savedCode == RESULT_OK && savedData != null) {
                     try {
                         startCaptureWithResult(savedCode, savedData)
-                        uiHandler.postDelayed({ startLiveTransmission() }, 250L)
+                        startStreamAfterCaptureAuth = false
+                        uiHandler.postDelayed({ beginLiveStartCountdown() }, 250L)
                         return
                     } catch (_: Throwable) {}
                 }
                 requestScreenCaptureForSource(allowFromAnyPage = true)
             } else {
-                startLiveTransmission()
+                beginLiveStartCountdown()
             }
         }
     }
@@ -661,19 +671,94 @@ class MainActivity : Activity() {
 
     private fun buildActiveTargetsJson(): String = StreamingConfig.buildActiveTargetsJson(this)
 
-    private fun startLiveTransmission() {
+    private fun showOverlayPermissionRequired() {
+        AlertDialog.Builder(this)
+            .setTitle("Permissão de sobreposição necessária")
+            .setMessage("Para iniciar a live e deixar somente o botão flutuante na tela, permita que o LiveNEXUS apareça sobre outros aplicativos. Depois, toque em Iniciar Live novamente.")
+            .setPositiveButton("Abrir configurações") { _, _ ->
+                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun cancelLiveStartCountdown() {
+        liveStartCountdownRunnable?.let { uiHandler.removeCallbacks(it) }
+        liveStartCountdownRunnable = null
+        val dialog = liveStartCountdownDialog
+        liveStartCountdownDialog = null
+        dialog?.setOnDismissListener(null)
+        if (dialog?.isShowing == true) dialog.dismiss()
+    }
+
+    /**
+     * Apenas a interface aguarda três segundos. O serviço RTMP/RTMPS e os
+     * encoders originais só são iniciados quando a contagem termina.
+     * A Activity permanece visível até startForegroundService() ser chamado.
+     */
+    private fun beginLiveStartCountdown() {
+        if (isFinishing || isDestroyed || !resumed || liveStartCountdownDialog != null ||
+            liveStartPollRunnable != null || isTransmitting ||
+            ScreenCaptureService.isConnecting || ScreenCaptureService.isLiveStreaming) return
+
+        if (!Settings.canDrawOverlays(this)) {
+            showOverlayPermissionRequired()
+            return
+        }
+
+        // O serviço flutuante é preparado enquanto o aplicativo está visível.
+        prepareOverlay()
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Preparando transmissão")
+            .setMessage("A live começará em 3 segundos.")
+            .setNegativeButton("Cancelar") { _, _ -> cancelLiveStartCountdown() }
+            .create()
+        liveStartCountdownDialog = dialog
+        dialog.setOnDismissListener {
+            if (liveStartCountdownDialog === dialog) cancelLiveStartCountdown()
+        }
+        dialog.show()
+
+        val deadline = SystemClock.elapsedRealtime() + 3_000L
+        val ticker = object : Runnable {
+            override fun run() {
+                if (liveStartCountdownDialog !== dialog) return
+                if (isFinishing || isDestroyed || !resumed || !Settings.canDrawOverlays(this@MainActivity)) {
+                    cancelLiveStartCountdown()
+                    return
+                }
+                val remaining = deadline - SystemClock.elapsedRealtime()
+                if (remaining <= 0L) {
+                    cancelLiveStartCountdown()
+                    startLiveTransmission(autoMinimize = true)
+                    return
+                }
+                val seconds = ((remaining + 999L) / 1_000L).toInt().coerceIn(1, 3)
+                dialog.setMessage("Iniciando em $seconds... A seguir, somente o botão flutuante ficará visível.")
+                uiHandler.postDelayed(this, 200L)
+            }
+        }
+        liveStartCountdownRunnable = ticker
+        uiHandler.post(ticker)
+    }
+
+    private fun startLiveTransmission(autoMinimize: Boolean = false) {
         val targetsJson = buildActiveTargetsJson()
         if (targetsJson == "[]") {
             Toast.makeText(this, "Nenhuma plataforma com chave de transmissão válida.", Toast.LENGTH_SHORT).show()
             return
         }
 
-        val progress = AlertDialog.Builder(this)
+        if (liveStartPollRunnable != null || ScreenCaptureService.isConnecting ||
+            ScreenCaptureService.isLiveStreaming) return
+
+        // No início automático não mantemos um diálogo aberto sobre o jogo.
+        val progress = if (autoMinimize) null else AlertDialog.Builder(this)
             .setTitle("Iniciando Transmissão")
             .setMessage("Estabelecendo conexão RTMP/RTMPS e codificando vídeo H.264 e áudio AAC...")
             .setCancelable(false)
             .create()
-        progress.show()
+        progress?.show()
 
         try {
             // A WebView do editor não pode disputar o mesmo runtimeId com
@@ -694,21 +779,30 @@ class MainActivity : Activity() {
             }
             startForegroundService(intent)
 
-            val pollStart = System.currentTimeMillis()
+            // Começa a transmissão antes de minimizar: respeita os limites
+            // do Android para serviços de projeção/microfone em segundo plano.
+            // O OverlayService já mostra apenas a bolha ao receber onStop().
+            if (autoMinimize && !moveTaskToBack(true)) {
+                Toast.makeText(this, "Não foi possível minimizar automaticamente.", Toast.LENGTH_SHORT).show()
+            }
+
+            val pollStart = SystemClock.elapsedRealtime()
             val pollRunnable = object : Runnable {
                 override fun run() {
                     if (isFinishing || isDestroyed) {
-                        try { progress.dismiss() } catch (_: Exception) {}
+                        liveStartPollRunnable = null
+                        try { progress?.dismiss() } catch (_: Exception) {}
                         return
                     }
-                    val elapsed = System.currentTimeMillis() - pollStart
+                    val elapsed = SystemClock.elapsedRealtime() - pollStart
                     // Aguarda pelo menos 400ms para o Service iniciar e enquanto isConnecting for true (até 18s)
                     if ((elapsed < 400L || ScreenCaptureService.isConnecting) && elapsed < 18000L) {
                         uiHandler.postDelayed(this, 250L)
                         return
                     }
 
-                    try { progress.dismiss() } catch (_: Exception) {}
+                    liveStartPollRunnable = null
+                    try { progress?.dismiss() } catch (_: Exception) {}
                     if (ScreenCaptureService.isLiveStreaming) {
                         isTransmitting = true
                         transmissionStartTime = System.currentTimeMillis()
@@ -722,24 +816,36 @@ class MainActivity : Activity() {
                     } else {
                         isTransmitting = false
                         val errMsg = ScreenCaptureService.lastError ?: "Falha ao conectar com servidor RTMP"
-                        AlertDialog.Builder(this@MainActivity)
-                            .setTitle("Falha na Transmissão")
-                            .setMessage("Não foi possível publicar ao vivo:\n\n$errMsg\n\nVerifique sua conexão e a chave de transmissão.")
-                            .setPositiveButton("OK", null)
-                            .show()
+                        if (autoMinimize && !resumed) {
+                            // Não abre diálogo sobre outro aplicativo; o erro
+                            // permanece disponível em ScreenCaptureService.lastError.
+                            Toast.makeText(this@MainActivity,
+                                "Falha ao iniciar a live: $errMsg", Toast.LENGTH_LONG).show()
+                        } else {
+                            AlertDialog.Builder(this@MainActivity)
+                                .setTitle("Falha na Transmissão")
+                                .setMessage("Não foi possível publicar ao vivo:\n\n$errMsg\n\nVerifique sua conexão e a chave de transmissão.")
+                                .setPositiveButton("OK", null)
+                                .show()
+                        }
                     }
                     render()
                 }
             }
+            liveStartPollRunnable = pollRunnable
             uiHandler.postDelayed(pollRunnable, 300L)
         } catch (e: Throwable) {
-            try { progress.dismiss() } catch (_: Exception) {}
+            liveStartPollRunnable = null
+            try { progress?.dismiss() } catch (_: Exception) {}
             ScreenCaptureService.reportError(e.message ?: "Falha ao iniciar transmissão")
             Toast.makeText(this, "Erro: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
     fun stopLiveTransmission() {
+        cancelLiveStartCountdown()
+        liveStartPollRunnable?.let { uiHandler.removeCallbacks(it) }
+        liveStartPollRunnable = null
         isTransmitting = false
         transmissionStartTime = 0L
         ControllerRuntime.isTransmitting = false
@@ -759,6 +865,11 @@ class MainActivity : Activity() {
     }
 
     fun handleStartTransmissionClick() {
+        // Um toque inicia no máximo uma tentativa; não duplicar captura, RTMP ou contagem.
+        if (liveStartCountdownDialog != null || liveStartPollRunnable != null ||
+            isTransmitting || ScreenCaptureService.isConnecting ||
+            ScreenCaptureService.isLiveStreaming || isRequestingMediaProjection) return
+
         var selectedPlatforms = listOf(
             Triple("stream_youtube", "YouTube", "youtube"),
             Triple("stream_twitch", "Twitch", "twitch"),
@@ -804,6 +915,12 @@ class MainActivity : Activity() {
             return
         }
 
+        // Antes de capturar a tela, garantir o controle flutuante exigido no início automático.
+        if (!Settings.canDrawOverlays(this)) {
+            showOverlayPermissionRequired()
+            return
+        }
+
         // Solicita permissão de áudio do microfone antes de transmitir a cena
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), AUDIO_PERMISSION_REQUEST)
@@ -819,7 +936,8 @@ class MainActivity : Activity() {
             if (savedCode == RESULT_OK && savedData != null) {
                 try {
                     startCaptureWithResult(savedCode, savedData)
-                    uiHandler.postDelayed({ startLiveTransmission() }, 250L)
+                    startStreamAfterCaptureAuth = false
+                    uiHandler.postDelayed({ beginLiveStartCountdown() }, 250L)
                     return
                 } catch (_: Throwable) {}
             }
@@ -827,7 +945,7 @@ class MainActivity : Activity() {
             return
         }
 
-        startLiveTransmission()
+        beginLiveStartCountdown()
     }
 
     private fun requestScreenCaptureForSource(allowFromAnyPage: Boolean = false) {

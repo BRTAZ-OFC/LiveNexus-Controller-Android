@@ -382,12 +382,15 @@ class ControllerPanel(context: Context, private val isOverlay: Boolean) : Linear
                         act.handleStartTransmissionClick()
                         render()
                     } else {
-                        val started = StreamingConfig.startLiveStream(context)
-                        if (started) {
-                            Toast.makeText(context, "Iniciando transmissão ao vivo...", Toast.LENGTH_SHORT).show()
-                            render()
-                        } else {
-                            Toast.makeText(context, "Configure ao menos uma chave RTMP no menu Transmissão.", Toast.LENGTH_LONG).show()
+                        // Na sobreposição, voltar à Activity somente para permissões
+                        // e contagem; ela se minimizará após iniciar o serviço.
+                        try {
+                            context.startActivity(Intent(context, MainActivity::class.java).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                                putExtra("auto_start_stream", true)
+                            })
+                        } catch (error: Exception) {
+                            Toast.makeText(context, "Não foi possível abrir o início da live: ${error.message}", Toast.LENGTH_LONG).show()
                         }
                     }
                 }
@@ -1045,11 +1048,13 @@ class ControllerPanel(context: Context, private val isOverlay: Boolean) : Linear
                 if (act != null) {
                     act.handleStartTransmissionClick()
                 } else {
-                    val started = StreamingConfig.startLiveStream(context)
-                    if (started) {
-                        Toast.makeText(context, "Iniciando transmissão ao vivo...", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(context, "Configure ao menos uma chave RTMP no menu Transmissão.", Toast.LENGTH_LONG).show()
+                    try {
+                        context.startActivity(Intent(context, MainActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                            putExtra("auto_start_stream", true)
+                        })
+                    } catch (error: Exception) {
+                        Toast.makeText(context, "Não foi possível abrir o início da live: ${error.message}", Toast.LENGTH_LONG).show()
                     }
                 }
                 render()
