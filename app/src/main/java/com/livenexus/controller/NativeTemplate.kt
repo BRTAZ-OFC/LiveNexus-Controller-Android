@@ -51,6 +51,11 @@ internal class NativeTemplate(private val activity: Activity) {
         "Comando não conectado à função real nesta versão.", Toast.LENGTH_SHORT).show()
 
     fun show() {
+        // A tela inicial sempre abre limpa: o menu rápido só aparece após um toque.
+        popup?.dismiss()
+        popup = null
+        menuAnchor = null
+        page = "transmission"
         root.background = TemplateStyle.Backdrop()
         root.addOnLayoutChangeListener { _, l, t, r, b, _, _, _, _ ->
             val width = r-l; val height = b-t
@@ -111,7 +116,8 @@ internal class NativeTemplate(private val activity: Activity) {
 
     private fun render() {
         if(availableWidth==0)return
-        popup?.dismiss();currentScroll=null;expandedPreview=null;root.removeAllViews()
+        popup?.dismiss();popup=null;menuAnchor=null
+        currentScroll=null;expandedPreview=null;root.removeAllViews()
         val shell=column().apply { setPadding(dp(if(wide)12 else 8),dp(3),dp(if(wide)12 else 8),dp(8)) }
         root.addView(shell,FrameLayout.LayoutParams(-1,-1))
         add(shell,header(),if(wide)54 else 72)
@@ -168,7 +174,7 @@ internal class NativeTemplate(private val activity: Activity) {
     }
 
     private fun showMenu() {
-        if(popup?.isShowing==true) { popup?.dismiss();return }
+        if(popup?.isShowing==true) { popup?.dismiss();popup=null;return }
         val anchor=menuAnchor ?: root
         val panel=card(18f).apply { setPadding(dp(12),dp(8),dp(12),dp(14)) }
         val heading=row()
@@ -177,7 +183,7 @@ internal class NativeTemplate(private val activity: Activity) {
         add(panel,heading)
         add(panel,action("Cenários     ›","layers",true){navigate("editor")},48,4)
         add(panel,action("Controles     ›","game"){navigate("controls")},48,5)
-        popup=PopupWindow(panel,min(dp(285),(availableWidth*.66f).toInt()),ViewGroup.LayoutParams.WRAP_CONTENT,true).apply {
+        popup=PopupWindow(panel,min(dp(285),(availableWidth-dp(16)).coerceAtLeast(dp(1))),ViewGroup.LayoutParams.WRAP_CONTENT,true).apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT));isOutsideTouchable=true;elevation=dp(8).toFloat()
             panel.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(availableHeight,View.MeasureSpec.AT_MOST))
             val position=IntArray(2);anchor.getLocationOnScreen(position)
