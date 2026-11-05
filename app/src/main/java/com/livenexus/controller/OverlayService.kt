@@ -34,11 +34,23 @@ class OverlayService : Service() {
     private var controls: ControllerPanel? = null
 
     companion object {
-        private var active: OverlayService? = null
+        @Volatile private var active: OverlayService? = null
         fun refreshVisibility() {
-            active?.let {
-                it.syncVisibility()
-                it.updateTimerBadge()
+            val service = active ?: return
+            // O pipeline RTMP chama este método de uma thread de trabalho.
+            // WindowManager/Views do overlay devem ser atualizados na UI.
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                if (active === service) {
+                    service.syncVisibility()
+                    service.updateTimerBadge()
+                }
+            } else {
+                service.overlayHandler.post {
+                    if (active === service) {
+                        service.syncVisibility()
+                        service.updateTimerBadge()
+                    }
+                }
             }
         }
     }

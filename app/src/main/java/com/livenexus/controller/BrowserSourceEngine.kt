@@ -22,6 +22,9 @@ import android.util.Log
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -98,6 +101,7 @@ class BrowserSourceEngine(private val context: Context) {
         @Volatile var active = true
         var lastFrameAt = 0L // lido/escrito somente na thread de ImageReader
         var loadStartedAt = 0L // thread principal; diagnóstico do tempo de carregamento
+        var firstFrameLogged = false // somente thread do ImageReader
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -226,6 +230,30 @@ class BrowserSourceEngine(private val context: Context) {
 
             val layer = BrowserLayer(id, url, sourceDesktopMode, width, height, reader, virtualDisplay, presentation, browser)
             browser.webViewClient = object : WebViewClient() {
+                override fun onReceivedError(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                    error: WebResourceError?
+                ) {
+                    super.onReceivedError(view, request, error)
+                    if (request?.isForMainFrame == true && layer.active && running) {
+                        Log.e(TAG, "Navegação principal do Browser Source falhou: " + id +
+                            " (erro " + (error?.errorCode ?: -1) + ")")
+                    }
+                }
+
+                override fun onReceivedHttpError(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                    errorResponse: WebResourceResponse?
+                ) {
+                    super.onReceivedHttpError(view, request, errorResponse)
+                    if (request?.isForMainFrame == true && layer.active && running) {
+                        Log.e(TAG, "Resposta HTTP inválida no Browser Source: " + id +
+                            " (status " + (errorResponse?.statusCode ?: -1) + ")")
+                    }
+                }
+
                 override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, pageUrl, favicon)
                     if (layer.active && running) {
@@ -341,6 +369,11 @@ class BrowserSourceEngine(private val context: Context) {
             val completed = pair.back
             pair.back = pair.front
             pair.front = completed
+            if (!layer.firstFrameLogged) {
+                layer.firstFrameLogged = true
+                Log.i(TAG, "Primeiro frame do Browser Source recebido: " + layer.id +
+                    " (" + width + "x" + height + ")")
+            }
         }
     }
 

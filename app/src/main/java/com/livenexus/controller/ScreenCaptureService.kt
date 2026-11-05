@@ -621,6 +621,12 @@ class ScreenCaptureService : Service() {
      * Se a fonte "Captura de tela" estiver ativa na cena, ela será composta em 16:9 (Horizontal) ou 9:16 (Vertical).
      */
     private fun handleStartStream(intent: Intent) {
+        // Uma solicitação duplicada nunca deve reinicializar a captura,
+        // a WebView do Browser Source ou os encoders de uma live em andamento.
+        if (isConnecting || isLiveStreaming) {
+            Log.w(TAG, "Início duplicado de transmissão ignorado")
+            return
+        }
         val targetsJson = intent.getStringExtra(EXTRA_TARGETS_JSON)
         val streamTargets = parseTargets(targetsJson)
         if (streamTargets.isEmpty()) {
@@ -708,7 +714,14 @@ class ScreenCaptureService : Service() {
         bitrate: Int,
         stopServiceOnFailure: Boolean
     ) {
-        stopStreamingOnly()
+        // CRÍTICO: stopStreamingOnly() encerra a MediaProjection e a captura
+        // de tela autorizada. Iniciar uma live NÃO pode passar por essa rotina.
+        // Os recursos só devem ser liberados ao parar ou falhar a transmissão.
+        isConnecting = true
+        lastError = null
+        isLiveStreaming = false
+        activePlatforms = emptyList()
+
         // PRISM-like: preparar a fonte web ANTES de esperar RTMP conectar.
         // O encoder e o publicador continuam exatamente no fluxo original.
         val earlyLayers = activeSceneLayers ?: loadPersistedSceneLayers(this)
@@ -725,11 +738,6 @@ class ScreenCaptureService : Service() {
                 browserEngine = null
             }
         }
-        lastError = null
-        isLiveStreaming = false
-        activePlatforms = emptyList()
-        isConnecting = true
-
         Thread({
             try {
                 val streamPub = StreamPublisher(
@@ -749,14 +757,6 @@ class ScreenCaptureService : Service() {
                 }
 
                 publisher = streamPub
-                isLiveStreaming = true
-                activePlatforms = streamPub.connectedPlatforms
-                ControllerRuntime.isTransmitting = true
-                if (ControllerRuntime.transmissionStartTime <= 0L) {
-                    ControllerRuntime.transmissionStartTime = System.currentTimeMillis()
-                }
-                OverlayService.refreshVisibility()
-                updateForegroundNotification()
 
                 // Encoder de Vídeo H.264
                 val encoder = LocalVideoEncoder(
@@ -832,6 +832,17 @@ class ScreenCaptureService : Service() {
                 } catch (audioErr: Throwable) {
                     Log.w(TAG, "Falha ao iniciar captura de áudio", audioErr)
                 }
+
+                // A conexão e o compositor estão prontos. Só agora autorizar
+                // a Activity a minimizar e exibir o controle flutuante.
+                isLiveStreaming = true
+                activePlatforms = streamPub.connectedPlatforms
+                ControllerRuntime.isTransmitting = true
+                if (ControllerRuntime.transmissionStartTime <= 0L) {
+                    ControllerRuntime.transmissionStartTime = System.currentTimeMillis()
+                }
+                OverlayService.refreshVisibility()
+                updateForegroundNotification()
             } catch (error: Throwable) {
                 val msg = error.message ?: "Falha ao conectar ao servidor RTMP"
                 lastError = msg

@@ -752,13 +752,15 @@ class MainActivity : Activity() {
         if (liveStartPollRunnable != null || ScreenCaptureService.isConnecting ||
             ScreenCaptureService.isLiveStreaming) return
 
-        // No início automático não mantemos um diálogo aberto sobre o jogo.
-        val progress = if (autoMinimize) null else AlertDialog.Builder(this)
+        // Não minimizar durante conexão e criação dos encoders.
+        // A contagem já terminou, mas a Activity permanece ativa até a
+        // confirmação de que o compositor e os serviços estão prontos.
+        val progress = AlertDialog.Builder(this)
             .setTitle("Iniciando Transmissão")
-            .setMessage("Estabelecendo conexão RTMP/RTMPS e codificando vídeo H.264 e áudio AAC...")
+            .setMessage("Conectando RTMP/RTMPS e preparando áudio, vídeo e Browser Source...")
             .setCancelable(false)
             .create()
-        progress?.show()
+        progress.show()
 
         try {
             // A WebView do editor não pode disputar o mesmo runtimeId com
@@ -779,13 +781,8 @@ class MainActivity : Activity() {
             }
             startForegroundService(intent)
 
-            // Começa a transmissão antes de minimizar: respeita os limites
-            // do Android para serviços de projeção/microfone em segundo plano.
-            // O OverlayService já mostra apenas a bolha ao receber onStop().
-            if (autoMinimize && !moveTaskToBack(true)) {
-                Toast.makeText(this, "Não foi possível minimizar automaticamente.", Toast.LENGTH_SHORT).show()
-            }
-
+            // Nunca minimizar só porque o serviço foi solicitado. A saída
+            // para segundo plano será feita APÓS confirmar isLiveStreaming.
             val pollStart = SystemClock.elapsedRealtime()
             val pollRunnable = object : Runnable {
                 override fun run() {
@@ -813,6 +810,13 @@ class MainActivity : Activity() {
                         uiHandler.post(transmissionTimerRunnable)
                         val activeNames = ScreenCaptureService.activePlatforms.joinToString(", ")
                         Toast.makeText(this@MainActivity, "Transmissão ao vivo iniciada para: $activeNames!", Toast.LENGTH_LONG).show()
+                        if (autoMinimize && resumed && Settings.canDrawOverlays(this@MainActivity)) {
+                            // O OverlayService existente exibe somente a bolha
+                            // quando a Activity deixa o primeiro plano.
+                            if (!moveTaskToBack(true)) {
+                                Toast.makeText(this@MainActivity, "Não foi possível minimizar automaticamente.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
                     } else {
                         isTransmitting = false
                         val errMsg = ScreenCaptureService.lastError ?: "Falha ao conectar com servidor RTMP"
@@ -829,7 +833,9 @@ class MainActivity : Activity() {
                                 .show()
                         }
                     }
-                    render()
+                    // Não recriar WebViews e a UI do editor após a Activity
+                    // sair do primeiro plano por causa do início da live.
+                    if (resumed && (!autoMinimize || !ScreenCaptureService.isLiveStreaming)) render()
                 }
             }
             liveStartPollRunnable = pollRunnable
