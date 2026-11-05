@@ -486,37 +486,66 @@ internal class NativeTemplate(private val activity: Activity) {
 
     private fun platforms():LinearLayout=column().apply {
         val content=row().apply {gravity=Gravity.TOP}
-        if(wide){
-            val side=card()
-            listOf(Triple("Configuração","gear","encoder"),Triple("Plataformas","layers","platforms"),Triple("Transmissão","broadcast","transmission"),Triple("Visualização","screen","transmission"),Triple("Cenário / Overlay","layers","editor")).forEach { (s,i,d)->add(side,action(s,i,d==page){navigate(d)},48,4) }
+        if(wide) {
+            val side=card(radius=5f)
+            listOf(Triple("Configuração","gear","encoder"),Triple("Plataformas","layers","platforms"),
+                Triple("Transmissão","broadcast","transmission"),Triple("Visualização","screen","transmission"),
+                Triple("Cenário / Overlay","layers","editor")).forEach { (name,symbol,dest) ->
+                add(side,action(name,symbol,dest==page){navigate(dest)},45,3)
+            }
             content.addView(side,LinearLayout.LayoutParams(dp(135),-2))
         }
         val main=column()
-        sectionHeader(main,"Plataformas de Transmissão","layers")
-        add(main,label("Conexão via RTMP / RTMPS",10f).apply { gravity=Gravity.CENTER },top=5)
-        val list=if(wide)row().apply {gravity=Gravity.TOP} else column()
+        val heading=row()
+        heading.addView(icon("layers",TemplateStyle.white),LinearLayout.LayoutParams(dp(24),dp(24)))
+        weighted(heading,label("Plataformas de Transmissão",if(wide)17f else 16f,true),gap=4)
+        add(main,heading,34)
+        add(main,action("Conexão via RTMP / RTMPS","link"),36,2)
+        val items=if(wide)row().apply {gravity=Gravity.TOP} else column()
         listOf("Twitch","YouTube","Kick").forEach { name ->
-            if(wide)weighted(list,platform(name)) else add(list,platform(name),top=4)
+            if(wide) weighted(items,platform(name),gap=1)
+            else add(items,platform(name),top=3)
         }
-        add(main,list,top=5);weighted(content,main);add(this,content)
-        val start=action("Iniciar Transmissão em Todas","broadcast",true)
-        val update=action("Atualizar Conexões","refresh")
-        val stop=action("Encerrar Todas","stop")
-        val footer=row()
-        if(wide){weighted(footer,update);weighted(footer,start,1.6f);weighted(footer,stop)}
-        else {add(this,start,40,5);weighted(footer,update);weighted(footer,stop)}
-        add(this,footer,43,5)
+        add(main,items,top=3)
+        weighted(content,main)
+        add(this,content)
+        val startButton=action("Iniciar Transmissão em Todas","broadcast",true)
+        val updateButton=action("Atualizar Conexões","refresh")
+        val stopButton=action("Encerrar Todas","stop")
+        if(wide) {
+            val footer=row()
+            weighted(footer,updateButton,1f,44,1)
+            weighted(footer,startButton,1.7f,44,1)
+            weighted(footer,stopButton,1f,44,1)
+            add(this,footer,44,top=5)
+        } else {
+            add(this,startButton,44,top=5)
+            val footer=row()
+            weighted(footer,updateButton,1f,42,1)
+            weighted(footer,stopButton,1f,42,1)
+            add(this,footer,42,top=3)
+        }
     }
-    private fun platform(name:String):View=card().apply {
-        val heading=row();heading.addView(icon(name.lowercase()),LinearLayout.LayoutParams(dp(27),dp(27)));weighted(heading,label(name,17f,true));heading.addView(toggle(false){unavailable()});add(this,heading,30)
-        // No stream backend exists in this repository; do not present fabricated connected states or keys.
-        add(this,label("Não conectado",9f).apply{setTextColor(TemplateStyle.muted)},top=1)
-        add(this,label("URL do Servidor (RTMP / RTMPS)",10f,true),top=6)
-        add(this,action("Configuração não disponível","copy"),48,2)
-        add(this,label("Stream Key",10f,true),top=5)
-        add(this,action("Não configurada","eye"),48,2)
-        val buttons=row();weighted(buttons,action("Testar","broadcast",true),height=48,gap=0);weighted(buttons,action("Conectar","link"),height=48,gap=0)
-        add(this,buttons,top=5)
+
+    private fun platform(name:String):View=card(radius=5f).apply {
+        setPadding(dp(8),dp(6),dp(8),dp(7))
+        val heading=row()
+        heading.addView(icon(name.lowercase()),LinearLayout.LayoutParams(dp(26),dp(26)))
+        weighted(heading,label(name,16f,true),gap=3)
+        val status=label("Não conectado",9f,true).apply {
+            setTextColor(TemplateStyle.muted)
+        }
+        heading.addView(status)
+        heading.addView(toggle(false){unavailable()})
+        add(this,heading,31)
+        add(this,label("URL do Servidor (RTMP / RTMPS)",9f,true),top=3)
+        add(this,action("Configuração não disponível","copy"),34,1)
+        add(this,label("Stream Key",9f,true),top=3)
+        add(this,action("Não configurada","eye"),34,1)
+        val buttons=row()
+        weighted(buttons,action("Testar","broadcast",true),1f,38,1)
+        weighted(buttons,action("Conectar","link"),1f,38,1)
+        add(this,buttons,38,top=4)
     }
 
     private fun editor():LinearLayout=column().apply {
