@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>LiveNEXUS — Entrar</title>
+<style>
+@font-face{font-family:"DM Sans";src:url("fonts/dm-sans.ttf") format("truetype");font-style:normal;font-weight:100 1000;font-display:swap}
+@font-face{font-family:"Space Mono";src:url("fonts/space-mono-regular.ttf") format("truetype");font-weight:400;font-display:swap}
+:root{--cyan:#00eaff;--pink:#e900ff;--ink:#f7f9ff}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;min-height:100%;background:#020313;color:var(--ink);font-family:"DM Sans",sans-serif}
+body{min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:24px 14px;background:radial-gradient(ellipse at -8% 3%,#4a0076 0,transparent 30%),radial-gradient(ellipse at 108% 23%,#004ea0 0,transparent 35%),radial-gradient(ellipse at 65% 98%,#3e006f 0,transparent 30%),#020414}
+.panel{width:min(100%,390px);padding:23px 19px;background:linear-gradient(150deg,#0e1234,#05081e 65%,#030516);border:1px solid #8b33ff;border-radius:13px;box-shadow:0 0 18px #9a00ff87,inset 0 0 16px #3b086d}
+.brand{text-align:center;margin-bottom:26px}
+.brandline{font-size:34px;font-weight:800;font-style:italic;letter-spacing:-1px;white-space:nowrap}
+.brandline b{background:linear-gradient(95deg,#f600ff,#8c42ff 50%,#00eaff);background-clip:text;color:transparent}
+.logo{color:#e13aff;margin-right:5px;filter:drop-shadow(2px 2px 3px #00eaff)}
+.tagline{font:8px "Space Mono",monospace;letter-spacing:2.6px;color:#e3d9fb;margin-top:6px}
+h1{font-size:18px;text-align:center;margin:0 0 20px}
+label{display:block;font-size:11px;font-weight:700;color:#c4d7ff;margin:12px 0 6px}
+input{width:100%;border:1px solid #42518b;background:#09132c;color:#f6faff;border-radius:8px;padding:12px;font-size:14px;outline:0}
+input:focus{border-color:var(--cyan);box-shadow:0 0 9px #00cfff55}
+button{font:700 13px "DM Sans",sans-serif;cursor:pointer;min-height:43px;border-radius:8px;color:#fff;border:1px solid #4b4d91;background:linear-gradient(155deg,#101634,#030716);width:100%;margin-top:11px}
+button:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+button:disabled{opacity:.6;cursor:default}
+.primary{background:linear-gradient(135deg,#4b009b,#b500dc 65%,#7200c8);border-color:#e82cff;box-shadow:0 0 12px #ce00ff70}
+.google{border-color:#00d9ff}
+.steam{border-color:#8b33ff}
+.divider{display:flex;align-items:center;gap:10px;color:#b8c6ea;font-size:10px;margin:18px 0 5px}
+.divider:before,.divider:after{content:"";height:1px;background:#405280;flex:1}
+#status{min-height:18px;color:#ffadca;font-size:11px;text-align:center;margin:12px 0 0}
+.note{text-align:center;font-size:10px;color:#b8c6ea;line-height:1.4;margin-top:14px}
+</style>
+</head>
+<body>
+<main class="panel">
+ <div class="brand"><div class="brandline"><span class="logo">▷</span>Live<b>NEXUS</b></div><div class="tagline">CONTROLE DE TRANSMISSÃO</div></div>
+ <h1>ENTRAR NA CONTA</h1>
+ <form id="login" autocomplete="on">
+  <label for="user">Usuário</label>
+  <input id="user" name="username" type="text" autocomplete="username" maxlength="128" required>
+  <label for="password">Senha</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <button id="submit" class="primary" type="submit">ENTRAR</button>
+ </form>
+ <div class="divider">OU CONTINUAR COM</div>
+ <button id="google" class="google" type="button">Conectar com Google</button>
+ <button id="steam" class="steam" type="button">Conectar com Steam</button>
+ <p id="status" role="status" aria-live="polite"></p>
+ <p class="note">Acesso ao aplicativo somente após validação da conta LiveNEXUS.</p>
+</main>
+<script>
+const status=document.getElementById('status');
+const submit=document.getElementById('submit');
+document.getElementById('login').addEventListener('submit',event=>{
+ event.preventDefault();
+ if(!window.AndroidLogin)return;
+ const user=document.getElementById('user').value.trim();
+ const password=document.getElementById('password').value;
+ if(!user||!password){status.textContent='Preencha usuário e senha.';return;}
+ submit.disabled=true;
+ status.textContent='Validando sua conta…';
+ window.AndroidLogin.login(user,password);
+ document.getElementById('password').value='';
+});
+document.getElementById('google').addEventListener('click',()=>window.AndroidLogin?.external('google'));
+document.getElementById('steam').addEventListener('click',()=>window.AndroidLogin?.external('steam'));
+window.loginResult=(message)=>{submit.disabled=false;status.textContent=String(message||'');};
+</script>
+</body></html>
