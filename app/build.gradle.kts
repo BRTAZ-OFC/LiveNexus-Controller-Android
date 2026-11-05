@@ -38,4 +38,5 @@ android {
 
 dependencies {
     implementation("androidx.browser:browser:1.9.0")
+    implementation("androidx.activity:activity:1.9.0")
 }
