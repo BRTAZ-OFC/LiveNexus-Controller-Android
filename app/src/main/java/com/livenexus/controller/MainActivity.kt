@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.util.Base64
 import android.view.WindowManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
@@ -14,19 +15,41 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.concurrent.Executors
 
 /**
- * A tela principal só é carregada depois de autenticação confirmada pelo backend.
- * O WebView da sessão não recebe ponte JavaScript nem token.
- * Google/Steam abrem exclusivamente fora do APK.
+ * O APK só libera o template após uma sessão validada pelo servidor.
+ * A autenticação Google/Steam ocorre no navegador externo com retorno via deep link.
+ * O código de autorização é trocado com prova PKCE e nunca é tratado como sessão.
  */
 class MainActivity : Activity() {
     private val apiOrigin = "https://livenexus.acq.lat"
     private val worker = Executors.newSingleThreadExecutor()
+    private val random = SecureRandom()
+    private val authPrefs by lazy { getSharedPreferences("mobile_auth_pending", MODE_PRIVATE) }
     private var browser: WebView? = null
     @Volatile private var authorized = false
     @Volatile private var pendingLogin = false
+
+    private fun randomUrlSafe(): String {
+        val bytes = ByteArray(32)
+        random.nextBytes(bytes)
+        return Base64.encodeToString(
+            bytes, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP
+        )
+    }
+
+    private fun sha256Challenge(verifier: String): String =
+        Base64.encodeToString(
+            MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray(Charsets.US_ASCII)),
+            Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP
+        )
+
+    private fun clearPendingExternal() {
+        authPrefs.edit().clear().apply()
+    }
 
     private inner class LoginBridge {
         @JavascriptInterface
@@ -40,30 +63,17 @@ class MainActivity : Activity() {
                         return@execute
                     }
                     val response = apiRequest(
-                        "/api/auth/login",
-                        "POST",
-                        JSONObject().put("user", username).put("password", password).toString(),
-                        null
+                        "/api/auth/login", "POST",
+                        JSONObject().put("user", username).put("password", password).toString(), null
                     )
-                    val session = response.optString("token")
-                    if (!response.optBoolean("ok") || session.isBlank()) {
+                    val token = response.optString("token")
+                    if (!response.optBoolean("ok") || token.isBlank()) {
                         showError("Usuário ou senha incorretos.")
                         return@execute
                     }
-                    val verification = apiRequest("/api/auth/me", "GET", null, session)
-                    val user = verification.optJSONObject("user")
-                    if (!verification.optBoolean("ok") || user?.optString("user_id").isNullOrBlank()) {
-                        showError("Não foi possível validar a sessão.")
-                        return@execute
-                    }
-                    runOnUiThread {
-                        if (!isFinishing && !isDestroyed) {
-                            authorized = true
-                            showMainTemplate()
-                        }
-                    }
+                    verifyAndOpen(token)
                 } catch (_: Exception) {
-                    showError("Falha ao conectar ao LiveNEXUS. Verifique a internet e tente novamente.")
+                    showError("Falha ao conectar ao LiveNEXUS. Verifique a internet.")
                 } finally {
                     pendingLogin = false
                 }
@@ -72,28 +82,99 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun external(provider: String) {
-            val path = when (provider) {
-                "google" -> "/api/auth/google"
-                "steam" -> "/api/auth/steam"
-                else -> return
-            }
-            runOnUiThread {
-                if (!authorized && !isFinishing && !isDestroyed) {
-                    try {
-                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(apiOrigin + path)).apply {
-                            addCategory(Intent.CATEGORY_BROWSABLE)
-                        })
-                        browser?.evaluateJavascript(
-                            "window.loginResult('Faça a autenticação no navegador externo. A integração de retorno ao APK ainda não está disponível.');",
-                            null
-                        )
-                    } catch (_: Exception) {
-                        browser?.evaluateJavascript(
-                            "window.loginResult('Nenhum aplicativo externo disponível para autenticação.');",
-                            null
-                        )
+            if (provider != "google" && provider != "steam") return
+            if (authorized || pendingLogin) return
+            pendingLogin = true
+            worker.execute {
+                try {
+                    val verifier = randomUrlSafe()
+                    val state = randomUrlSafe()
+                    val response = apiRequest(
+                        "/api/auth/mobile/start", "POST",
+                        JSONObject().put("provider", provider).put("state", state)
+                            .put("challenge", sha256Challenge(verifier)).toString(), null
+                    )
+                    val url = response.optString("url")
+                    if (!response.optBoolean("ok") ||
+                        !url.startsWith("/api/auth/$provider?mobile_request=")) {
+                        showError("Não foi possível iniciar o login externo.")
+                        return@execute
                     }
+                    authPrefs.edit()
+                        .putString("state", state)
+                        .putString("verifier", verifier)
+                        .putLong("created", System.currentTimeMillis())
+                        .apply()
+                    runOnUiThread {
+                        if (!authorized && !isFinishing && !isDestroyed) {
+                            try {
+                                startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse(apiOrigin + url))
+                                        .addCategory(Intent.CATEGORY_BROWSABLE)
+                                )
+                                showError("Conclua o login externo para retornar ao LiveNEXUS.")
+                            } catch (_: Exception) {
+                                clearPendingExternal()
+                                showError("Não foi possível abrir a autenticação externa.")
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    showError("Falha ao iniciar o login externo. Verifique a internet.")
+                } finally {
+                    pendingLogin = false
                 }
+            }
+        }
+    }
+
+    private fun processExternalReturn(uri: Uri?) {
+        if (uri?.scheme != "com.livenexus.controller" ||
+            uri.host != "auth" || uri.path != "/callback") return
+        val code = uri.getQueryParameter("code") ?: return
+        val state = uri.getQueryParameter("state") ?: return
+        val storedState = authPrefs.getString("state", null)
+        val verifier = authPrefs.getString("verifier", null)
+        val created = authPrefs.getLong("created", 0)
+        if (authorized || pendingLogin || storedState == null || verifier == null ||
+            state != storedState || System.currentTimeMillis() - created > 10 * 60 * 1000) {
+            showError("Solicitação externa inválida ou expirada. Tente novamente.")
+            return
+        }
+        pendingLogin = true
+        clearPendingExternal()
+        worker.execute {
+            try {
+                val response = apiRequest(
+                    "/api/auth/mobile/exchange", "POST",
+                    JSONObject().put("code", code).put("state", state)
+                        .put("verifier", verifier).toString(), null
+                )
+                val token = response.optString("token")
+                if (!response.optBoolean("ok") || token.isBlank()) {
+                    showError("O servidor não confirmou o login externo.")
+                    return@execute
+                }
+                verifyAndOpen(token)
+            } catch (_: Exception) {
+                showError("Falha ao validar o login externo. Tente novamente.")
+            } finally {
+                pendingLogin = false
+            }
+        }
+    }
+
+    private fun verifyAndOpen(token: String) {
+        val response = apiRequest("/api/auth/me", "GET", null, token)
+        if (!response.optBoolean("ok") ||
+            response.optJSONObject("user")?.optString("user_id").isNullOrBlank()) {
+            showError("O servidor não confirmou sua sessão.")
+            return
+        }
+        runOnUiThread {
+            if (!isFinishing && !isDestroyed) {
+                authorized = true
+                showMainTemplate()
             }
         }
     }
@@ -128,8 +209,7 @@ class MainActivity : Activity() {
     private fun showError(message: String) {
         runOnUiThread {
             if (!isFinishing && !isDestroyed && !authorized) {
-                val safe = JSONObject.quote(message)
-                browser?.evaluateJavascript("window.loginResult($safe);", null)
+                browser?.evaluateJavascript("window.loginResult(${JSONObject.quote(message)});", null)
             }
         }
     }
@@ -143,10 +223,17 @@ class MainActivity : Activity() {
             WindowManager.LayoutParams.FLAG_FULLSCREEN
         )
         showLogin()
+        processExternalReturn(intent?.data)
     }
 
-    private fun localBrowser(): WebView {
-        return WebView(this).apply {
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        processExternalReturn(intent.data)
+    }
+
+    private fun localBrowser(): WebView =
+        WebView(this).apply {
             setBackgroundColor(Color.rgb(2, 3, 19))
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = false
@@ -158,17 +245,15 @@ class MainActivity : Activity() {
             settings.javaScriptCanOpenWindowsAutomatically = false
             settings.setSupportMultipleWindows(false)
             webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = true
+                override fun shouldOverrideUrlLoading(
+                    view: WebView?, request: WebResourceRequest?
+                ): Boolean = true
             }
         }
-    }
 
     private fun showLogin() {
         authorized = false
-        browser?.apply {
-            stopLoading()
-            destroy()
-        }
+        browser?.apply { stopLoading(); destroy() }
         val loginView = localBrowser()
         loginView.addJavascriptInterface(LoginBridge(), "AndroidLogin")
         browser = loginView
@@ -191,15 +276,17 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Android")
     override fun onBackPressed() {
-        if (authorized) showLogin() else moveTaskToBack(true)
+        if (authorized) {
+            clearPendingExternal()
+            showLogin()
+        } else {
+            moveTaskToBack(true)
+        }
     }
 
     override fun onDestroy() {
         worker.shutdownNow()
-        browser?.apply {
-            stopLoading()
-            destroy()
-        }
+        browser?.apply { stopLoading(); destroy() }
         browser = null
         super.onDestroy()
     }
