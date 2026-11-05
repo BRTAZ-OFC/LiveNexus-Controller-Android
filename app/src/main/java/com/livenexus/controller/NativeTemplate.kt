@@ -268,10 +268,23 @@ internal class NativeTemplate(private val activity: Activity) {
         val cover=FrameLayout(activity).apply { background=TemplateStyle.Panel(density,true,8f);addView(icon("music"),FrameLayout.LayoutParams(dp(30),dp(30),Gravity.CENTER)) }
         media.addView(cover,LinearLayout.LayoutParams(dp(50),dp(50)))
         val track=column();add(track,label("Nenhuma mídia carregada",11f,true));add(track,label("--:-- / --:--",10f),top=3)
-        val transport=row()
-        listOf("back" to "Anterior","pause" to "Pausar","next" to "Próxima").forEach { (i,s)-> weighted(transport,iconAction(i,s),height=48,gap=1) }
-        weighted(media,track,gap=5);media.addView(transport,LinearLayout.LayoutParams(dp(144),dp(48)))
-        add(this,media,top=5)
+        val transport=row().apply { gravity=Gravity.CENTER }
+        listOf("back" to "Anterior","pause" to "Pausar","next" to "Próxima").forEach { (i,s)->
+            transport.addView(iconAction(i,s),LinearLayout.LayoutParams(dp(48),dp(48)).apply {
+                marginStart=dp(3);marginEnd=dp(3)
+            })
+        }
+        weighted(media,track,gap=5)
+        // Em telas estreitas, a barra de reprodução ocupa uma linha própria.
+        // Botões não disputam espaço com o nome da faixa nem são comprimidos.
+        val estimatedPanelWidth=if(wide)availableWidth/density/2f else availableWidth/density
+        if(estimatedPanelWidth<390f) {
+            add(this,media,top=5)
+            add(this,transport,48,top=5)
+        } else {
+            media.addView(transport,LinearLayout.LayoutParams(dp(162),dp(48)))
+            add(this,media,top=5)
+        }
         add(this,volumeRow("",75){},top=1)
     }
     private fun tts():View = card().apply {
