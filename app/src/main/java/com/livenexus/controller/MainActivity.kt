@@ -295,7 +295,7 @@ class MainActivity : ComponentActivity() {
         passwordInput = null
         statusText = null
         loginButtons = emptyList()
-        setContentView(View(this).apply { setBackgroundColor(backgroundColor) })
+        NativeTemplate(this).show()
     }
 
     private fun showLogin() {
