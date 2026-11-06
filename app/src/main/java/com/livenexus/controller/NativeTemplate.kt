@@ -718,7 +718,11 @@ internal class NativeTemplate(private val activity: Activity) {
     }
 
     private fun editor():LinearLayout=column().apply {
-        val workspace=row().apply {gravity=Gravity.TOP}
+        val workspace=row().apply {
+            gravity=Gravity.TOP
+            clipChildren=true
+            clipToPadding=true
+        }
         val sidebar=column().apply {
             background=TemplateStyle.Panel(density,radius=3f,glow=false)
             setPadding(dp(3),dp(4),dp(3),dp(4))
@@ -733,7 +737,17 @@ internal class NativeTemplate(private val activity: Activity) {
             item.contentDescription=key
             add(sidebar,item,40,2)
         }
-        workspace.addView(sidebar,LinearLayout.LayoutParams(dp(53),-1))
+        // A barra esquerda rola apenas dentro do espaço do editor.
+        // Não deixa os ícones invadirem o cabeçalho ao arrastar.
+        val sidebarScroll=ScrollView(activity).apply {
+            isVerticalScrollBarEnabled=false
+            isFillViewport=false
+            overScrollMode=View.OVER_SCROLL_NEVER
+            clipChildren=true
+            clipToPadding=true
+            addView(sidebar,FrameLayout.LayoutParams(-1,-2))
+        }
+        workspace.addView(sidebarScroll,LinearLayout.LayoutParams(dp(53),-1))
         val center=column().apply {
             setPadding(dp(5),dp(4),dp(5),dp(4))
             gravity=Gravity.CENTER_VERTICAL
@@ -754,6 +768,8 @@ internal class NativeTemplate(private val activity: Activity) {
         val elements=column().apply {
             background=TemplateStyle.Panel(density,radius=3f,glow=false)
             setPadding(dp(5),dp(5),dp(5),dp(5))
+            clipChildren=true
+            clipToPadding=true
         }
         sectionHeader(elements,"Elementos","layers")
         val filters=row()
@@ -778,6 +794,9 @@ internal class NativeTemplate(private val activity: Activity) {
         }
         val scroll=ScrollView(activity).apply {
             isVerticalScrollBarEnabled=false
+            overScrollMode=View.OVER_SCROLL_NEVER
+            clipChildren=true
+            clipToPadding=true
             addView(elementItems)
         }
         elements.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
