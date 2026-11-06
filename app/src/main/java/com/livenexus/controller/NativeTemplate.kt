@@ -35,6 +35,8 @@ internal class NativeTemplate(private val activity: Activity) {
     private var micVolume = 100
     private var internalVolume = 100
     private var ttsText = ""
+    private var addedSceneCount = 0
+    private var playerVolume = 75
     private var zoom = 66
     private var filter = "Todos"
     private var editorTab = "Cenário / Overlay"
@@ -124,6 +126,8 @@ internal class NativeTemplate(private val activity: Activity) {
         add(shell,if(page=="editor") editorHeader() else header(),if(wide)54 else 72)
         if(page=="editor") {
             shell.addView(editor(),LinearLayout.LayoutParams(-1,0,1f))
+        } else if(page=="controls" && !wide) {
+            shell.addView(controls(),LinearLayout.LayoutParams(-1,0,1f))
         } else if(page=="transmission") {
             shell.addView(home(),LinearLayout.LayoutParams(-1,0,1f))
         } else {
@@ -163,7 +167,7 @@ internal class NativeTemplate(private val activity: Activity) {
             addView(Space(activity),LinearLayout.LayoutParams(0,1,1f))
             addView(icon("gear",TemplateStyle.white),LinearLayout.LayoutParams(dp(23),dp(23)))
         } else {
-            val back=page=="encoder" || page=="platforms" || page=="editor"
+            val back=page=="encoder" || page=="platforms" || page=="editor" || page=="controls"
             addView(iconAction(if(back)"back" else "menu",if(back)"Voltar à transmissão" else "Abrir menu") {
                 if(back)navigate("transmission") else showMenu()
             },LinearLayout.LayoutParams(dp(48),dp(48)))
@@ -266,11 +270,103 @@ internal class NativeTemplate(private val activity: Activity) {
     }
 
     private fun controls():LinearLayout = column().apply {
+        if(!wide) {
+            add(this,controlsPortrait(),-1)
+            return@apply
+        }
         add(this,title("Controles","game"),54,0)
         // Apenas os dois containers solicitados: Hotkeys e Player.
         add(this,hotkeys(),top=6)
         add(this,player(),top=6)
     }
+    private fun controlsPortrait():View = column().apply {
+        val heading=row().apply {
+            gravity=Gravity.CENTER
+            background=TemplateStyle.Panel(density,radius=6f)
+        }
+        heading.addView(icon("game"),LinearLayout.LayoutParams(dp(31),dp(31)))
+        heading.addView(label("Controles",21f,true),
+            LinearLayout.LayoutParams(-2,-2).apply {marginStart=dp(9)})
+        add(this,heading,53)
+
+        val keys=card(radius=6f)
+        sectionHeader(keys,"Hotkeys","keyboard","Atalhos de cenas, subcenas e ações rápidas")
+        val buttonList=column()
+        val buttons=mutableListOf<View>()
+        buttons.add(portraitSceneButton("refresh","Reload",true) {unavailable()})
+        buttons.add(portraitSceneButton("plus","Adicionar\ncenário",false) {
+            addedSceneCount++
+            render()
+        })
+        for(index in 1..addedSceneCount) {
+            buttons.add(portraitSceneButton("video","Cena $index",false) {unavailable()})
+        }
+        val columns=if(availableWidth/density<305f) 2 else 3
+        buttons.chunked(columns).forEach { group ->
+            val line=row().apply {gravity=Gravity.START}
+            group.forEach { button ->
+                line.addView(button,LinearLayout.LayoutParams(dp(80),dp(76)).apply {
+                    marginEnd=dp(7)
+                })
+            }
+            add(buttonList,line,76,top=6)
+        }
+        val scroll=ScrollView(activity).apply {
+            isVerticalScrollBarEnabled=false
+            overScrollMode=View.OVER_SCROLL_NEVER
+            addView(buttonList)
+        }
+        keys.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
+        addView(keys,LinearLayout.LayoutParams(-1,0,1f).apply {topMargin=dp(7)})
+
+        val player=card(radius=6f).apply {
+            setPadding(dp(7),dp(5),dp(7),dp(6))
+        }
+        val playerTitle=row()
+        playerTitle.addView(icon("music",TemplateStyle.white),
+            LinearLayout.LayoutParams(dp(24),dp(24)))
+        playerTitle.addView(label("Player (Mídia)",15f,true),
+            LinearLayout.LayoutParams(-2,-2).apply {marginStart=dp(7)})
+        add(player,playerTitle,26)
+        val playback=row()
+        playback.addView(icon("volume",TemplateStyle.white),
+            LinearLayout.LayoutParams(dp(19),dp(19)))
+        val valueLabel=label("$playerVolume%",11f,true).apply {gravity=Gravity.CENTER}
+        val volume=seek(playerVolume,100) {
+            playerVolume=it
+            valueLabel.text="$it%"
+        }
+        weighted(playback,volume,1f,36,0)
+        playback.addView(valueLabel,LinearLayout.LayoutParams(dp(39),-2))
+        listOf("back" to "Anterior","pause" to "Pausar","next" to "Próxima")
+            .forEach { (symbol,name) ->
+                playback.addView(iconAction(symbol,name),
+                    LinearLayout.LayoutParams(dp(37),dp(38)).apply {marginStart=dp(2)})
+            }
+        add(player,playback,41,top=2)
+        add(this,player,83,top=8)
+    }
+
+    private fun portraitSceneButton(symbol:String,title:String,selected:Boolean,click:()->Unit):View =
+        column().apply {
+            gravity=Gravity.CENTER
+            background=TemplateStyle.Panel(density,selected,radius=6f)
+            isClickable=true
+            isFocusable=true
+            contentDescription=title.replace("\n"," ")
+            setOnClickListener {click()}
+            if(symbol=="plus") {
+                addView(label("+",29f,true).apply {gravity=Gravity.CENTER},
+                    LinearLayout.LayoutParams(-1,dp(35)))
+            } else {
+                addView(icon(symbol),LinearLayout.LayoutParams(dp(29),dp(29)))
+            }
+            addView(label(title,11f,true).apply {
+                gravity=Gravity.CENTER
+                maxLines=2
+            },LinearLayout.LayoutParams(-1,-2).apply {topMargin=dp(3)})
+        }
+
     private fun hotkeys():View = card().apply {
         sectionHeader(this,"Hotkeys","keyboard","Atalhos de cenas, subcenas e ações rápidas")
         val keys=row();listOf("Cena 1  F1","Cena 2  F2","Subcena  F3").forEachIndexed { i,s -> weighted(keys,action(s,if(i==2)"layers" else "video"),height=48,gap=1) }
