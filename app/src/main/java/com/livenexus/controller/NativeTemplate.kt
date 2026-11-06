@@ -830,11 +830,11 @@ internal class NativeTemplate(private val activity: Activity) {
         TextView(activity).apply {
             text = value
             setTextColor(color)
-            // Preserva o tamanho individual da tela e reduz só 2 pixels físicos.
+            // Preserva o tamanho individual de cada componente e reduz mais 3 pixels físicos.
             val sizePx = TypedValue.applyDimension(
                 TypedValue.COMPLEX_UNIT_SP, size, activity.resources.displayMetrics
             )
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, (sizePx - 2f).coerceAtLeast(6f))
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, (sizePx - 5f).coerceAtLeast(6f))
             typeface = TemplateStyle.font(activity, bold)
             includeFontPadding = false
         }
@@ -2758,11 +2758,11 @@ internal class NativeTemplate(private val activity: Activity) {
                         p.style = Paint.Style.FILL
                         p.typeface = TemplateStyle.font(context, bold = true)
                         p.color = TemplateStyle.cyan
-                        p.textSize = (min(13f * density, eh * 0.20f).coerceAtLeast(6f * density) - 9f).coerceAtLeast(6f)
+                        p.textSize = (min(13f * density, eh * 0.20f).coerceAtLeast(6f * density) - 12f).coerceAtLeast(6f)
                         c.drawText(title, ex + 8f * density, ey + eh * 0.46f, p)
                         p.typeface = TemplateStyle.font(context)
                         p.color = TemplateStyle.white
-                        p.textSize = (min(10f * density, eh * 0.15f).coerceAtLeast(5f * density) - 9f).coerceAtLeast(6f)
+                        p.textSize = (min(10f * density, eh * 0.15f).coerceAtLeast(5f * density) - 12f).coerceAtLeast(6f)
                         c.drawText(detail, ex + 8f * density, ey + eh * 0.62f, p)
                     }
                 } else if (el.type == "browser" && BrowserSourceManager.draw(el.id, c, RectF(ex, ey, er, eb))) {
@@ -2777,13 +2777,13 @@ internal class NativeTemplate(private val activity: Activity) {
                     c.drawRect(ex, ey, er, ey + headerH, p)
 
                     p.color = if (el.type == "browser") TemplateStyle.cyan else TemplateStyle.magenta
-                    p.textSize = (min(8.5f * density, headerH * 0.65f) - 9f).coerceAtLeast(6f)
+                    p.textSize = (min(8.5f * density, headerH * 0.65f) - 12f).coerceAtLeast(6f)
                     p.typeface = TemplateStyle.font(context, bold = true)
                     val tag = if (el.type == "browser") "BROWSER SOURCE" else "WIDGET"
                     c.drawText("$tag | ${el.title}", ex + 8f * density, ey + headerH * 0.72f, p)
 
                     p.color = Color.WHITE
-                    p.textSize = (min(10.5f * density, eh * 0.25f) - 9f).coerceAtLeast(6f)
+                    p.textSize = (min(10.5f * density, eh * 0.25f) - 12f).coerceAtLeast(6f)
                     c.drawText(el.title, ex + 10f * density, ey + eh * 0.62f, p)
                 }
 
@@ -2832,7 +2832,7 @@ internal class NativeTemplate(private val activity: Activity) {
 
                     p.style = Paint.Style.FILL
                     p.color = TemplateStyle.cyan
-                    p.textSize = (7f * density - 9f).coerceAtLeast(6f)
+                    p.textSize = (7f * density - 12f).coerceAtLeast(6f)
                     p.typeface = TemplateStyle.font(context, bold = true)
                     val dimStr = "${(el.width * 100).toInt()}% × ${(el.height * 100).toInt()}%"
                     c.drawText("${el.title} [$dimStr] • Ajustável", ex + 6f * density, badgeY + badgeH * 0.7f, p)

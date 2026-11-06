@@ -434,7 +434,7 @@ class MainActivity : ComponentActivity() {
     private fun fontPixels(sizeSp: Float): Float =
         (TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_SP, sizeSp, resources.displayMetrics
-        ) - 2f).coerceAtLeast(6f)
+        ) - 5f).coerceAtLeast(6f)
 
     private fun brandPart(value: String, size: Float, hex: String): TextView =
         TextView(this).apply {
