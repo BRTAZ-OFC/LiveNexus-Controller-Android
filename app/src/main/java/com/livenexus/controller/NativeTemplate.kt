@@ -2305,10 +2305,19 @@ internal class NativeTemplate(private val activity: Activity) {
         }
         frame.addView(container, FrameLayout.LayoutParams(-1, -1))
 
-        val hud = CyberneticOverlayView(activity, canvasElements, interactive = true) {
-            syncSceneLayersToEncoder()
-            render()
-        }
+        val hud = CyberneticOverlayView(
+            activity,
+            canvasElements,
+            interactive = true,
+            onSelectionChanged = {
+                selectedElementId = canvasElements.firstOrNull { it.isSelected }?.id
+                syncSceneLayersToEncoder()
+                render()
+            },
+            onGeometryChanged = {
+                syncSceneLayersToEncoder()
+            }
+        )
         container.addView(hud, FrameLayout.LayoutParams(-1, -1))
         return frame
     }
@@ -2349,14 +2358,49 @@ internal class NativeTemplate(private val activity: Activity) {
         context: Context,
         private val elements: MutableList<CanvasElement>,
         private val interactive: Boolean = true,
-        private val onStateChanged: (() -> Unit)? = null
+        private val onSelectionChanged: (() -> Unit)? = null,
+        private val onGeometryChanged: (() -> Unit)? = null
     ) : View(context) {
         private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val previewPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
         private val density = context.resources.displayMetrics.density
 
         private var activeHandle = -1
         private var lastTouchX = 0f
         private var lastTouchY = 0f
+        private var selectionChangedDuringTouch = false
+        private var geometryChangedDuringTouch = false
+        private var previewFrame: Bitmap? = null
+
+        // Reaproveita a captura do serviço ativo; jamais inicia uma segunda MediaProjection.
+        private val previewRefresh = object : Runnable {
+            override fun run() {
+                if (!isAttachedToWindow) return
+                val hasCapture = elements.any { it.type == "screen_capture" }
+                val next = if (hasCapture && ScreenCaptureService.isLiveStreaming) {
+                    ScreenCaptureService.getPreviewSnapshot(480)
+                } else {
+                    null
+                }
+                val previous = previewFrame
+                previewFrame = next
+                if (previous !== next && previous != null && !previous.isRecycled) previous.recycle()
+                if (hasCapture) invalidate()
+                postDelayed(this, if (hasCapture) 1000L else 1500L)
+            }
+        }
+
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            post(previewRefresh)
+        }
+
+        override fun onDetachedFromWindow() {
+            removeCallbacks(previewRefresh)
+            previewFrame?.let { if (!it.isRecycled) it.recycle() }
+            previewFrame = null
+            super.onDetachedFromWindow()
+        }
 
         override fun onDraw(c: Canvas) {
             val w = width.toFloat()
@@ -2391,104 +2435,41 @@ internal class NativeTemplate(private val activity: Activity) {
                 val eb = ey + eh
 
                 if (el.type == "screen_capture") {
-                    // Monitor/Screen Background
+                    // A imagem anterior era um aplicativo fictício; só mostramos o quadro real.
                     p.style = Paint.Style.FILL
                     p.color = Color.rgb(10, 16, 32)
                     c.drawRect(ex, ey, er, eb, p)
 
-                    // Desktop Grid Lines inside screen capture
-                    p.style = Paint.Style.STROKE
-                    p.strokeWidth = 0.6f * density
-                    p.color = Color.argb(30, 0, 234, 255)
-                    val cols = 6
-                    val rows = 4
-                    for (i in 1 until cols) {
-                        val gx = ex + i * (ew / cols)
-                        c.drawLine(gx, ey, gx, eb, p)
-                    }
-                    for (j in 1 until rows) {
-                        val gy = ey + j * (eh / rows)
-                        c.drawLine(ex, gy, er, gy, p)
-                    }
-
-                    // Window Title Bar
-                    val titleH = min(20f * density, eh * 0.18f)
-                    p.style = Paint.Style.FILL
-                    p.color = Color.rgb(18, 26, 52)
-                    c.drawRect(ex, ey, er, ey + titleH, p)
-
-                    // Red recording dot
-                    p.color = Color.rgb(255, 45, 85)
-                    c.drawCircle(ex + 10f * density, ey + titleH * 0.5f, 3.2f * density, p)
-
-                    // Title
-                    p.color = Color.WHITE
-                    p.textSize = min(8f * density, titleH * 0.55f)
-                    p.typeface = Typeface.create("sans-serif", Typeface.BOLD)
-                    val capRes = if (el.aspectRatio == "9:16") "9:16 Vertical" else "16:9 Horizontal"
-                    c.drawText("REC | Captura ($capRes)", ex + 18f * density, ey + titleH * 0.68f, p)
-
-                    // Control dots on right
-                    p.color = Color.rgb(90, 110, 150)
-                    c.drawCircle(er - 22f * density, ey + titleH * 0.5f, 2.2f * density, p)
-                    c.drawCircle(er - 14f * density, ey + titleH * 0.5f, 2.2f * density, p)
-                    c.drawCircle(er - 6f * density, ey + titleH * 0.5f, 2.2f * density, p)
-
-                    // Inner simulated app window
-                    val winL = ex + 10f * density
-                    val winT = ey + titleH + 6f * density
-                    val winR = er - 10f * density
-                    val winB = eb - 12f * density
-                    if (winR > winL && winB > winT) {
-                        p.color = Color.rgb(14, 20, 38)
-                        c.drawRect(winL, winT, winR, winB, p)
-
-                        p.style = Paint.Style.STROKE
-                        p.strokeWidth = 0.8f * density
-                        p.color = Color.argb(60, 0, 234, 255)
-                        c.drawRect(winL, winT, winR, winB, p)
-
-                        p.style = Paint.Style.FILL
-                        val colors = intArrayOf(TemplateStyle.cyan, TemplateStyle.magenta, TemplateStyle.green, TemplateStyle.white)
-                        for (k in 0..3) {
-                            p.color = colors[k % colors.size]
-                            val ly = winT + 8f * density + k * 8f * density
-                            if (ly + 3.5f * density < winB) {
-                                c.drawRect(winL + 8f * density, ly, winL + 8f * density + (winR - winL) * (0.32f + k * 0.14f), ly + 3.5f * density, p)
-                            }
+                    val capturedFrame = previewFrame
+                    if (capturedFrame != null && !capturedFrame.isRecycled) {
+                        val imageW = capturedFrame.width.toFloat()
+                        val imageH = capturedFrame.height.toFloat()
+                        val scale = min(ew / imageW, eh / imageH)
+                        val renderedW = imageW * scale
+                        val renderedH = imageH * scale
+                        val left = ex + (ew - renderedW) / 2f
+                        val top = ey + (eh - renderedH) / 2f
+                        val saved = c.save()
+                        c.clipRect(ex, ey, er, eb)
+                        c.drawBitmap(capturedFrame, null, RectF(left, top, left + renderedW, top + renderedH), previewPaint)
+                        c.restoreToCount(saved)
+                    } else {
+                        val title = if (el.title == "Captura de Jogos") "Captura de Jogos" else "Captura de Tela"
+                        val detail = if (ScreenCaptureService.isLiveStreaming) {
+                            "Aguardando quadro da tela..."
+                        } else {
+                            "Prévia real durante a transmissão"
                         }
+                        p.style = Paint.Style.FILL
+                        p.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                        p.color = TemplateStyle.cyan
+                        p.textSize = min(13f * density, eh * 0.20f).coerceAtLeast(6f * density)
+                        c.drawText(title, ex + 8f * density, ey + eh * 0.46f, p)
+                        p.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+                        p.color = TemplateStyle.white
+                        p.textSize = min(10f * density, eh * 0.15f).coerceAtLeast(5f * density)
+                        c.drawText(detail, ex + 8f * density, ey + eh * 0.62f, p)
                     }
-
-                    // Taskbar at bottom
-                    val taskH = min(12f * density, eh * 0.10f)
-                    p.style = Paint.Style.FILL
-                    p.color = Color.rgb(8, 12, 24)
-                    c.drawRect(ex, eb - taskH, er, eb, p)
-                    p.color = TemplateStyle.cyan
-                    c.drawRect(ex + 8f * density, eb - taskH + 3f * density, ex + 13f * density, eb - 3f * density, p)
-                    p.color = TemplateStyle.magenta
-                    c.drawRect(ex + 16f * density, eb - taskH + 3f * density, ex + 21f * density, eb - 3f * density, p)
-
-                    // Mouse pointer on capture
-                    val curX = ex + ew * 0.62f
-                    val curY = ey + eh * 0.52f
-                    val cursorPath = Path().apply {
-                        moveTo(curX, curY)
-                        lineTo(curX, curY + 12f * density)
-                        lineTo(curX + 3.5f * density, curY + 8.5f * density)
-                        lineTo(curX + 7.5f * density, curY + 13f * density)
-                        lineTo(curX + 9.5f * density, curY + 11.5f * density)
-                        lineTo(curX + 5.5f * density, curY + 7f * density)
-                        lineTo(curX + 9.5f * density, curY + 7f * density)
-                        close()
-                    }
-                    p.style = Paint.Style.FILL
-                    p.color = Color.WHITE
-                    c.drawPath(cursorPath, p)
-                    p.style = Paint.Style.STROKE
-                    p.strokeWidth = 1f * density
-                    p.color = Color.BLACK
-                    c.drawPath(cursorPath, p)
                 } else {
                     p.style = Paint.Style.FILL
                     p.color = Color.argb(210, 12, 18, 38)
@@ -2575,6 +2556,8 @@ internal class NativeTemplate(private val activity: Activity) {
                     lastTouchX = event.x
                     lastTouchY = event.y
                     activeHandle = -1
+                    selectionChangedDuringTouch = false
+                    geometryChangedDuringTouch = false
 
                     if (sel != null) {
                         val ex = sel.x * w
@@ -2621,11 +2604,11 @@ internal class NativeTemplate(private val activity: Activity) {
                         event.x in ex..er && event.y in ey..eb
                     }
                     if (clicked != null) {
+                        selectionChangedDuringTouch = sel?.id != clicked.id
                         elements.forEach { it.isSelected = (it.id == clicked.id) }
                         activeHandle = 8
                         parent?.requestDisallowInterceptTouchEvent(true)
                         invalidate()
-                        onStateChanged?.invoke()
                         return true
                     }
                     return true
@@ -2683,6 +2666,7 @@ internal class NativeTemplate(private val activity: Activity) {
                                 current.width = nw
                             }
                         }
+                        if (dx != 0f || dy != 0f) geometryChangedDuringTouch = true
                         lastTouchX = event.x
                         lastTouchY = event.y
                         invalidate()
@@ -2693,7 +2677,10 @@ internal class NativeTemplate(private val activity: Activity) {
                     activeHandle = -1
                     parent?.requestDisallowInterceptTouchEvent(false)
                     if (event.actionMasked == MotionEvent.ACTION_UP) performClick()
-                    onStateChanged?.invoke()
+                    if (geometryChangedDuringTouch) onGeometryChanged?.invoke()
+                    if (selectionChangedDuringTouch) onSelectionChanged?.invoke()
+                    geometryChangedDuringTouch = false
+                    selectionChangedDuringTouch = false
                     return true
                 }
                 else -> return super.onTouchEvent(event)

@@ -108,6 +108,12 @@ class ScreenCaptureService : Service() {
             return instance.triggerSceneReload()
         }
 
+        // Prévia de baixa resolução exclusivamente para o editor, se a transmissão estiver ativa.
+        fun getPreviewSnapshot(maxDimension: Int = 480): Bitmap? {
+            if (!isLiveStreaming) return null
+            return activeInstance?.copyPreviewSnapshot(maxDimension.coerceIn(160, 640))
+        }
+
         fun updateDynamicBitrate(kbps: Int) {
             val clamped = kbps.coerceIn(2000, 10000)
             currentBitrateKbps = clamped
@@ -129,6 +135,21 @@ class ScreenCaptureService : Service() {
     @Volatile
     private var latestScreenBitmap: Bitmap? = null
     private val bitmapLock = Any()
+
+    private fun copyPreviewSnapshot(maxDimension: Int): Bitmap? = synchronized(bitmapLock) {
+        val current = latestScreenBitmap ?: return@synchronized null
+        if (current.isRecycled || current.width <= 0 || current.height <= 0) return@synchronized null
+        try {
+            val targetWidth = minOf(current.width, maxDimension)
+            val targetHeight = ((current.height.toLong() * targetWidth) / current.width).toInt().coerceAtLeast(1)
+            val resized = Bitmap.createScaledBitmap(current, targetWidth, targetHeight, true)
+            if (resized === current) current.copy(Bitmap.Config.ARGB_8888, false) else resized
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Falha ao gerar prévia da captura: ${e.message}")
+            null
+        }
+    }
+
     private val stopping = AtomicBoolean(false)
     private val starting = AtomicBoolean(false)
 
@@ -395,9 +416,10 @@ class ScreenCaptureService : Service() {
                 )
                 sceneCompositor = compositor
                 compositor.start { canvas, cWidth, cHeight ->
-                    val currentBmp = synchronized(bitmapLock) { latestScreenBitmap }
                     val layersSnapshot = StreamingConfig.activeSceneLayers.toList()
-                    SceneRenderer.renderScene(canvas, cWidth, cHeight, layersSnapshot, currentBmp)
+                    synchronized(bitmapLock) {
+                        SceneRenderer.renderScene(canvas, cWidth, cHeight, layersSnapshot, latestScreenBitmap)
+                    }
                 }
 
                 // 6. Start AAC MediaCodec Audio Encoder + Microphone AudioRecord + Internal Audio
