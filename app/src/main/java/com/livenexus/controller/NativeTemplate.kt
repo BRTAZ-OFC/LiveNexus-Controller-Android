@@ -513,6 +513,15 @@ internal class NativeTemplate(private val activity: Activity) {
     private fun toast(msg: String) = Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
 
     fun show() {
+        // Restaura apenas o último cenário salvo explicitamente pelo usuário.
+        ScenarioStorage.load(activity)?.let { saved ->
+            canvasElements.clear()
+            canvasElements.addAll(saved.elements)
+            selectedElementId = saved.elements.firstOrNull { it.isSelected }?.id
+            streamOrientation = saved.orientation
+            StreamingConfig.saveOrientationLabel(activity, streamOrientation)
+            syncSceneLayersToEncoder()
+        }
         activeTemplate = this
         ScreenCaptureService.addStateListener(serviceStateListener)
         popup?.dismiss()
@@ -1847,9 +1856,13 @@ internal class NativeTemplate(private val activity: Activity) {
         addView(iconAction("refresh", "Refazer", radius = 8f) { toast("Refazer") }, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(4) })
         addView(action("Visualizar", "eye", radius = 10f) { showExpandedPreview() }, LinearLayout.LayoutParams(dp(100), dp(38)).apply { marginStart = dp(6) })
         addView(action("Salvar", "save", selected = true, radius = 10f) {
-            syncSceneLayersToEncoder()
-            StreamingConfig.saveOrientationLabel(activity, streamOrientation)
-            toast("Cenário salvo e aplicado ao encoder!")
+            if (ScenarioStorage.save(activity, streamOrientation, canvasElements.toList())) {
+                syncSceneLayersToEncoder()
+                StreamingConfig.saveOrientationLabel(activity, streamOrientation)
+                toast("Cenário salvo no dispositivo e aplicado ao encoder!")
+            } else {
+                toast("Não foi possível salvar o cenário. Tente novamente.")
+            }
         }, LinearLayout.LayoutParams(dp(86), dp(38)).apply { marginStart = dp(6) })
     }
 
