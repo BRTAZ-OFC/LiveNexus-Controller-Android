@@ -143,7 +143,7 @@ internal class NativeTemplate(private val activity: Activity) {
             shell.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
             scroll.post { scroll.scrollTo(0,scrollPositions[page]?:0) }
         }
-        if(page!="encoder" && page!="editor" && !(page=="platforms" && wide))add(shell,navigation(),if(wide)48 else 66,6)
+        if(page!="encoder" && page!="editor" && page!="controls" && !(page=="platforms" && wide))add(shell,navigation(),if(wide)48 else 66,6)
         if(page=="transmission" && !wide)add(shell,Space(activity),(availableHeight/density*.14f).toInt())
     }
 
@@ -267,13 +267,9 @@ internal class NativeTemplate(private val activity: Activity) {
 
     private fun controls():LinearLayout = column().apply {
         add(this,title("Controles","game"),54,0)
-        if(wide) {
-            val columns=row().apply { gravity=Gravity.TOP }
-            val left=column();add(left,hotkeys());add(left,player(),top=5)
-            val right=column();add(right,tts(),top=0);add(right,bots(),top=5)
-            weighted(columns,left);weighted(columns,right);add(this,columns,top=5)
-        } else {add(this,hotkeys(),top=5);add(this,player(),top=5);add(this,tts(),top=5);add(this,bots(),top=5)}
-        add(this,integrations(),top=5)
+        // Apenas os dois containers solicitados: Hotkeys e Player.
+        add(this,hotkeys(),top=6)
+        add(this,player(),top=6)
     }
     private fun hotkeys():View = card().apply {
         sectionHeader(this,"Hotkeys","keyboard","Atalhos de cenas, subcenas e ações rápidas")
@@ -283,30 +279,35 @@ internal class NativeTemplate(private val activity: Activity) {
         listOf("Iniciar Transmissão" to "play","Parar Transmissão" to "stop","Reiniciar" to "refresh").forEach { (s,i)->weighted(commands,action(s,i),height=48,gap=1) }
         add(this,commands,top=3)
     }
-    private fun player():View = card().apply {
+    private fun player():View = card(radius=5f).apply {
         sectionHeader(this,"Player (Mídia)","music","Controle de músicas e mídias")
         val media=row()
-        val cover=FrameLayout(activity).apply { background=TemplateStyle.Panel(density,true,8f);addView(icon("music"),FrameLayout.LayoutParams(dp(30),dp(30),Gravity.CENTER)) }
-        media.addView(cover,LinearLayout.LayoutParams(dp(50),dp(50)))
-        val track=column();add(track,label("Nenhuma mídia carregada",11f,true));add(track,label("--:-- / --:--",10f),top=3)
+        val cover=FrameLayout(activity).apply {
+            background=TemplateStyle.Panel(density,true,5f)
+            addView(icon("music"),FrameLayout.LayoutParams(dp(31),dp(31),Gravity.CENTER))
+        }
+        media.addView(cover,LinearLayout.LayoutParams(dp(55),dp(55)))
+        val information=column()
+        add(information,label("Nenhuma mídia carregada",12f,true))
+        add(information,label("--:-- / --:--",10f),top=4)
+        weighted(media,information,1f,gap=6)
         val transport=row().apply { gravity=Gravity.CENTER }
-        listOf("back" to "Anterior","pause" to "Pausar","next" to "Próxima").forEach { (i,s)->
-            transport.addView(iconAction(i,s),LinearLayout.LayoutParams(dp(48),dp(48)).apply {
-                marginStart=dp(3);marginEnd=dp(3)
-            })
+        listOf("back" to "Anterior","pause" to "Pausar","next" to "Próxima").forEach { (symbol,name) ->
+            transport.addView(iconAction(symbol,name),
+                LinearLayout.LayoutParams(dp(48),dp(48)).apply {
+                    marginStart=dp(3);marginEnd=dp(3)
+                })
         }
-        weighted(media,track,gap=5)
-        // Em telas estreitas, a barra de reprodução ocupa uma linha própria.
-        // Botões não disputam espaço com o nome da faixa nem são comprimidos.
-        val estimatedPanelWidth=if(wide)availableWidth/density/2f else availableWidth/density
-        if(estimatedPanelWidth<390f) {
-            add(this,media,top=5)
-            add(this,transport,48,top=5)
-        } else {
+        // Mantém o tamanho dos controles, sem comprimir a capa ou o texto.
+        val usableWidth=availableWidth/density-40f
+        if(usableWidth>=445f) {
             media.addView(transport,LinearLayout.LayoutParams(dp(162),dp(48)))
-            add(this,media,top=5)
+            add(this,media,top=6)
+        } else {
+            add(this,media,top=6)
+            add(this,transport,48,top=5)
         }
-        add(this,volumeRow("",75){},top=1)
+        add(this,volumeRow("",75){},top=5)
     }
     private fun tts():View = card().apply {
         val heading=row()
