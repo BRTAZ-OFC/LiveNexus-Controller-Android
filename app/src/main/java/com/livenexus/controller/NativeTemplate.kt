@@ -362,6 +362,75 @@ internal class NativeTemplate(private val activity: Activity) {
     private var addedSceneCount = 0
     private var playerPlaying = true
     private var playerVolume = 75
+    private val serverScenarios = mutableListOf<LiveNexusControllerApi.Scenario>()
+    private var scenarioRequestVersion = 0
+    private var creatingScenario = false
+
+    /** Busca cenários reais, sem converter os cenários locais do encoder em registros web. */
+    private fun loadServerScenarios() {
+        val requestVersion = ++scenarioRequestVersion
+        LiveNexusControllerApi.fetchScenarios(activity) { scenes, error ->
+            if (activity.isFinishing || activity.isDestroyed || requestVersion != scenarioRequestVersion) return@fetchScenarios
+            if (scenes == null) {
+                if (page == "controls") toast(error ?: "Não foi possível carregar cenários.")
+            } else {
+                serverScenarios.clear()
+                serverScenarios.addAll(scenes)
+                addedSceneCount = serverScenarios.size
+                if (page == "controls") render()
+                if (overlayExpanded && systemOverlayView != null) refreshSystemOverlayWindow()
+            }
+        }
+    }
+
+    private fun addServerScenario(fromOverlay: Boolean) {
+        if (creatingScenario) return
+        creatingScenario = true
+        ++scenarioRequestVersion
+        val name = "Cenário " + (serverScenarios.size + 1)
+        LiveNexusControllerApi.createScenario(activity, name) { scene, error ->
+            creatingScenario = false
+            if (activity.isFinishing || activity.isDestroyed) return@createScenario
+            if (scene != null) {
+                serverScenarios.add(scene)
+                addedSceneCount = serverScenarios.size
+                toast("Cenário criado no LiveNEXUS.")
+                if (fromOverlay) refreshSystemOverlayWindow() else render()
+            } else {
+                toast(error ?: "Não foi possível criar o cenário.")
+            }
+        }
+    }
+
+    private fun selectServerScenario(index: Int) {
+        val scene = serverScenarios.getOrNull(index)
+        if (scene == null) {
+            toast("Cenário não carregado do LiveNEXUS.")
+            return
+        }
+        LiveNexusControllerApi.sendCommand(activity, "scenario-select", scene) { accepted ->
+            if (!activity.isFinishing && !activity.isDestroyed) {
+                toast(if (accepted) "Troca de subcenário enviada ao LiveNEXUS." else "Não foi possível solicitar a troca de subcenário.")
+            }
+        }
+    }
+
+    private fun sendPlayerCommand(action: String, onAccepted: () -> Unit = {}) {
+        LiveNexusControllerApi.sendCommand(activity, action) { accepted ->
+            if (activity.isFinishing || activity.isDestroyed) return@sendCommand
+            if (accepted) onAccepted() else toast("Não foi possível enviar o comando ao player.")
+        }
+    }
+
+    private fun reloadControllerScene() {
+        syncSceneLayersToEncoder()
+        ScreenCaptureService.reloadCurrentScene()
+        LiveNexusControllerApi.sendCommand(activity, "rtc-reload") { accepted ->
+            if (!activity.isFinishing && !activity.isDestroyed) {
+                toast(if (accepted) "Reload local e RTC solicitado." else "Reload local executado; falha ao solicitar RTC.")
+            }
+        }
+    }
 
     // Canvas Element Model (Adjustable elements on the scenario canvas)
     data class CanvasElement(
@@ -609,6 +678,7 @@ internal class NativeTemplate(private val activity: Activity) {
         popup?.dismiss()
         popup = null
         page = destination
+        if (destination == "controls") loadServerScenarios()
         activity.requestedOrientation = if (destination == "editor") {
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         } else {
@@ -1737,9 +1807,7 @@ internal class NativeTemplate(private val activity: Activity) {
         val buttonList = column()
         val buttons = mutableListOf<View>()
         buttons.add(sceneButton("refresh", "Reload", selected = true) {
-            syncSceneLayersToEncoder()
-            ScreenCaptureService.reloadCurrentScene()
-            toast("Cena recarregada no encoder.")
+            reloadControllerScene()
         })
         buttons.add(sceneButton("plus", "Mortes +", selected = false) {
             DeathCounterCommands.send(activity, increase = true) { delivered ->
@@ -1756,13 +1824,11 @@ internal class NativeTemplate(private val activity: Activity) {
             }
         })
         buttons.add(sceneButton("plus", "Adicionar\ncenário", selected = false) {
-            addedSceneCount++
-            toast("Novo cenário adicionado.")
-            render()
+            addServerScenario(fromOverlay = false)
         })
         for (i in 1..addedSceneCount) {
             buttons.add(sceneButton("video", "Cena $i", selected = false) {
-                toast("Alternando para Cena $i")
+                selectServerScenario(i - 1)
             })
         }
 
@@ -1816,12 +1882,14 @@ internal class NativeTemplate(private val activity: Activity) {
         // Transport Controls: Prev, Pause/Play, Next
         val controlsGroup = row()
         controlsGroup.addView(iconAction("prev_track", "Anterior", radius = 8f) {
-            toast("Faixa anterior.")
+            sendPlayerCommand("music-previous")
         }, LinearLayout.LayoutParams(dp(36), dp(36)))
 
         val playPause = action("", if (playerPlaying) "pause" else "play", selected = true, radius = 10f) {
-            playerPlaying = !playerPlaying
-            render()
+            sendPlayerCommand("music-toggle") {
+                playerPlaying = !playerPlaying
+                render()
+            }
         }
         controlsGroup.addView(playPause, LinearLayout.LayoutParams(dp(42), dp(42)).apply {
             marginStart = dp(4)
@@ -1829,7 +1897,7 @@ internal class NativeTemplate(private val activity: Activity) {
         })
 
         controlsGroup.addView(iconAction("next_track", "Próxima", radius = 8f) {
-            toast("Próxima faixa.")
+            sendPlayerCommand("music-next")
         }, LinearLayout.LayoutParams(dp(36), dp(36)))
 
         mediaBar.addView(controlsGroup)
@@ -3140,6 +3208,7 @@ internal class NativeTemplate(private val activity: Activity) {
                             if (!moved) {
                                 v.performClick()
                                 overlayExpanded = true
+                                loadServerScenarios()
                                 refreshSystemOverlayWindow()
                             }
                             true
@@ -3324,18 +3393,14 @@ internal class NativeTemplate(private val activity: Activity) {
 
         val buttons = mutableListOf<View>()
         buttons.add(sceneButton("refresh", "Reload", selected = true) {
-            syncSceneLayersToEncoder()
-            ScreenCaptureService.reloadCurrentScene()
-            toast("Cena recarregada no encoder.")
+            reloadControllerScene()
         })
         buttons.add(sceneButton("plus", "Adicionar\ncenário", selected = false) {
-            addedSceneCount++
-            toast("Novo cenário adicionado.")
-            refreshSystemOverlayWindow()
+            addServerScenario(fromOverlay = true)
         })
         for (i in 1..addedSceneCount) {
             buttons.add(sceneButton("video", "Cena $i", selected = false) {
-                toast("Alternando para Cena $i")
+                selectServerScenario(i - 1)
             })
         }
 
@@ -3376,12 +3441,14 @@ internal class NativeTemplate(private val activity: Activity) {
 
         val controlsGroup = row()
         controlsGroup.addView(iconAction("prev_track", "Anterior", radius = 8f) {
-            toast("Faixa anterior.")
+            sendPlayerCommand("music-previous")
         }, LinearLayout.LayoutParams(dp(34), dp(34)))
 
         val playPause = action("", if (playerPlaying) "pause" else "play", selected = true, radius = 10f) {
-            playerPlaying = !playerPlaying
-            refreshSystemOverlayWindow()
+            sendPlayerCommand("music-toggle") {
+                playerPlaying = !playerPlaying
+                refreshSystemOverlayWindow()
+            }
         }
         controlsGroup.addView(playPause, LinearLayout.LayoutParams(dp(38), dp(38)).apply {
             marginStart = dp(4)
@@ -3389,7 +3456,7 @@ internal class NativeTemplate(private val activity: Activity) {
         })
 
         controlsGroup.addView(iconAction("next_track", "Próxima", radius = 8f) {
-            toast("Próxima faixa.")
+            sendPlayerCommand("music-next")
         }, LinearLayout.LayoutParams(dp(34), dp(34)))
 
         mediaBar.addView(controlsGroup)
