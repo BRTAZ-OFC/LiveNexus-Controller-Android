@@ -9,6 +9,7 @@ import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.text.InputType
 import android.text.TextUtils
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -726,79 +727,92 @@ internal class NativeTemplate(private val activity: Activity) {
     // =========================================================================
     // RENDER DISPATCHER
     // =========================================================================
+    private var renderScheduled = false
+
     private fun render() {
-        if (availableWidth == 0) return
-        popup?.dismiss()
-        popup = null
-        menuAnchor = null
-        currentScroll = null
-        expandedPreview = null
-        countdownLabel = null
-        root.removeAllViews()
+        if (availableWidth <= 0) return
+        val currentRoot = root ?: return
+        if (renderScheduled) return
+        renderScheduled = true
+        currentRoot.post {
+            renderScheduled = false
+            if (availableWidth <= 0) return@post
+            try {
+                popup?.dismiss()
+                popup = null
+                menuAnchor = null
+                currentScroll = null
+                expandedPreview = null
+                countdownLabel = null
+                currentRoot.removeAllViews()
 
-        val shell = column().apply {
-            setPadding(dp(if (wide) 12 else 8), dp(4), dp(if (wide) 12 else 8), dp(6))
-        }
-        root.addView(shell, FrameLayout.LayoutParams(-1, -1))
-
-        // Screen Header
-        if (page == "editor") {
-            add(shell, editorHeader(), if (wide) 52 else 64)
-            shell.addView(editor(), LinearLayout.LayoutParams(-1, 0, 1f))
-            if (showPermissionsModal) {
-                attachPermissionsModal()
-            }
-            if (countdownSeconds > 0) {
-                attachCountdownOverlay()
-            }
-            return
-        }
-
-        add(shell, header(), if (wide) 52 else 66)
-
-        // Body Content
-        when (page) {
-            "transmission" -> {
-                shell.addView(home(), LinearLayout.LayoutParams(-1, 0, 1f))
-                add(shell, navigation(), if (wide) 50 else 66, 4)
-            }
-            "controls" -> {
-                shell.addView(controls(), LinearLayout.LayoutParams(-1, 0, 1f))
-                if (!wide) add(shell, navigation(), 66, 4)
-            }
-            "encoder" -> {
-                val scroll = ScrollView(activity).apply {
-                    isFillViewport = true
-                    isVerticalScrollBarEnabled = false
-                    clipToPadding = false
+                val shell = column().apply {
+                    setPadding(dp(if (wide) 12 else 8), dp(4), dp(if (wide) 12 else 8), dp(6))
                 }
-                currentScroll = scroll
-                val body = encoder()
-                scroll.addView(body, FrameLayout.LayoutParams(-1, -2))
-                shell.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-                scroll.post { scroll.scrollTo(0, scrollPositions[page] ?: 0) }
-                if (!wide) add(shell, navigation(), 66, 4)
-            }
-            "platforms" -> {
-                val scroll = ScrollView(activity).apply {
-                    isFillViewport = true
-                    isVerticalScrollBarEnabled = false
-                    clipToPadding = false
-                }
-                currentScroll = scroll
-                val body = platforms()
-                scroll.addView(body, FrameLayout.LayoutParams(-1, -2))
-                shell.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-                scroll.post { scroll.scrollTo(0, scrollPositions[page] ?: 0) }
-                add(shell, navigation(), if (wide) 50 else 66, 4)
-            }
-        }
+                currentRoot.safeAdd(shell, FrameLayout.LayoutParams(-1, -1))
 
-        if (showPermissionsModal) {
-            attachPermissionsModal()
-        }
-        if (countdownSeconds > 0) {
-            attachCountdownOverlay()
+                // Screen Header
+                if (page == "editor") {
+                    add(shell, editorHeader(), if (wide) 52 else 64)
+                    shell.safeAdd(editor(), LinearLayout.LayoutParams(-1, 0, 1f))
+                    if (showPermissionsModal) {
+                        attachPermissionsModal()
+                    }
+                    if (countdownSeconds > 0) {
+                        attachCountdownOverlay()
+                    }
+                    return@post
+                }
+
+                add(shell, header(), if (wide) 52 else 66)
+
+                // Body Content
+                when (page) {
+                    "transmission" -> {
+                        shell.safeAdd(home(), LinearLayout.LayoutParams(-1, 0, 1f))
+                        add(shell, navigation(), if (wide) 50 else 66, 4)
+                    }
+                    "controls" -> {
+                        shell.safeAdd(controls(), LinearLayout.LayoutParams(-1, 0, 1f))
+                        if (!wide) add(shell, navigation(), 66, 4)
+                    }
+                    "encoder" -> {
+                        val scroll = ScrollView(activity).apply {
+                            isFillViewport = true
+                            isVerticalScrollBarEnabled = false
+                            clipToPadding = false
+                        }
+                        currentScroll = scroll
+                        val body = encoder()
+                        scroll.safeAdd(body, FrameLayout.LayoutParams(-1, -2))
+                        shell.safeAdd(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+                        scroll.post { scroll.scrollTo(0, scrollPositions[page] ?: 0) }
+                        if (!wide) add(shell, navigation(), 66, 4)
+                    }
+                    "platforms" -> {
+                        val scroll = ScrollView(activity).apply {
+                            isFillViewport = true
+                            isVerticalScrollBarEnabled = false
+                            clipToPadding = false
+                        }
+                        currentScroll = scroll
+                        val body = platforms()
+                        scroll.safeAdd(body, FrameLayout.LayoutParams(-1, -2))
+                        shell.safeAdd(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+                        scroll.post { scroll.scrollTo(0, scrollPositions[page] ?: 0) }
+                        add(shell, navigation(), if (wide) 50 else 66, 4)
+                    }
+                }
+
+                if (showPermissionsModal) {
+                    attachPermissionsModal()
+                }
+                if (countdownSeconds > 0) {
+                    attachCountdownOverlay()
+                }
+            } catch (e: Throwable) {
+                Log.e("NativeTemplate", "Erro ao renderizar: ${e.message}", e)
+            }
         }
     }
 
@@ -1808,11 +1822,11 @@ internal class NativeTemplate(private val activity: Activity) {
             setOnClickListener { click() }
 
             if (symbol == "plus") {
-                addView(label("+", 28f, true, TemplateStyle.cyan).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, dp(34)))
+                safeAdd(label("+", 28f, true, TemplateStyle.cyan).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, dp(34)))
             } else {
-                addView(icon(symbol, if (selected) TemplateStyle.white else TemplateStyle.magenta), LinearLayout.LayoutParams(dp(28), dp(28)))
+                safeAdd(icon(symbol, if (selected) TemplateStyle.white else TemplateStyle.magenta), LinearLayout.LayoutParams(dp(28), dp(28)))
             }
-            addView(label(title, 10.5f, true).apply {
+            safeAdd(label(title, 10.5f, true).apply {
                 gravity = Gravity.CENTER
                 maxLines = 2
             }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
