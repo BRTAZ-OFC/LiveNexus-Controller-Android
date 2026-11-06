@@ -1741,6 +1741,20 @@ internal class NativeTemplate(private val activity: Activity) {
             ScreenCaptureService.reloadCurrentScene()
             toast("Cena recarregada no encoder.")
         })
+        buttons.add(sceneButton("plus", "Mortes +", selected = false) {
+            DeathCounterCommands.send(activity, increase = true) { delivered ->
+                if (!activity.isFinishing && !activity.isDestroyed) {
+                    toast(if (delivered) "Comando + enviado ao contador de mortes." else "Falha ao enviar comando + ao LiveNEXUS.")
+                }
+            }
+        })
+        buttons.add(sceneButton("minus", "Mortes −", selected = false) {
+            DeathCounterCommands.send(activity, increase = false) { delivered ->
+                if (!activity.isFinishing && !activity.isDestroyed) {
+                    toast(if (delivered) "Comando − enviado ao contador de mortes." else "Falha ao enviar comando − ao LiveNEXUS.")
+                }
+            }
+        })
         buttons.add(sceneButton("plus", "Adicionar\ncenário", selected = false) {
             addedSceneCount++
             toast("Novo cenário adicionado.")
@@ -1832,8 +1846,9 @@ internal class NativeTemplate(private val activity: Activity) {
             contentDescription = title.replace("\n", " ")
             setOnClickListener { click() }
 
-            if (symbol == "plus") {
-                safeAdd(label("+", 28f, true, TemplateStyle.cyan).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, dp(34)))
+            if (symbol == "plus" || symbol == "minus") {
+                val sign = if (symbol == "plus") "+" else "−"
+                safeAdd(label(sign, 28f, true, TemplateStyle.cyan).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, dp(34)))
             } else {
                 safeAdd(icon(symbol, if (selected) TemplateStyle.white else TemplateStyle.magenta), LinearLayout.LayoutParams(dp(28), dp(28)))
             }
