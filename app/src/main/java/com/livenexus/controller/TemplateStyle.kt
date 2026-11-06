@@ -208,8 +208,12 @@ internal object TemplateStyle {
         }
     }
 
-    /** Status badge "Conectado 🟢" with Wi-Fi icon, matching top-right of all images. */
-    class ConnectionBadge(context: Context) : View(context) {
+    /** Status badge with Wi-Fi icon, reflecting real transmission state in the header. */
+    class ConnectionBadge(
+        context: Context,
+        private val statusText: String = "Conectado",
+        private val statusColor: Int = green
+    ) : View(context) {
         private val p = Paint(Paint.ANTI_ALIAS_FLAG)
         private val density = context.resources.displayMetrics.density
 
@@ -227,25 +231,25 @@ internal object TemplateStyle {
             p.style = Paint.Style.STROKE
             p.strokeWidth = 1.2f * density
             p.shader = LinearGradient(r.left, r.top, r.right, r.bottom,
-                intArrayOf(cyan, green), null, Shader.TileMode.CLAMP)
+                intArrayOf(cyan, statusColor), null, Shader.TileMode.CLAMP)
             c.drawRoundRect(r, corner, corner, p)
             p.shader = null
 
             // Wi-Fi icon on the left
             drawIcon(c, p, "wifi", RectF(8f * density, 6f * density, 24f * density, 22f * density), cyan)
 
-            // Green status dot
+            // Status dot
             val dotX = 30f * density
             val dotY = r.centerY()
             p.style = Paint.Style.FILL
-            p.color = green
+            p.color = statusColor
             c.drawCircle(dotX, dotY, 3.5f * density, p)
 
-            // Text "Conectado"
-            p.color = green
-            p.textSize = 10.5f * density
+            // Status text
+            p.color = statusColor
+            p.textSize = 10.0f * density
             p.typeface = Typeface.create("sans-serif", Typeface.BOLD)
-            c.drawText("Conectado", dotX + 7f * density, dotY + 3.8f * density, p)
+            c.drawText(statusText, dotX + 6.5f * density, dotY + 3.6f * density, p)
         }
     }
 

@@ -24,6 +24,17 @@ import kotlin.math.hypot
  * visual fidelity, cyberpunk neon palette, and component layouts of the design specifications.
  */
 internal class NativeTemplate(private val activity: Activity) {
+    companion object {
+        const val REQUEST_MEDIA_PROJECTION = 2001
+
+        @Volatile
+        private var activeTemplate: NativeTemplate? = null
+
+        fun onMediaProjectionResult(granted: Boolean) {
+            activeTemplate?.handleMediaProjectionResult(granted)
+        }
+    }
+
     private val density = activity.resources.displayMetrics.density
     private val root = FrameLayout(activity)
 
@@ -35,26 +46,27 @@ internal class NativeTemplate(private val activity: Activity) {
     private var popup: PopupWindow? = null
     private var menuAnchor: View? = null
 
-    // Encoder settings state
-    private var resolution = "1080p"
-    private var streamOrientation = "Horizontal (16:9)"
-    private var fps = "60 FPS"
-    private var bitrate = 6000
+    // Encoder settings state (synced with StreamingConfig SharedPreferences)
+    private var resolution = StreamingConfig.loadResolutionLabel(activity)
+    private var streamOrientation = StreamingConfig.loadOrientationLabel(activity)
+    private var fps = StreamingConfig.loadFpsLabel(activity)
+    private var bitrate = StreamingConfig.loadBitrateKbps(activity)
     private var codec = "H.264"
-    private var micEnabled = true
-    private var internalAudioEnabled = true
-    private var micVolume = 100
-    private var internalVolume = 100
+    private var micEnabled = StreamingConfig.loadMicEnabled(activity)
+    private var internalAudioEnabled = StreamingConfig.loadInternalAudioEnabled(activity)
+    private var micVolume = StreamingConfig.loadMicVolume(activity)
+    private var internalVolume = StreamingConfig.loadInternalVolume(activity)
 
     // Platform settings state
-    private var twitchEnabled = true
-    private var youtubeEnabled = true
-    private var kickEnabled = true
+    private var twitchEnabled = StreamingConfig.isPlatformEnabled(activity, "Twitch")
+    private var youtubeEnabled = StreamingConfig.isPlatformEnabled(activity, "YouTube")
+    private var kickEnabled = StreamingConfig.isPlatformEnabled(activity, "Kick")
     private var twitchKeyVisible = false
     private var youtubeKeyVisible = false
     private var kickKeyVisible = false
-    private var streamConnected = false
-    private var streamStartTimeMs = 0L
+    private var streamConnected = ScreenCaptureService.isLiveStreaming
+    private var streamConnecting = ScreenCaptureService.isConnecting
+    private var streamStartTimeMs = ScreenCaptureService.streamStartTimeMs
     private var timerLabel: TextView? = null
     private var overlayTimerLabel: TextView? = null
     private var overlayPanelTimerLabel: TextView? = null
@@ -74,6 +86,34 @@ internal class NativeTemplate(private val activity: Activity) {
     private var lifecycleRegistered = false
     private var activityInBackground = false
     private var systemOverlayView: View? = null
+
+    private val serviceStateListener: () -> Unit = {
+        activity.runOnUiThread {
+            if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+            val wasConnected = streamConnected
+            streamConnected = ScreenCaptureService.isLiveStreaming
+            streamConnecting = ScreenCaptureService.isConnecting
+            streamStartTimeMs = ScreenCaptureService.streamStartTimeMs
+
+            val err = ScreenCaptureService.lastError
+            if (!err.isNullOrBlank()) {
+                toast(err)
+                ScreenCaptureService.clearError()
+            }
+
+            if (streamConnected && !wasConnected) {
+                root.removeCallbacks(timerRunnable)
+                root.postDelayed(timerRunnable, 1000L)
+                if (activityInBackground && canDrawSystemOverlay()) {
+                    showSystemOverlayWindow()
+                }
+            } else if (!streamConnected && wasConnected) {
+                root.removeCallbacks(timerRunnable)
+                removeSystemOverlayWindow()
+            }
+            render()
+        }
+    }
 
     private val timerRunnable = object : Runnable {
         override fun run() {
@@ -95,6 +135,16 @@ internal class NativeTemplate(private val activity: Activity) {
                 root.postDelayed(this, 1000L)
             } else if (countdownSeconds == 1) {
                 countdownSeconds = 0
+                syncSceneLayersToEncoder()
+                val startErr = StreamingConfig.startLiveStream(activity)
+                if (startErr != null) {
+                    streamConnected = false
+                    streamConnecting = false
+                    toast(startErr)
+                    render()
+                    return
+                }
+                streamConnecting = true
                 streamConnected = true
                 streamStartTimeMs = System.currentTimeMillis()
                 overlayExpanded = false
@@ -107,7 +157,30 @@ internal class NativeTemplate(private val activity: Activity) {
         }
     }
 
-    private fun startConnectionCountdown() {
+    private fun requestMediaProjectionConsent() {
+        try {
+            val mgr = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? android.media.projection.MediaProjectionManager
+            if (mgr != null) {
+                @Suppress("DEPRECATION")
+                activity.startActivityForResult(mgr.createScreenCaptureIntent(), REQUEST_MEDIA_PROJECTION)
+            } else {
+                toast("Serviço MediaProjection indisponível neste dispositivo.")
+            }
+        } catch (e: Throwable) {
+            toast("Falha ao solicitar captura de tela: ${e.message}")
+        }
+    }
+
+    private fun handleMediaProjectionResult(granted: Boolean) {
+        if (granted && ProjectionState.hasConsent()) {
+            startConnectionCountdown()
+        } else {
+            toast("A captura de tela precisa ser autorizada para iniciar a transmissão.")
+            render()
+        }
+    }
+
+    private fun verifyAndStartLiveFlow() {
         val activePlatforms = mutableListOf<String>()
         if (twitchEnabled) activePlatforms.add("Twitch")
         if (youtubeEnabled) activePlatforms.add("YouTube")
@@ -116,14 +189,64 @@ internal class NativeTemplate(private val activity: Activity) {
             toast("Não há plataforma conectada.")
             return
         }
+
+        val configuredTargets = StreamingConfig.getConfiguredPlatformTargets(activity)
+        if (configuredTargets.isEmpty()) {
+            val firstActive = activePlatforms.first()
+            toast("Insira a Stream Key da plataforma $firstActive para transmitir.")
+            promptStreamKeyDialog(firstActive) {
+                if (StreamingConfig.getConfiguredPlatformTargets(activity).isNotEmpty()) {
+                    verifyAndStartLiveFlow()
+                }
+            }
+            return
+        }
+
+        syncSystemPermissions()
+        if (!micPermGranted || !galleryPermGranted || !overlayPermGranted) {
+            showPermissionsModal = true
+            requestRuntimeMicAndGalleryPermissions()
+            render()
+            return
+        }
+
+        if (!ProjectionState.hasConsent()) {
+            requestMediaProjectionConsent()
+            return
+        }
+
+        startConnectionCountdown()
+    }
+
+    private fun startConnectionCountdown() {
+        val configuredTargets = StreamingConfig.getConfiguredPlatformTargets(activity)
+        if (configuredTargets.isEmpty()) {
+            toast("Não há plataforma conectada com Stream Key configurada.")
+            return
+        }
         countdownSeconds = 3
         root.removeCallbacks(countdownRunnable)
         root.postDelayed(countdownRunnable, 1000L)
         render()
     }
 
+    private fun stopLiveStreamAndReset(showMessage: Boolean = true) {
+        StreamingConfig.stopLiveStream(activity)
+        streamConnected = false
+        streamConnecting = false
+        overlayExpanded = false
+        countdownSeconds = 0
+        root.removeCallbacks(timerRunnable)
+        root.removeCallbacks(countdownRunnable)
+        removeSystemOverlayWindow()
+        if (showMessage) {
+            toast("Transmissão encerrada e recursos liberados.")
+        }
+        render()
+    }
+
     private fun minimizeApkToOverlay() {
-        if (!streamConnected) return
+        if (!streamConnected && !streamConnecting) return
         overlayExpanded = false
         activityInBackground = true
         showSystemOverlayWindow()
@@ -221,8 +344,13 @@ internal class NativeTemplate(private val activity: Activity) {
     }
 
     private fun formatElapsedTime(): String {
-        if (!streamConnected || streamStartTimeMs <= 0L) return "00:00:00"
-        val totalSec = ((System.currentTimeMillis() - streamStartTimeMs) / 1000L).coerceAtLeast(0L)
+        val baseStart = if (ScreenCaptureService.streamStartTimeMs > 0L) {
+            ScreenCaptureService.streamStartTimeMs
+        } else {
+            streamStartTimeMs
+        }
+        if ((!streamConnected && !ScreenCaptureService.isLiveStreaming) || baseStart <= 0L) return "00:00:00"
+        val totalSec = ((System.currentTimeMillis() - baseStart) / 1000L).coerceAtLeast(0L)
         val hours = totalSec / 3600L
         val minutes = (totalSec % 3600L) / 60L
         val seconds = totalSec % 60L
@@ -255,6 +383,25 @@ internal class NativeTemplate(private val activity: Activity) {
     private var selectedElementId: String? = null
     private var expandedPreview: View? = null
 
+    private fun syncSceneLayersToEncoder() {
+        StreamingConfig.activeSceneLayers.clear()
+        StreamingConfig.activeSceneLayers.addAll(
+            canvasElements.map { el ->
+                CaptureLayer(
+                    id = el.id,
+                    type = el.type,
+                    label = el.title,
+                    normX = el.x,
+                    normY = el.y,
+                    normW = el.width,
+                    normH = el.height,
+                    visible = true,
+                    aspectRatio = el.aspectRatio
+                )
+            }
+        )
+    }
+
     private fun getSelectedElement(): CanvasElement? =
         canvasElements.find { it.id == selectedElementId } ?: canvasElements.find { it.isSelected }
 
@@ -280,6 +427,7 @@ internal class NativeTemplate(private val activity: Activity) {
             selectedElementId = newElement.id
             toast("Elemento 'Captura de Tela' adicionado ao cenário!")
         }
+        syncSceneLayersToEncoder()
         render()
     }
 
@@ -297,6 +445,7 @@ internal class NativeTemplate(private val activity: Activity) {
         )
         canvasElements.add(newElement)
         selectedElementId = newElement.id
+        syncSceneLayersToEncoder()
         toast("Elemento 'Texto' adicionado ao cenário!")
         render()
     }
@@ -307,6 +456,7 @@ internal class NativeTemplate(private val activity: Activity) {
             canvasElements.remove(selected)
             selectedElementId = canvasElements.lastOrNull()?.id
             canvasElements.lastOrNull()?.isSelected = true
+            syncSceneLayersToEncoder()
             toast("Elemento '${selected.title}' removido do cenário.")
             render()
         } else {
@@ -349,6 +499,7 @@ internal class NativeTemplate(private val activity: Activity) {
                 elem.height = nh
             }
         }
+        syncSceneLayersToEncoder()
         render()
     }
 
@@ -359,6 +510,8 @@ internal class NativeTemplate(private val activity: Activity) {
     private fun toast(msg: String) = Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
 
     fun show() {
+        activeTemplate = this
+        ScreenCaptureService.addStateListener(serviceStateListener)
         popup?.dismiss()
         popup = null
         menuAnchor = null
@@ -396,6 +549,8 @@ internal class NativeTemplate(private val activity: Activity) {
                 if (a === activity) {
                     activityInBackground = false
                     syncSystemPermissions()
+                    streamConnected = ScreenCaptureService.isLiveStreaming
+                    streamConnecting = ScreenCaptureService.isConnecting
                     // Quando está dentro do APK, a sobreposição de tela some
                     removeSystemOverlayWindow()
                     if (pendingConnectAfterPermissions && canDrawSystemOverlay()) {
@@ -404,7 +559,7 @@ internal class NativeTemplate(private val activity: Activity) {
                         micPermGranted = true
                         galleryPermGranted = true
                         overlayPermGranted = true
-                        root.post { startConnectionCountdown() }
+                        root.post { verifyAndStartLiveFlow() }
                     } else {
                         root.post { render() }
                     }
@@ -415,7 +570,7 @@ internal class NativeTemplate(private val activity: Activity) {
                 if (a === activity) {
                     activityInBackground = true
                     // Quando você minimiza o APK para o smartphone, a sobreposição de tela volta a aparecer
-                    if (streamConnected && canDrawSystemOverlay()) {
+                    if ((streamConnected || ScreenCaptureService.isLiveStreaming) && canDrawSystemOverlay()) {
                         showSystemOverlayWindow()
                     }
                 }
@@ -423,6 +578,10 @@ internal class NativeTemplate(private val activity: Activity) {
             override fun onActivitySaveInstanceState(a: Activity, outState: android.os.Bundle) {}
             override fun onActivityDestroyed(a: Activity) {
                 if (a === activity) {
+                    ScreenCaptureService.removeStateListener(serviceStateListener)
+                    if (activeTemplate === this@NativeTemplate) {
+                        activeTemplate = null
+                    }
                     removeSystemOverlayWindow()
                 }
             }
@@ -661,8 +820,20 @@ internal class NativeTemplate(private val activity: Activity) {
             marginEnd = dp(8)
         })
 
-        // Right Action: Status Badge and optional Gear icon
-        val badge = TemplateStyle.ConnectionBadge(activity)
+        // Right Action: Real Status Badge and optional Gear icon
+        val isLive = ScreenCaptureService.isLiveStreaming || streamConnected
+        val isConn = ScreenCaptureService.isConnecting || streamConnecting || countdownSeconds > 0
+        val badgeText = when {
+            isLive -> "Conectado"
+            isConn -> "Conectando"
+            else -> "Offline"
+        }
+        val badgeColor = when {
+            isLive -> TemplateStyle.green
+            isConn -> TemplateStyle.cyan
+            else -> TemplateStyle.muted
+        }
+        val badge = TemplateStyle.ConnectionBadge(activity, badgeText, badgeColor)
         addView(badge, LinearLayout.LayoutParams(dp(112), dp(32)))
 
         if (wide) {
@@ -847,6 +1018,7 @@ internal class NativeTemplate(private val activity: Activity) {
             radius = 12f
         ) {
             streamOrientation = if (isVertical) "Horizontal (16:9)" else "Vertical (9:16)"
+            StreamingConfig.saveOrientationLabel(activity, streamOrientation)
             toast("Cenário alterado para $streamOrientation")
             render()
         }
@@ -859,15 +1031,18 @@ internal class NativeTemplate(private val activity: Activity) {
         // Botão Conectar / Conectado (Vermelho quando desconectado, Verde quando conectado)
         val hasActivePlatform = twitchEnabled || youtubeEnabled || kickEnabled
         if (!hasActivePlatform && streamConnected) {
-            streamConnected = false
-            root.removeCallbacks(timerRunnable)
+            stopLiveStreamAndReset(false)
         }
 
         val btnPrimary = if (streamConnected) Color.rgb(0, 215, 115) else Color.rgb(255, 34, 60)
         val btnDark = if (streamConnected) Color.rgb(0, 140, 72) else Color.rgb(160, 0, 28)
         val btnDeep = if (streamConnected) Color.rgb(0, 80, 40) else Color.rgb(90, 0, 16)
         val btnBorder = if (streamConnected) TemplateStyle.green else btnPrimary
-        val btnText = if (streamConnected) "Conectado" else "Conectar"
+        val btnText = when {
+            streamConnected -> "Conectado"
+            streamConnecting -> "Conectando..."
+            else -> "Conectar"
+        }
 
         val connectionButton = row().apply {
             gravity = Gravity.CENTER
@@ -890,32 +1065,12 @@ internal class NativeTemplate(private val activity: Activity) {
                 if (kickEnabled) activePlatforms.add("Kick")
 
                 if (activePlatforms.isEmpty()) {
-                    streamConnected = false
-                    overlayExpanded = false
-                    countdownSeconds = 0
-                    root.removeCallbacks(timerRunnable)
-                    root.removeCallbacks(countdownRunnable)
-                    removeSystemOverlayWindow()
+                    stopLiveStreamAndReset(false)
                     toast("Não há plataforma conectada.")
-                    render()
-                } else if (!streamConnected && countdownSeconds == 0) {
-                    syncSystemPermissions()
-                    if (!micPermGranted || !galleryPermGranted || !overlayPermGranted) {
-                        showPermissionsModal = true
-                        requestRuntimeMicAndGalleryPermissions()
-                        render()
-                    } else {
-                        startConnectionCountdown()
-                    }
+                } else if (!streamConnected && !streamConnecting && countdownSeconds == 0) {
+                    verifyAndStartLiveFlow()
                 } else {
-                    streamConnected = false
-                    overlayExpanded = false
-                    countdownSeconds = 0
-                    root.removeCallbacks(timerRunnable)
-                    root.removeCallbacks(countdownRunnable)
-                    removeSystemOverlayWindow()
-                    toast("Transmissão desconectada.")
-                    render()
+                    stopLiveStreamAndReset(true)
                 }
             }
 
@@ -998,7 +1153,7 @@ internal class NativeTemplate(private val activity: Activity) {
         banner.addView(subBadge)
         add(this, banner)
 
-        // Resolução Card
+        // Resolução Card (1280x720 / 1920x1080)
         val resCard = card(radius = 14f)
         val resHead = row()
         resHead.addView(icon("screen"), LinearLayout.LayoutParams(dp(18), dp(18)))
@@ -1008,12 +1163,15 @@ internal class NativeTemplate(private val activity: Activity) {
         listOf("720p", "1080p").forEach { res ->
             weighted(resChoices, action(res, selected = res == resolution, radius = 12f) {
                 resolution = res
+                StreamingConfig.saveResolutionLabel(activity, res)
+                val dims = if (res == "720p") "1280×720" else "1920×1080"
+                toast("Resolução do encoder definida: $res ($dims)")
                 render()
             }, 1f, 38, 2)
         }
         add(resCard, resChoices, top = 6)
 
-        // FPS Card
+        // FPS Card (30 / 60)
         val fpsCard = card(radius = 14f)
         val fpsHead = row()
         fpsHead.addView(icon("layers"), LinearLayout.LayoutParams(dp(18), dp(18)))
@@ -1023,6 +1181,8 @@ internal class NativeTemplate(private val activity: Activity) {
         listOf("30 FPS", "60 FPS").forEach { opt ->
             weighted(fpsChoices, action(opt, selected = opt == fps, radius = 12f) {
                 fps = opt
+                StreamingConfig.saveFpsLabel(activity, opt)
+                toast("Taxa de quadros do encoder definida: $opt")
                 render()
             }, 1f, 38, 2)
         }
@@ -1038,7 +1198,7 @@ internal class NativeTemplate(private val activity: Activity) {
             add(this, fpsCard, top = 4)
         }
 
-        // Bitrate Card
+        // Bitrate Card (2000–10000 kbps)
         val bitrateCard = card(radius = 14f)
         val bitHead = row()
         bitHead.addView(icon("broadcast"), LinearLayout.LayoutParams(dp(18), dp(18)))
@@ -1052,8 +1212,10 @@ internal class NativeTemplate(private val activity: Activity) {
         add(bitrateCard, bitHead)
 
         val bitSeek = customSeekBar(bitrate - 2000, 8000) {
-            bitrate = it + 2000
+            bitrate = (it + 2000).coerceIn(2000, 10000)
             bitBadge.text = "$bitrate Kbps"
+            StreamingConfig.saveBitrateKbps(activity, bitrate)
+            ScreenCaptureService.updateDynamicBitrate(bitrate)
         }
         add(bitrateCard, bitSeek, 32, top = 6)
         val bitLimits = row()
@@ -1062,15 +1224,15 @@ internal class NativeTemplate(private val activity: Activity) {
         bitLimits.addView(label("10000 Kbps", 10f, color = TemplateStyle.muted))
         add(bitrateCard, bitLimits)
 
-        // Codec Card
+        // Codec Card (H.264 / AAC native MediaCodec)
         val codecCard = card(radius = 14f)
         val codecHead = row()
         codecHead.addView(icon("gear"), LinearLayout.LayoutParams(dp(18), dp(18)))
         codecHead.addView(label("Codec de Vídeo", 12.5f, true).apply { marginStart(dp(6)) })
         add(codecCard, codecHead)
         val codecSelector = action("H.264     ⌄", radius = 10f) {
-            codec = if (codec == "H.264") "H.265 (HEVC)" else "H.264"
-            toast("Codec selecionado: $codec")
+            codec = "H.264"
+            toast("Codec nativo ativo: Vídeo H.264 (AVC) + Áudio AAC")
         }
         add(codecCard, codecSelector, 38, top = 6)
 
@@ -1093,12 +1255,18 @@ internal class NativeTemplate(private val activity: Activity) {
 
         val micRow = row()
         weighted(micRow, label("Microfone (Áudio Externo)", 11.5f), 1f)
-        micRow.addView(neonToggle(micEnabled) { micEnabled = it })
+        micRow.addView(neonToggle(micEnabled) {
+            micEnabled = it
+            StreamingConfig.saveMicEnabled(activity, it)
+        })
         add(audioCard, micRow, 34, top = 4)
 
         val internalRow = row()
         weighted(internalRow, label("Áudio Interno (Som do Dispositivo)", 11.5f), 1f)
-        internalRow.addView(neonToggle(internalAudioEnabled) { internalAudioEnabled = it })
+        internalRow.addView(neonToggle(internalAudioEnabled) {
+            internalAudioEnabled = it
+            StreamingConfig.saveInternalAudioEnabled(activity, it)
+        })
         add(audioCard, internalRow, 34, top = 2)
 
         val volumeCard = card(radius = 14f)
@@ -1113,6 +1281,7 @@ internal class NativeTemplate(private val activity: Activity) {
         weighted(micVolRow, customSeekBar(micVolume, 100) {
             micVolume = it
             micVolVal.text = "$it%"
+            StreamingConfig.saveMicVolume(activity, it)
         }, 1f, 30)
         micVolRow.addView(micVolVal, LinearLayout.LayoutParams(dp(40), -2))
         add(volumeCard, micVolRow, top = 3)
@@ -1123,6 +1292,7 @@ internal class NativeTemplate(private val activity: Activity) {
         weighted(intVolRow, customSeekBar(internalVolume, 100) {
             internalVolume = it
             intVolVal.text = "$it%"
+            StreamingConfig.saveInternalVolume(activity, it)
         }, 1f, 30)
         intVolRow.addView(intVolVal, LinearLayout.LayoutParams(dp(40), -2))
         add(volumeCard, intVolRow, top = 2)
@@ -1144,18 +1314,47 @@ internal class NativeTemplate(private val activity: Activity) {
             streamOrientation = "Horizontal (16:9)"
             fps = "60 FPS"
             bitrate = 6000
+            micEnabled = true
+            internalAudioEnabled = true
             micVolume = 100
             internalVolume = 100
-            toast("Configurações padrão restauradas.")
+            StreamingConfig.saveResolutionLabel(activity, resolution)
+            StreamingConfig.saveOrientationLabel(activity, streamOrientation)
+            StreamingConfig.saveFpsLabel(activity, fps)
+            StreamingConfig.saveBitrateKbps(activity, bitrate)
+            StreamingConfig.saveMicEnabled(activity, micEnabled)
+            StreamingConfig.saveInternalAudioEnabled(activity, internalAudioEnabled)
+            StreamingConfig.saveMicVolume(activity, micVolume)
+            StreamingConfig.saveInternalVolume(activity, internalVolume)
+            ScreenCaptureService.updateDynamicBitrate(bitrate)
+            toast("Configurações padrão restauradas no encoder.")
             render()
         }, 1f, 48, 2)
 
         weighted(footer, action("Salvar Configurações", "save", selected = true, radius = 14f) {
-            toast("Configurações salvas com sucesso!")
+            StreamingConfig.saveResolutionLabel(activity, resolution)
+            StreamingConfig.saveOrientationLabel(activity, streamOrientation)
+            StreamingConfig.saveFpsLabel(activity, fps)
+            StreamingConfig.saveBitrateKbps(activity, bitrate)
+            StreamingConfig.saveMicEnabled(activity, micEnabled)
+            StreamingConfig.saveInternalAudioEnabled(activity, internalAudioEnabled)
+            StreamingConfig.saveMicVolume(activity, micVolume)
+            StreamingConfig.saveInternalVolume(activity, internalVolume)
+            ScreenCaptureService.updateDynamicBitrate(bitrate)
+            toast("Configurações salvas no encoder ($resolution • $fps • $bitrate Kbps)!")
         }, 1.6f, 48, 2)
 
         weighted(footer, action("Aplicar", "check", radius = 12f) {
-            toast("Configurações aplicadas à transmissão.")
+            StreamingConfig.saveResolutionLabel(activity, resolution)
+            StreamingConfig.saveOrientationLabel(activity, streamOrientation)
+            StreamingConfig.saveFpsLabel(activity, fps)
+            StreamingConfig.saveBitrateKbps(activity, bitrate)
+            StreamingConfig.saveMicEnabled(activity, micEnabled)
+            StreamingConfig.saveInternalAudioEnabled(activity, internalAudioEnabled)
+            StreamingConfig.saveMicVolume(activity, micVolume)
+            StreamingConfig.saveInternalVolume(activity, internalVolume)
+            ScreenCaptureService.updateDynamicBitrate(bitrate)
+            toast("Configurações aplicadas ao encoder real.")
         }, 1f, 48, 2)
 
         add(this, footer, 48, top = 8)
@@ -1193,9 +1392,12 @@ internal class NativeTemplate(private val activity: Activity) {
             symbol = "twitch",
             themeColor = TemplateStyle.twitch,
             enabled = twitchEnabled,
-            url = "rtmp://live.twitch.tv/app/",
+            url = StreamingConfig.getPlatformUrl(activity, "Twitch"),
             keyRevealed = twitchKeyVisible,
-            onToggle = { twitchEnabled = it },
+            onToggle = {
+                twitchEnabled = it
+                StreamingConfig.setPlatformEnabled(activity, "Twitch", it)
+            },
             onPeek = { twitchKeyVisible = !twitchKeyVisible; render() }
         )
 
@@ -1204,9 +1406,12 @@ internal class NativeTemplate(private val activity: Activity) {
             symbol = "youtube",
             themeColor = TemplateStyle.youtube,
             enabled = youtubeEnabled,
-            url = "rtmps://a.rtmps.youtube.com:443/live2",
+            url = StreamingConfig.getPlatformUrl(activity, "YouTube"),
             keyRevealed = youtubeKeyVisible,
-            onToggle = { youtubeEnabled = it },
+            onToggle = {
+                youtubeEnabled = it
+                StreamingConfig.setPlatformEnabled(activity, "YouTube", it)
+            },
             onPeek = { youtubeKeyVisible = !youtubeKeyVisible; render() }
         )
 
@@ -1215,9 +1420,12 @@ internal class NativeTemplate(private val activity: Activity) {
             symbol = "kick",
             themeColor = TemplateStyle.kick,
             enabled = kickEnabled,
-            url = "rtmps://fa723fc63517111e61a2a3b.",
+            url = StreamingConfig.getPlatformUrl(activity, "Kick"),
             keyRevealed = kickKeyVisible,
-            onToggle = { kickEnabled = it },
+            onToggle = {
+                kickEnabled = it
+                StreamingConfig.setPlatformEnabled(activity, "Kick", it)
+            },
             onPeek = { kickKeyVisible = !kickKeyVisible; render() }
         )
 
@@ -1234,6 +1442,117 @@ internal class NativeTemplate(private val activity: Activity) {
         }
     }
 
+    private fun promptStreamKeyDialog(platformName: String, onSaved: (() -> Unit)? = null) {
+        val currentKey = StreamingConfig.getStreamKey(activity, platformName)
+        val input = EditText(activity).apply {
+            setSingleLine(true)
+            hint = "Cole a Stream Key da $platformName"
+            setText(currentKey)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.LTGRAY)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        android.app.AlertDialog.Builder(activity)
+            .setTitle("Stream Key • $platformName")
+            .setMessage("Insira sua chave de transmissão RTMP/RTMPS (armazenada localmente no dispositivo):")
+            .setView(input)
+            .setPositiveButton("Salvar") { _, _ ->
+                val newKey = input.text?.toString()?.trim().orEmpty()
+                StreamingConfig.setStreamKey(activity, platformName, newKey)
+                if (newKey.isNotBlank()) {
+                    StreamingConfig.setPlatformEnabled(activity, platformName, true)
+                    when (platformName) {
+                        "Twitch" -> twitchEnabled = true
+                        "YouTube" -> youtubeEnabled = true
+                        "Kick" -> kickEnabled = true
+                    }
+                    toast("Stream Key da $platformName salva!")
+                } else {
+                    toast("Stream Key da $platformName removida.")
+                }
+                render()
+                onSaved?.invoke()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun promptServerUrlDialog(platformName: String) {
+        val currentUrl = StreamingConfig.getPlatformUrl(activity, platformName)
+        val input = EditText(activity).apply {
+            setSingleLine(true)
+            hint = "rtmp:// ou rtmps://"
+            setText(currentUrl)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.LTGRAY)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        android.app.AlertDialog.Builder(activity)
+            .setTitle("Servidor RTMP/RTMPS • $platformName")
+            .setView(input)
+            .setPositiveButton("Salvar") { _, _ ->
+                val newUrl = input.text?.toString()?.trim().orEmpty()
+                if (newUrl.startsWith("rtmp://", ignoreCase = true) || newUrl.startsWith("rtmps://", ignoreCase = true)) {
+                    StreamingConfig.setPlatformUrl(activity, platformName, newUrl)
+                    toast("URL do servidor $platformName atualizada.")
+                    render()
+                } else {
+                    toast("Informe uma URL iniciando com rtmp:// ou rtmps://")
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun testPlatformRtmpConnection(platformName: String) {
+        val key = StreamingConfig.getStreamKey(activity, platformName)
+        if (key.isBlank()) {
+            toast("Toque em Stream Key para configurar a chave da $platformName.")
+            promptStreamKeyDialog(platformName)
+            return
+        }
+        val baseUrl = StreamingConfig.getPlatformUrl(activity, platformName)
+        toast("Testando handshake RTMP/RTMPS em $platformName...")
+        Thread({
+            val width = if (resolution == "720p") 1280 else 1920
+            val height = if (resolution == "720p") 720 else 1080
+            val fpsVal = if (fps.startsWith("30")) 30 else 60
+            val client = RtmpClient(
+                rtmpUrl = baseUrl,
+                streamKey = key,
+                width = width,
+                height = height,
+                fps = fpsVal,
+                videoBitrateKbps = bitrate
+            )
+            var errorDetail: String? = null
+            val ok = try {
+                client.connect()
+                true
+            } catch (e: Exception) {
+                errorDetail = e.message
+                false
+            } finally {
+                try {
+                    client.close()
+                } catch (_: Exception) {}
+            }
+            activity.runOnUiThread {
+                if (!activity.isFinishing && !activity.isDestroyed) {
+                    if (ok) {
+                        toast("$platformName: Conexão RTMP/RTMPS verificada com sucesso!")
+                    } else {
+                        val suffix = errorDetail?.let { " ($it)" } ?: ""
+                        toast("$platformName: Falha no handshake RTMP/RTMPS$suffix")
+                    }
+                    render()
+                }
+            }
+        }, "RtmpTest-$platformName").start()
+    }
+
     private fun platformCard(
         name: String,
         symbol: String,
@@ -1244,6 +1563,10 @@ internal class NativeTemplate(private val activity: Activity) {
         onToggle: (Boolean) -> Unit,
         onPeek: () -> Unit
     ): View = card(radius = 16f, borderTint = themeColor).apply {
+        val storedKey = StreamingConfig.getStreamKey(activity, name)
+        val isStreamingThis = ScreenCaptureService.isLiveStreaming && ScreenCaptureService.activePlatforms.contains(name)
+        val isReady = enabled && storedKey.isNotBlank()
+
         // Platform header: Logo + Name + Status + Switch
         val head = row()
         head.addView(icon(symbol, themeColor), LinearLayout.LayoutParams(dp(26), dp(26)))
@@ -1254,7 +1577,18 @@ internal class NativeTemplate(private val activity: Activity) {
             setPadding(dp(6), dp(2), dp(6), dp(2))
             marginStart(dp(8))
         }
-        val statusColor = if (enabled) TemplateStyle.green else TemplateStyle.muted
+        val statusColor = when {
+            isStreamingThis -> TemplateStyle.green
+            isReady -> TemplateStyle.cyan
+            enabled -> TemplateStyle.magenta
+            else -> TemplateStyle.muted
+        }
+        val statusLabel = when {
+            isStreamingThis -> " Transmitindo"
+            isReady -> " Pronto"
+            enabled -> " Sem Chave"
+            else -> " Desconectado"
+        }
         val dot = View(activity).apply {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
@@ -1262,7 +1596,7 @@ internal class NativeTemplate(private val activity: Activity) {
             }
         }
         statusPill.addView(dot, LinearLayout.LayoutParams(dp(6), dp(6)))
-        statusPill.addView(label(if (enabled) " Conectado" else " Desconectado", 9.5f, true, statusColor))
+        statusPill.addView(label(statusLabel, 9.5f, true, statusColor))
         head.addView(statusPill)
 
         head.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
@@ -1272,11 +1606,13 @@ internal class NativeTemplate(private val activity: Activity) {
         })
         add(this, head)
 
-        // URL Field
-        add(this, label("URL do Servidor (${if (name == "Twitch") "RTMP" else "RTMPS"})", 9.5f, true, TemplateStyle.muted), top = 6)
+        // URL Field (tapping edits URL, copy button copies to clipboard)
+        add(this, label("URL do Servidor (${if (url.startsWith("rtmps", ignoreCase = true)) "RTMPS" else "RTMP"})", 9.5f, true, TemplateStyle.muted), top = 6)
         val urlBox = row().apply {
             background = TemplateStyle.Panel(density, false, radius = 8f, glow = false)
             setPadding(dp(8), dp(4), dp(4), dp(4))
+            isClickable = true
+            setOnClickListener { promptServerUrlDialog(name) }
         }
         urlBox.addView(
             label(url, 11f, color = TemplateStyle.white).apply {
@@ -1286,25 +1622,40 @@ internal class NativeTemplate(private val activity: Activity) {
             LinearLayout.LayoutParams(0, -2, 1f)
         )
         urlBox.addView(iconAction("copy", "Copiar URL", radius = 6f) {
+            try {
+                val cm = activity.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                cm?.setPrimaryClip(android.content.ClipData.newPlainText("RTMP URL", url))
+            } catch (_: Throwable) {}
             toast("URL copiada: $url")
         }, LinearLayout.LayoutParams(dp(32), dp(32)))
         add(this, urlBox, 36, top = 2)
 
-        // Stream Key Field
-        add(this, label("Stream Key", 9.5f, true, TemplateStyle.muted), top = 4)
+        // Stream Key Field (tapping opens dialog to set/edit key; never hardcoded)
+        add(this, label("Stream Key (toque para configurar)", 9.5f, true, TemplateStyle.muted), top = 4)
         val keyBox = row().apply {
             background = TemplateStyle.Panel(density, false, radius = 8f, glow = false)
             setPadding(dp(8), dp(4), dp(4), dp(4))
+            isClickable = true
+            setOnClickListener { promptStreamKeyDialog(name) }
         }
-        val keyDisplay = if (keyRevealed) "live_sk_8928471029841" else "••••••••••••••••"
+        val keyDisplay = when {
+            storedKey.isBlank() -> "Toque para inserir Stream Key..."
+            keyRevealed -> storedKey
+            else -> "••••••••••••••••"
+        }
         keyBox.addView(
-            label(keyDisplay, 12f, true, TemplateStyle.cyan).apply {
+            label(keyDisplay, 12f, true, if (storedKey.isBlank()) TemplateStyle.muted else TemplateStyle.cyan).apply {
                 maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
             },
             LinearLayout.LayoutParams(0, -2, 1f)
         )
         keyBox.addView(iconAction("eye", "Revelar chave", radius = 6f) {
-            onPeek()
+            if (storedKey.isBlank()) {
+                promptStreamKeyDialog(name)
+            } else {
+                onPeek()
+            }
         }, LinearLayout.LayoutParams(dp(32), dp(32)))
         add(this, keyBox, 36, top = 2)
 
@@ -1312,11 +1663,13 @@ internal class NativeTemplate(private val activity: Activity) {
         val btns = row()
         weighted(btns, action("Testar", "broadcast", selected = true, radius = 10f) {
             onToggle(true)
-            toast("Testando conexão RTMP em $name...")
-            render()
+            testPlatformRtmpConnection(name)
         }, 1f, 36, 2)
         weighted(btns, action("Desconectar", "link", selected = false, radius = 10f) {
             onToggle(false)
+            if (!twitchEnabled && !youtubeEnabled && !kickEnabled && (streamConnected || ScreenCaptureService.isLiveStreaming)) {
+                stopLiveStreamAndReset(false)
+            }
             toast("$name desconectado.")
             render()
         }, 1f, 36, 2)
@@ -1354,7 +1707,9 @@ internal class NativeTemplate(private val activity: Activity) {
         val buttonList = column()
         val buttons = mutableListOf<View>()
         buttons.add(sceneButton("refresh", "Reload", selected = true) {
-            toast("Cena recarregada.")
+            syncSceneLayersToEncoder()
+            ScreenCaptureService.reloadCurrentScene()
+            toast("Cena recarregada no encoder.")
         })
         buttons.add(sceneButton("plus", "Adicionar\ncenário", selected = false) {
             addedSceneCount++
@@ -1470,7 +1825,11 @@ internal class NativeTemplate(private val activity: Activity) {
         addView(iconAction("back", "Desfazer", radius = 8f) { toast("Desfazer") }, LinearLayout.LayoutParams(dp(36), dp(36)))
         addView(iconAction("refresh", "Refazer", radius = 8f) { toast("Refazer") }, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(4) })
         addView(action("Visualizar", "eye", radius = 10f) { showExpandedPreview() }, LinearLayout.LayoutParams(dp(100), dp(38)).apply { marginStart = dp(6) })
-        addView(action("Salvar", "save", selected = true, radius = 10f) { toast("Cenário salvo!") }, LinearLayout.LayoutParams(dp(86), dp(38)).apply { marginStart = dp(6) })
+        addView(action("Salvar", "save", selected = true, radius = 10f) {
+            syncSceneLayersToEncoder()
+            StreamingConfig.saveOrientationLabel(activity, streamOrientation)
+            toast("Cenário salvo e aplicado ao encoder!")
+        }, LinearLayout.LayoutParams(dp(86), dp(38)).apply { marginStart = dp(6) })
     }
 
     private fun editor(): LinearLayout = column().apply {
@@ -1564,6 +1923,7 @@ internal class NativeTemplate(private val activity: Activity) {
                 isClickable = true
                 setOnClickListener {
                     streamOrientation = if (isVerticalCanvas) "Horizontal (16:9)" else "Vertical (9:16)"
+                    StreamingConfig.saveOrientationLabel(activity, streamOrientation)
                     render()
                 }
             }
@@ -1590,6 +1950,7 @@ internal class NativeTemplate(private val activity: Activity) {
                     selElem.y = 0.10f
                     toast("Captura de Tela alterada para 16:9 (Horizontal)")
                 }
+                syncSceneLayersToEncoder()
                 render()
             }
             capRatioBtn.setPadding(dp(8), dp(2), dp(8), dp(2))
@@ -1760,6 +2121,7 @@ internal class NativeTemplate(private val activity: Activity) {
                         canvasElements.remove(elem)
                         if (selectedElementId == elem.id) selectedElementId = canvasElements.lastOrNull()?.id
                         canvasElements.lastOrNull()?.isSelected = true
+                        syncSceneLayersToEncoder()
                         toast("Elemento removido.")
                         render()
                     }, LinearLayout.LayoutParams(dp(22), dp(22)))
@@ -1905,6 +2267,7 @@ internal class NativeTemplate(private val activity: Activity) {
         )
         canvasElements.add(newElem)
         selectedElementId = newElem.id
+        syncSceneLayersToEncoder()
         toast("Elemento '$title' adicionado ao cenário!")
         render()
     }
@@ -1924,6 +2287,7 @@ internal class NativeTemplate(private val activity: Activity) {
         frame.addView(container, FrameLayout.LayoutParams(-1, -1))
 
         val hud = CyberneticOverlayView(activity, canvasElements, interactive = true) {
+            syncSceneLayersToEncoder()
             render()
         }
         container.addView(hud, FrameLayout.LayoutParams(-1, -1))
@@ -2468,7 +2832,7 @@ internal class NativeTemplate(private val activity: Activity) {
                     overlayPermGranted = true
                     pendingConnectAfterPermissions = false
                     showPermissionsModal = false
-                    startConnectionCountdown()
+                    verifyAndStartLiveFlow()
                 }
             },
             1.5f,
@@ -2573,7 +2937,7 @@ internal class NativeTemplate(private val activity: Activity) {
     }
 
     private fun showSystemOverlayWindow() {
-        if (!canDrawSystemOverlay() || !streamConnected) return
+        if (!canDrawSystemOverlay() || (!streamConnected && !ScreenCaptureService.isLiveStreaming)) return
         if (systemOverlayView != null) return
         try {
             val wm = activity.getSystemService(Context.WINDOW_SERVICE) as? android.view.WindowManager ?: return
@@ -2857,7 +3221,9 @@ internal class NativeTemplate(private val activity: Activity) {
 
         val buttons = mutableListOf<View>()
         buttons.add(sceneButton("refresh", "Reload", selected = true) {
-            toast("Cena recarregada.")
+            syncSceneLayersToEncoder()
+            ScreenCaptureService.reloadCurrentScene()
+            toast("Cena recarregada no encoder.")
         })
         buttons.add(sceneButton("plus", "Adicionar\ncenário", selected = false) {
             addedSceneCount++
@@ -2941,12 +3307,18 @@ internal class NativeTemplate(private val activity: Activity) {
 
         val micRow = row()
         weighted(micRow, label("Microfone (Áudio Externo)", 11.5f), 1f)
-        micRow.addView(neonToggle(micEnabled) { micEnabled = it })
+        micRow.addView(neonToggle(micEnabled) {
+            micEnabled = it
+            StreamingConfig.saveMicEnabled(activity, it)
+        })
         add(audioCard, micRow, 34, top = 4)
 
         val internalRow = row()
         weighted(internalRow, label("Áudio Interno (Som do Dispositivo)", 11.5f), 1f)
-        internalRow.addView(neonToggle(internalAudioEnabled) { internalAudioEnabled = it })
+        internalRow.addView(neonToggle(internalAudioEnabled) {
+            internalAudioEnabled = it
+            StreamingConfig.saveInternalAudioEnabled(activity, it)
+        })
         add(audioCard, internalRow, 34, top = 2)
         add(parent, audioCard, top = 2)
 
@@ -2963,6 +3335,7 @@ internal class NativeTemplate(private val activity: Activity) {
         weighted(micVolRow, customSeekBar(micVolume, 100) {
             micVolume = it
             micVolVal.text = "$it%"
+            StreamingConfig.saveMicVolume(activity, it)
         }, 1f, 30)
         micVolRow.addView(micVolVal, LinearLayout.LayoutParams(dp(40), -2))
         add(volumeCard, micVolRow, top = 3)
@@ -2973,6 +3346,7 @@ internal class NativeTemplate(private val activity: Activity) {
         weighted(intVolRow, customSeekBar(internalVolume, 100) {
             internalVolume = it
             intVolVal.text = "$it%"
+            StreamingConfig.saveInternalVolume(activity, it)
         }, 1f, 30)
         intVolRow.addView(intVolVal, LinearLayout.LayoutParams(dp(40), -2))
         add(volumeCard, intVolRow, top = 2)

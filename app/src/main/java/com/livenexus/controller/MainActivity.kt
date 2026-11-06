@@ -101,6 +101,19 @@ class MainActivity : ComponentActivity() {
         moveTaskToBack(true)
     }
 
+    @Deprecated("Deprecated in Android")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == NativeTemplate.REQUEST_MEDIA_PROJECTION) {
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                ProjectionState.saveConsent(resultCode, data)
+                NativeTemplate.onMediaProjectionResult(true)
+            } else {
+                NativeTemplate.onMediaProjectionResult(false)
+            }
+        }
+    }
+
     override fun onDestroy() {
         executor.shutdownNow()
         super.onDestroy()
