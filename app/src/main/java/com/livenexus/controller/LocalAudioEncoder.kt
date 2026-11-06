@@ -18,11 +18,10 @@ import android.os.Process
 import android.util.Log
 import java.nio.ByteBuffer
 import kotlin.math.abs
-import kotlin.math.sqrt
 
 /**
  * Capturador e codificador de áudio local com mixagem de Microfone e Áudio Interno (Jogo/Sistema).
- * - Microfone: AudioRecord (PCM 16-bit) com Supressão de Ruído de hardware e DSP (passa-alta e noise gate).
+ * - Microfone: AudioRecord (PCM 16-bit) com ganho manual e supressão de ruído de hardware opcional.
  * - Áudio Interno: AudioPlaybackCaptureConfiguration via MediaProjection (Android 10+ / API 29+).
  * - Mixagem em tempo real com controle de volume independente e codificação AAC via MediaCodec.
  */
@@ -32,7 +31,7 @@ class LocalAudioEncoder(
     private val bitrateBps: Int = 128000,
     private val micVolumeProvider: () -> Float = { 1.0f },
     private val internalVolumeProvider: () -> Float = { 1.0f },
-    private val noiseSuppressionProvider: () -> Boolean = { true },
+    private val noiseSuppressionProvider: () -> Boolean = { false },
     private val mediaProjectionProvider: (() -> MediaProjection?)? = null,
     private val onHeader: (ByteArray) -> Unit,
     private val onSample: (ByteArray, MediaCodec.BufferInfo) -> Unit
@@ -40,11 +39,6 @@ class LocalAudioEncoder(
 
     companion object {
         private const val TAG = "LiveNexusAudio"
-        // Limiar do Noise Gate suave (~-38 dBFS em PCM 16-bit)
-        private const val NOISE_GATE_THRESHOLD = 420f
-        private const val NOISE_GATE_FLOOR_GAIN = 0.08f
-        // Coeficiente do filtro passa-alta (~85 Hz em 44.1 kHz) contra graves de vento/rede elétrica
-        private const val HPF_ALPHA = 0.988f
     }
 
     private var audioRecord: AudioRecord? = null
@@ -59,13 +53,6 @@ class LocalAudioEncoder(
     @Volatile var lastError: String? = null
         private set
 
-    // Estados contínuos do DSP de áudio do microfone
-    private var hpfPrevInL = 0f
-    private var hpfPrevOutL = 0f
-    private var hpfPrevInR = 0f
-    private var hpfPrevOutR = 0f
-    private var gateEnvelopeGain = 1.0f
-
     @SuppressLint("MissingPermission")
     @Synchronized
     fun start() {
@@ -79,8 +66,8 @@ class LocalAudioEncoder(
         // 1. Inicializa AudioRecord do Microfone
         var record: AudioRecord? = null
         val sourcesToTry = intArrayOf(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            MediaRecorder.AudioSource.MIC
+            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION
         )
         for (source in sourcesToTry) {
             try {
@@ -246,13 +233,13 @@ class LocalAudioEncoder(
 
     private fun attachHardwareAudioEffects(audioSessionId: Int) {
         if (audioSessionId <= 0) return
-        val initialNs = try { noiseSuppressionProvider() } catch (_: Exception) { true }
+        val initialNs = try { noiseSuppressionProvider() } catch (_: Exception) { false }
         try {
             if (NoiseSuppressor.isAvailable()) {
                 noiseSuppressor = NoiseSuppressor.create(audioSessionId)?.apply {
                     enabled = initialNs
                 }
-                Log.i(TAG, "NoiseSuppressor de hardware ativado: ${noiseSuppressor?.enabled == true}")
+                Log.i(TAG, "NoiseSuppressor de hardware habilitado: ${noiseSuppressor?.enabled == true}")
             }
         } catch (e: Throwable) {
             Log.w(TAG, "NoiseSuppressor de hardware indisponível: ${e.message}")
@@ -260,7 +247,8 @@ class LocalAudioEncoder(
         try {
             if (AcousticEchoCanceler.isAvailable()) {
                 echoCanceler = AcousticEchoCanceler.create(audioSessionId)?.apply {
-                    enabled = initialNs
+                    // Streaming não é chamada telefônica: evita tratamento de voz artificial.
+                    enabled = false
                 }
                 Log.i(TAG, "AcousticEchoCanceler de hardware ativado: ${echoCanceler?.enabled == true}")
             }
@@ -270,7 +258,8 @@ class LocalAudioEncoder(
         try {
             if (AutomaticGainControl.isAvailable()) {
                 autoGainControl = AutomaticGainControl.create(audioSessionId)?.apply {
-                    enabled = initialNs
+                    // Mantém o ganho manual do usuário, sem compressor automático do dispositivo.
+                    enabled = false
                 }
             }
         } catch (_: Throwable) {}
@@ -308,10 +297,9 @@ class LocalAudioEncoder(
     }
 
     /**
-     * Processa o buffer PCM 16-bit do Microfone aplicando:
-     * 1. Filtro Passa-Alta (HPF ~85Hz) para cortar ruído grave, sopro e zumbido elétrico.
-     * 2. Expander / Noise Gate suave baseado em RMS para eliminar chiado de fundo em silêncio.
-     * 3. Ganho do microfone e limitador suave (anti-clipping).
+     * Preserva a dinâmica natural do microfone. Evita combinar filtros agressivos
+     * (AEC, AGC, gate e passa-alta) que podem deixar a voz abafada ou intermitente.
+     * A supressão de hardware é opcional; o ganho permanece manual.
      */
     private fun processMicDspInPlace(
         pcmBuffer: ByteArray,
@@ -319,85 +307,14 @@ class LocalAudioEncoder(
         userGain: Float,
         suppressNoise: Boolean
     ) {
-        if (userGain <= 0.001f) {
-            java.util.Arrays.fill(pcmBuffer, 0, length, 0.toByte())
-            return
-        }
-
         try {
-            val ns = noiseSuppressor
-            if (ns != null && ns.enabled != suppressNoise) {
-                ns.enabled = suppressNoise
+            noiseSuppressor?.let { ns ->
+                if (ns.enabled != suppressNoise) ns.enabled = suppressNoise
             }
-            val aec = echoCanceler
-            if (aec != null && aec.enabled != suppressNoise) {
-                aec.enabled = suppressNoise
-            }
-        } catch (_: Throwable) {}
-
-        val sampleCount = length / 2
-        if (sampleCount <= 0) return
-
-        val targetGateGain = if (suppressNoise) {
-            var sumSq = 0.0
-            var idx = 0
-            while (idx + 1 < length) {
-                val lo = pcmBuffer[idx].toInt() and 0xFF
-                val hi = pcmBuffer[idx + 1].toInt()
-                val s = ((hi shl 8) or lo).toDouble()
-                sumSq += s * s
-                idx += 2
-            }
-            val rms = sqrt(sumSq / sampleCount.toDouble()).toFloat()
-            when {
-                rms >= NOISE_GATE_THRESHOLD * 1.6f -> 1.0f
-                rms <= NOISE_GATE_THRESHOLD * 0.65f -> NOISE_GATE_FLOOR_GAIN
-                else -> {
-                    val ratio = (rms - NOISE_GATE_THRESHOLD * 0.65f) / (NOISE_GATE_THRESHOLD * 0.95f)
-                    NOISE_GATE_FLOOR_GAIN + ratio.coerceIn(0f, 1f) * (1.0f - NOISE_GATE_FLOOR_GAIN)
-                }
-            }
-        } else {
-            1.0f
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "Não foi possível alterar a supressão de ruído", error)
         }
-
-        val smoothing = if (targetGateGain > gateEnvelopeGain) 0.45f else 0.12f
-        gateEnvelopeGain += (targetGateGain - gateEnvelopeGain) * smoothing
-        val effectiveGain = userGain * (if (suppressNoise) gateEnvelopeGain else 1.0f)
-
-        var i = 0
-        var ch = 0
-        while (i + 1 < length) {
-            val lo = pcmBuffer[i].toInt() and 0xFF
-            val hi = pcmBuffer[i + 1].toInt()
-            var sample = ((hi shl 8) or lo).toFloat()
-
-            if (suppressNoise) {
-                if (ch == 0 || channelCount == 1) {
-                    val filtered = HPF_ALPHA * (hpfPrevOutL + sample - hpfPrevInL)
-                    hpfPrevInL = sample
-                    hpfPrevOutL = filtered
-                    sample = filtered
-                } else {
-                    val filtered = HPF_ALPHA * (hpfPrevOutR + sample - hpfPrevInR)
-                    hpfPrevInR = sample
-                    hpfPrevOutR = filtered
-                    sample = filtered
-                }
-                ch = (ch + 1) % channelCount
-            }
-
-            var scaled = sample * effectiveGain
-            if (scaled > 28000f) {
-                scaled = 28000f + (scaled - 28000f) * 0.25f
-            } else if (scaled < -28000f) {
-                scaled = -28000f + (scaled + 28000f) * 0.25f
-            }
-            val outInt = scaled.toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-            pcmBuffer[i] = (outInt and 0xFF).toByte()
-            pcmBuffer[i + 1] = ((outInt shr 8) and 0xFF).toByte()
-            i += 2
-        }
+        applyGainInPlace(pcmBuffer, length, userGain)
     }
 
     private fun applyGainInPlace(pcmBuffer: ByteArray, length: Int, gain: Float) {
@@ -431,7 +348,7 @@ class LocalAudioEncoder(
             while (running) {
                 val micGain = try { micVolumeProvider().coerceIn(0f, 1f) } catch (_: Exception) { 1f }
                 val internalGain = try { internalVolumeProvider().coerceIn(0f, 1f) } catch (_: Exception) { 1f }
-                val suppressNoise = try { noiseSuppressionProvider() } catch (_: Exception) { true }
+                val suppressNoise = try { noiseSuppressionProvider() } catch (_: Exception) { false }
 
                 // Leitura do Microfone
                 val micRead = if (record != null && micGain > 0.001f) {

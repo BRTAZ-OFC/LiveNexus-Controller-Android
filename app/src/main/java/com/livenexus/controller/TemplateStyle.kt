@@ -4,10 +4,34 @@ import android.content.Context
 import android.graphics.*
 import android.graphics.drawable.Drawable
 import android.view.View
+import android.util.TypedValue
 import kotlin.math.min
 
 /** Visual primitives for the cyberpunk neon LiveNEXUS theme matching reference design images. */
 internal object TemplateStyle {
+    private var orbitronTypeface: Typeface? = null
+
+    /** Fonte Orbitron incorporada ao APK (sem download em tempo de execução). */
+    fun font(context: Context, bold: Boolean = false): Typeface {
+        val base = synchronized(this) {
+            orbitronTypeface ?: try {
+                Typeface.createFromAsset(context.assets, "fonts/orbitron.ttf").also {
+                    orbitronTypeface = it
+                }
+            } catch (error: RuntimeException) {
+                android.util.Log.e("TemplateStyle", "Falha ao carregar Orbitron", error)
+                Typeface.DEFAULT.also { orbitronTypeface = it }
+            }
+        }
+        return Typeface.create(base, if (bold) Typeface.BOLD else Typeface.NORMAL)
+    }
+
+    /** Reduz exatamente 3 pixels físicos do tamanho usado antes na UI. */
+    fun textSizePx(context: Context, sizeSp: Float): Float =
+        (TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_SP, sizeSp, context.resources.displayMetrics
+        ) - 3f).coerceAtLeast(6f)
+
     val ink = Color.rgb(2, 4, 18)
     val cardDark = Color.rgb(6, 10, 30)
     val cardLight = Color.rgb(14, 20, 52)
@@ -169,14 +193,14 @@ internal object TemplateStyle {
             c.scale(unit, unit)
 
             // Play icon
-            drawIcon(c, p, "play", RectF(10f, 4f, 48f, 42f), magenta)
+            drawIcon(c, p, "play", RectF(11.5f, 5.5f, 46.5f, 40.5f), magenta)
 
             // "Live" in bold white
             p.style = Paint.Style.FILL
             p.shader = null
             p.color = white
-            p.textSize = 36f
-            p.typeface = Typeface.create("sans-serif", Typeface.BOLD_ITALIC)
+            p.textSize = 33f
+            p.typeface = font(context, bold = true)
             c.drawText("Live", 60f, 36f, p)
 
             // "NEXUS" in vibrant cyan-magenta gradient
@@ -188,8 +212,8 @@ internal object TemplateStyle {
             p.shader = null
 
             // Subtitle with stylish horizontal divider lines on both sides: —— SUBTITLE ——
-            p.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-            p.textSize = 8.5f
+            p.typeface = font(context)
+            p.textSize = 5.5f
             p.color = subtext
             p.letterSpacing = 0.22f
             val cleanSub = subtitle.uppercase()
@@ -236,7 +260,7 @@ internal object TemplateStyle {
             p.shader = null
 
             // Wi-Fi icon on the left
-            drawIcon(c, p, "wifi", RectF(8f * density, 6f * density, 24f * density, 22f * density), cyan)
+            drawIcon(c, p, "wifi", RectF(8f * density + 1.5f, 6f * density + 1.5f, 24f * density - 1.5f, 22f * density - 1.5f), cyan)
 
             // Status dot
             val dotX = 30f * density
@@ -247,8 +271,8 @@ internal object TemplateStyle {
 
             // Status text
             p.color = statusColor
-            p.textSize = 10.0f * density
-            p.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            p.textSize = (10.0f * density - 3f).coerceAtLeast(6f)
+            p.typeface = font(context, bold = true)
             c.drawText(statusText, dotX + 6.5f * density, dotY + 3.6f * density, p)
         }
     }
@@ -258,7 +282,7 @@ internal object TemplateStyle {
         private val p = Paint(Paint.ANTI_ALIAS_FLAG)
         init { importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO }
         override fun onDraw(c: Canvas) {
-            drawIcon(c, p, name, RectF(2f, 2f, width - 2f, height - 2f), tint)
+            drawIcon(c, p, name, RectF(3.5f, 3.5f, width - 3.5f, height - 3.5f), tint)
         }
     }
 

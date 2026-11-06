@@ -829,8 +829,8 @@ internal class NativeTemplate(private val activity: Activity) {
         TextView(activity).apply {
             text = value
             setTextColor(color)
-            textSize = size
-            typeface = Typeface.create("sans-serif", if (bold) Typeface.BOLD else Typeface.NORMAL)
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, TemplateStyle.textSizePx(activity, size))
+            typeface = TemplateStyle.font(activity, bold)
             includeFontPadding = false
         }
 
@@ -1198,7 +1198,7 @@ internal class NativeTemplate(private val activity: Activity) {
                 centerContent.addView(
                     label("LiveNEXUS", if (isVertical) 22f else 32f, bold = true).apply {
                         gravity = Gravity.CENTER
-                        typeface = Typeface.create("sans-serif", Typeface.BOLD_ITALIC)
+                        typeface = TemplateStyle.font(activity, bold = true)
                     },
                     LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) }
                 )
@@ -2738,13 +2738,13 @@ internal class NativeTemplate(private val activity: Activity) {
                             "Prévia real durante a transmissão"
                         }
                         p.style = Paint.Style.FILL
-                        p.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                        p.typeface = TemplateStyle.font(context, bold = true)
                         p.color = TemplateStyle.cyan
-                        p.textSize = min(13f * density, eh * 0.20f).coerceAtLeast(6f * density)
+                        p.textSize = (min(13f * density, eh * 0.20f).coerceAtLeast(6f * density) - 3f).coerceAtLeast(6f)
                         c.drawText(title, ex + 8f * density, ey + eh * 0.46f, p)
-                        p.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+                        p.typeface = TemplateStyle.font(context)
                         p.color = TemplateStyle.white
-                        p.textSize = min(10f * density, eh * 0.15f).coerceAtLeast(5f * density)
+                        p.textSize = (min(10f * density, eh * 0.15f).coerceAtLeast(5f * density) - 3f).coerceAtLeast(6f)
                         c.drawText(detail, ex + 8f * density, ey + eh * 0.62f, p)
                     }
                 } else if (el.type == "browser" && BrowserSourceManager.draw(el.id, c, RectF(ex, ey, er, eb))) {
@@ -2759,13 +2759,13 @@ internal class NativeTemplate(private val activity: Activity) {
                     c.drawRect(ex, ey, er, ey + headerH, p)
 
                     p.color = if (el.type == "browser") TemplateStyle.cyan else TemplateStyle.magenta
-                    p.textSize = min(8.5f * density, headerH * 0.65f)
-                    p.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    p.textSize = (min(8.5f * density, headerH * 0.65f) - 3f).coerceAtLeast(6f)
+                    p.typeface = TemplateStyle.font(context, bold = true)
                     val tag = if (el.type == "browser") "BROWSER SOURCE" else "WIDGET"
                     c.drawText("$tag | ${el.title}", ex + 8f * density, ey + headerH * 0.72f, p)
 
                     p.color = Color.WHITE
-                    p.textSize = min(10.5f * density, eh * 0.25f)
+                    p.textSize = (min(10.5f * density, eh * 0.25f) - 3f).coerceAtLeast(6f)
                     c.drawText(el.title, ex + 10f * density, ey + eh * 0.62f, p)
                 }
 
@@ -2814,8 +2814,8 @@ internal class NativeTemplate(private val activity: Activity) {
 
                     p.style = Paint.Style.FILL
                     p.color = TemplateStyle.cyan
-                    p.textSize = 7f * density
-                    p.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    p.textSize = (7f * density - 3f).coerceAtLeast(6f)
+                    p.typeface = TemplateStyle.font(context, bold = true)
                     val dimStr = "${(el.width * 100).toInt()}% × ${(el.height * 100).toInt()}%"
                     c.drawText("${el.title} [$dimStr] • Ajustável", ex + 6f * density, badgeY + badgeH * 0.7f, p)
                 }
@@ -3233,7 +3233,7 @@ internal class NativeTemplate(private val activity: Activity) {
             glow = true,
             borderTint = TemplateStyle.cyan
         )
-        val iconSize = dp((sizeDp * 0.62f).toInt())
+        val iconSize = (dp((sizeDp * 0.62f).toInt()) - 3).coerceAtLeast(1)
         addView(
             icon("play", TemplateStyle.white),
             FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER)

@@ -445,8 +445,8 @@ class ScreenCaptureService : Service() {
                         if (!enabled) 0f else (audioPrefs.getInt("internal_volume", 100) / 100f).coerceIn(0f, 1f)
                     },
                     noiseSuppressionProvider = {
-                        // Supressão de ruído obrigatória: ignora preferências antigas salvas como false.
-                        true
+                        // Desativada por padrão para preservar a clareza da voz.
+                        audioPrefs.getBoolean("noise_suppression", false)
                     },
                     mediaProjectionProvider = {
                         mediaProjection

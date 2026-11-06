@@ -289,7 +289,8 @@ class MainActivity : ComponentActivity() {
         val screen = FrameLayout(this).apply { setBackgroundColor(backgroundColor) }
         val label = TextView(this).apply {
             text = "Verificando sessão…"
-            textSize = 13f
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, TemplateStyle.textSizePx(this@MainActivity, 13f))
+            typeface = TemplateStyle.font(this@MainActivity)
             setTextColor(color("#B8C6EA"))
             gravity = Gravity.CENTER
         }
@@ -381,13 +382,13 @@ class MainActivity : ComponentActivity() {
         val tagline = centeredText(
             "CONTROLE DE TRANSMISSÃO", 8f, "#E3D9FB"
         ).apply {
-            typeface = Typeface.MONOSPACE
+            typeface = TemplateStyle.font(this@MainActivity)
             letterSpacing = 0.24f
         }
         panel.addView(tagline, row(top = 6))
 
         val heading = centeredText("ENTRAR NA CONTA", 18f, "#F7F9FF").apply {
-            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            typeface = TemplateStyle.font(this@MainActivity, bold = true)
         }
         panel.addView(heading, row(top = 26, bottom = 12))
 
@@ -434,8 +435,8 @@ class MainActivity : ComponentActivity() {
         TextView(this).apply {
             text = value
             setTextColor(color(hex))
-            textSize = size
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC)
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, TemplateStyle.textSizePx(this@MainActivity, size))
+            typeface = if (value == "▷") Typeface.DEFAULT else TemplateStyle.font(this@MainActivity, bold = true)
             includeFontPadding = false
             setSingleLine(true)
         }
@@ -444,7 +445,8 @@ class MainActivity : ComponentActivity() {
         TextView(this).apply {
             text = value
             setTextColor(color(hex))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, size)
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, TemplateStyle.textSizePx(this@MainActivity, size))
+            typeface = TemplateStyle.font(this@MainActivity)
             gravity = Gravity.CENTER
         }
 
@@ -476,13 +478,14 @@ class MainActivity : ComponentActivity() {
         val label = TextView(this).apply {
             text = caption
             setTextColor(color("#C4D7FF"))
-            textSize = 11f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, TemplateStyle.textSizePx(this@MainActivity, 11f))
+            typeface = TemplateStyle.font(this@MainActivity, bold = true)
         }
         panel.addView(label, row(top = 12, bottom = 6))
         val field = EditText(this).apply {
             setSingleLine(true)
-            textSize = 14f
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, TemplateStyle.textSizePx(this@MainActivity, 14f))
+            typeface = TemplateStyle.font(this@MainActivity)
             setTextColor(color("#F6FAFF"))
             setHintTextColor(color("#B8C6EA"))
             background = fieldBackground(false)
@@ -515,9 +518,9 @@ class MainActivity : ComponentActivity() {
         Button(this).apply {
             text = title
             isAllCaps = false
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, TemplateStyle.textSizePx(this@MainActivity, 13f))
             setTextColor(Color.WHITE)
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            typeface = TemplateStyle.font(this@MainActivity, bold = true)
             minHeight = 0
             minimumHeight = 0
             backgroundTintList = null
