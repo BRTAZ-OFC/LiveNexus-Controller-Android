@@ -126,7 +126,7 @@ internal class NativeTemplate(private val activity: Activity) {
         add(shell,if(page=="editor") editorHeader() else header(),if(wide)54 else 72)
         if(page=="editor") {
             shell.addView(editor(),LinearLayout.LayoutParams(-1,0,1f))
-        } else if(page=="controls" && !wide) {
+        } else if(page=="controls") {
             shell.addView(controls(),LinearLayout.LayoutParams(-1,0,1f))
         } else if(page=="transmission") {
             shell.addView(home(),LinearLayout.LayoutParams(-1,0,1f))
@@ -172,7 +172,7 @@ internal class NativeTemplate(private val activity: Activity) {
                 if(back)navigate("transmission") else showMenu()
             },LinearLayout.LayoutParams(dp(48),dp(48)))
             addView(TemplateStyle.Brand(activity),LinearLayout.LayoutParams(0,dp(if(wide)52 else 62),1f))
-            if(wide && page!="transmission") addView(label("Sessão ativa",11f).apply {
+            if(wide && page!="transmission" && page!="controls") addView(label("Sessão ativa",11f).apply {
                 setTextColor(0xff00e8b4.toInt())
                 background=TemplateStyle.Panel(density,radius=20f,glow=false)
             }) else addView(Space(activity),LinearLayout.LayoutParams(dp(12),1))
@@ -270,15 +270,79 @@ internal class NativeTemplate(private val activity: Activity) {
     }
 
     private fun controls():LinearLayout = column().apply {
-        if(!wide) {
-            add(this,controlsPortrait(),-1)
-            return@apply
-        }
-        add(this,title("Controles","game"),54,0)
-        // Apenas os dois containers solicitados: Hotkeys e Player.
-        add(this,hotkeys(),top=6)
-        add(this,player(),top=6)
+        val content=if(wide) controlsWide() else controlsPortrait()
+        addView(content,LinearLayout.LayoutParams(-1,-1))
     }
+
+    private fun controlsWide():View = column().apply {
+        val heading=row().apply {
+            gravity=Gravity.CENTER
+            background=TemplateStyle.Panel(density,radius=6f)
+        }
+        heading.addView(icon("game"),LinearLayout.LayoutParams(dp(30),dp(30)))
+        heading.addView(label("Controles",21f,true),
+            LinearLayout.LayoutParams(-2,-2).apply {marginStart=dp(9)})
+        add(this,heading,48)
+
+        val hotkeys=card(radius=6f).apply {
+            setPadding(dp(9),dp(6),dp(9),dp(7))
+        }
+        sectionHeader(hotkeys,"Hotkeys","keyboard","Atalhos de cenas, subcenas e ações rápidas")
+        val buttons=mutableListOf<View>()
+        buttons.add(portraitSceneButton("refresh","Reload",true) {unavailable()})
+        buttons.add(portraitSceneButton("plus","Adicionar\ncenário",false) {
+            addedSceneCount++
+            render()
+        })
+        for(index in 1..addedSceneCount) {
+            buttons.add(portraitSceneButton("video","Cena $index",false) {unavailable()})
+        }
+        val buttonList=column()
+        val columns=((availableWidth/density-42f)/90f).toInt().coerceAtLeast(2)
+        buttons.chunked(columns).forEach { group ->
+            val line=row().apply {gravity=Gravity.START}
+            group.forEach { button ->
+                line.addView(button,LinearLayout.LayoutParams(dp(82),dp(72)).apply {
+                    marginEnd=dp(7)
+                })
+            }
+            add(buttonList,line,72,top=5)
+        }
+        val scroller=ScrollView(activity).apply {
+            isVerticalScrollBarEnabled=false
+            overScrollMode=View.OVER_SCROLL_NEVER
+            addView(buttonList)
+        }
+        hotkeys.addView(scroller,LinearLayout.LayoutParams(-1,0,1f))
+        addView(hotkeys,LinearLayout.LayoutParams(-1,0,1f).apply {
+            topMargin=dp(6)
+        })
+
+        val player=card(radius=6f).apply {
+            setPadding(dp(8),dp(5),dp(8),dp(6))
+        }
+        val bar=row()
+        bar.addView(icon("music",TemplateStyle.white),
+            LinearLayout.LayoutParams(dp(27),dp(27)))
+        bar.addView(label("Player (Mídia)",14f,true),
+            LinearLayout.LayoutParams(0,-2,.8f).apply {marginStart=dp(6)})
+        listOf("back" to "Anterior","pause" to "Pausar","next" to "Próxima")
+            .forEach { (symbol,name) ->
+                bar.addView(iconAction(symbol,name),
+                    LinearLayout.LayoutParams(dp(42),dp(42)).apply {marginStart=dp(3)})
+            }
+        bar.addView(icon("volume",TemplateStyle.white),
+            LinearLayout.LayoutParams(dp(21),dp(21)).apply {marginStart=dp(12)})
+        val valueLabel=label("$playerVolume%",12f,true).apply {gravity=Gravity.CENTER}
+        weighted(bar,seek(playerVolume,100) {
+            playerVolume=it
+            valueLabel.text="$it%"
+        },1f,38,2)
+        bar.addView(valueLabel,LinearLayout.LayoutParams(dp(44),-2))
+        add(player,bar,45)
+        add(this,player,68,top=7)
+    }
+
     private fun controlsPortrait():View = column().apply {
         val heading=row().apply {
             gravity=Gravity.CENTER
