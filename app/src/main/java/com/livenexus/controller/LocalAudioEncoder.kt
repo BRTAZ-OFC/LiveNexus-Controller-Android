@@ -21,7 +21,7 @@ import kotlin.math.abs
 
 /**
  * Capturador e codificador de áudio local com mixagem de Microfone e Áudio Interno (Jogo/Sistema).
- * - Microfone: AudioRecord (PCM 16-bit) com ganho manual e supressão de ruído de hardware opcional.
+ * - Microfone: AudioRecord (PCM 16-bit) com ganho manual e supressão de ruído do Android ativada.
  * - Áudio Interno: AudioPlaybackCaptureConfiguration via MediaProjection (Android 10+ / API 29+).
  * - Mixagem em tempo real com controle de volume independente e codificação AAC via MediaCodec.
  */
@@ -31,7 +31,7 @@ class LocalAudioEncoder(
     private val bitrateBps: Int = 128000,
     private val micVolumeProvider: () -> Float = { 1.0f },
     private val internalVolumeProvider: () -> Float = { 1.0f },
-    private val noiseSuppressionProvider: () -> Boolean = { false },
+    private val noiseSuppressionProvider: () -> Boolean = { true },
     private val mediaProjectionProvider: (() -> MediaProjection?)? = null,
     private val onHeader: (ByteArray) -> Unit,
     private val onSample: (ByteArray, MediaCodec.BufferInfo) -> Unit
@@ -65,10 +65,15 @@ class LocalAudioEncoder(
 
         // 1. Inicializa AudioRecord do Microfone
         var record: AudioRecord? = null
-        val sourcesToTry = intArrayOf(
-            MediaRecorder.AudioSource.MIC,
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION
-        )
+        // Prioriza o microfone normal com supressor de hardware.
+        // Sem supressor nativo, tenta o pipeline de comunicação do Android.
+        val hardwareNsAvailable = try { NoiseSuppressor.isAvailable() } catch (_: Throwable) { false }
+        val sourcesToTry = if (hardwareNsAvailable) {
+            intArrayOf(MediaRecorder.AudioSource.MIC, MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+        } else {
+            Log.w(TAG, "NoiseSuppressor indisponível: tentando VOICE_COMMUNICATION")
+            intArrayOf(MediaRecorder.AudioSource.VOICE_COMMUNICATION, MediaRecorder.AudioSource.MIC)
+        }
         for (source in sourcesToTry) {
             try {
                 val candidate = AudioRecord(
@@ -233,13 +238,16 @@ class LocalAudioEncoder(
 
     private fun attachHardwareAudioEffects(audioSessionId: Int) {
         if (audioSessionId <= 0) return
-        val initialNs = try { noiseSuppressionProvider() } catch (_: Exception) { false }
+        val initialNs = try { noiseSuppressionProvider() } catch (_: Exception) { true }
         try {
             if (NoiseSuppressor.isAvailable()) {
                 noiseSuppressor = NoiseSuppressor.create(audioSessionId)?.apply {
                     enabled = initialNs
                 }
-                Log.i(TAG, "NoiseSuppressor de hardware habilitado: ${noiseSuppressor?.enabled == true}")
+                Log.i(TAG, "NoiseSuppressor de hardware ativo: ${noiseSuppressor?.enabled == true}")
+                if (noiseSuppressor == null) Log.w(TAG, "Supressor não criado para a sessão de áudio.")
+            } else {
+                Log.w(TAG, "Supressão de ruído não implementada pelo dispositivo.")
             }
         } catch (e: Throwable) {
             Log.w(TAG, "NoiseSuppressor de hardware indisponível: ${e.message}")
@@ -348,7 +356,7 @@ class LocalAudioEncoder(
             while (running) {
                 val micGain = try { micVolumeProvider().coerceIn(0f, 1f) } catch (_: Exception) { 1f }
                 val internalGain = try { internalVolumeProvider().coerceIn(0f, 1f) } catch (_: Exception) { 1f }
-                val suppressNoise = try { noiseSuppressionProvider() } catch (_: Exception) { false }
+                val suppressNoise = try { noiseSuppressionProvider() } catch (_: Exception) { true }
 
                 // Leitura do Microfone
                 val micRead = if (record != null && micGain > 0.001f) {

@@ -4,7 +4,6 @@ import android.content.Context
 import android.graphics.*
 import android.graphics.drawable.Drawable
 import android.view.View
-import android.util.TypedValue
 import kotlin.math.min
 
 /** Visual primitives for the cyberpunk neon LiveNEXUS theme matching reference design images. */
@@ -25,12 +24,6 @@ internal object TemplateStyle {
         }
         return Typeface.create(base, if (bold) Typeface.BOLD else Typeface.NORMAL)
     }
-
-    /** Reduz exatamente 3 pixels físicos do tamanho usado antes na UI. */
-    fun textSizePx(context: Context, sizeSp: Float): Float =
-        (TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_SP, sizeSp, context.resources.displayMetrics
-        ) - 3f).coerceAtLeast(6f)
 
     val ink = Color.rgb(2, 4, 18)
     val cardDark = Color.rgb(6, 10, 30)
@@ -199,7 +192,7 @@ internal object TemplateStyle {
             p.style = Paint.Style.FILL
             p.shader = null
             p.color = white
-            p.textSize = 33f
+            p.textSize = 29f
             p.typeface = font(context, bold = true)
             c.drawText("Live", 60f, 36f, p)
 
@@ -271,7 +264,7 @@ internal object TemplateStyle {
 
             // Status text
             p.color = statusColor
-            p.textSize = (10.0f * density - 3f).coerceAtLeast(6f)
+            p.textSize = (10.0f * density - 7f).coerceAtLeast(6f)
             p.typeface = font(context, bold = true)
             c.drawText(statusText, dotX + 6.5f * density, dotY + 3.6f * density, p)
         }
@@ -282,7 +275,7 @@ internal object TemplateStyle {
         private val p = Paint(Paint.ANTI_ALIAS_FLAG)
         init { importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO }
         override fun onDraw(c: Canvas) {
-            drawIcon(c, p, name, RectF(3.5f, 3.5f, width - 3.5f, height - 3.5f), tint)
+            drawIcon(c, p, name, RectF(4.5f, 4.5f, width - 4.5f, height - 4.5f), tint)
         }
     }
 

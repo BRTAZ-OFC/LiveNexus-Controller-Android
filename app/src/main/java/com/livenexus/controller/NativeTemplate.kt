@@ -825,11 +825,11 @@ internal class NativeTemplate(private val activity: Activity) {
         clipToPadding = false
     }
 
-    private fun label(value: String, size: Float = 13f, bold: Boolean = false, color: Int = TemplateStyle.white) =
+    private fun label(value: String, size: Float = 10.5f, bold: Boolean = false, color: Int = TemplateStyle.white) =
         TextView(activity).apply {
             text = value
             setTextColor(color)
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, TemplateStyle.textSizePx(activity, size))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, size)
             typeface = TemplateStyle.font(activity, bold)
             includeFontPadding = false
         }
@@ -899,14 +899,14 @@ internal class NativeTemplate(private val activity: Activity) {
             if (symbol != null) {
                 addView(
                     icon(symbol, if (selected) TemplateStyle.white else (tint ?: TemplateStyle.cyan)),
-                    LinearLayout.LayoutParams(dp(if (stacked) 24 else 19), dp(if (stacked) 24 else 19)).apply {
+                    LinearLayout.LayoutParams(dp(if (stacked) 21 else 17), dp(if (stacked) 21 else 17)).apply {
                         if (stacked) bottomMargin = dp(3) else marginEnd = dp(6)
                     }
                 )
             }
             if (title.isNotEmpty()) {
                 addView(
-                    label(title, if (stacked) 9.5f else 12f, true).apply {
+                    label(title, if (stacked) 7.5f else 9.5f, true).apply {
                         gravity = Gravity.CENTER
                         maxLines = 2
                         ellipsize = TextUtils.TruncateAt.END
@@ -1196,14 +1196,14 @@ internal class NativeTemplate(private val activity: Activity) {
 
             if (wide) {
                 centerContent.addView(
-                    label("LiveNEXUS", if (isVertical) 22f else 32f, bold = true).apply {
+                    label("LiveNEXUS", if (isVertical) 18f else 26f, bold = true).apply {
                         gravity = Gravity.CENTER
                         typeface = TemplateStyle.font(activity, bold = true)
                     },
                     LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) }
                 )
                 centerContent.addView(
-                    label("— CENTRAL DE TRANSMISSÃO —", if (isVertical) 9f else 11f, bold = false, color = TemplateStyle.muted).apply {
+                    label("— CENTRAL DE TRANSMISSÃO —", if (isVertical) 7.5f else 8.5f, bold = false, color = TemplateStyle.muted).apply {
                         gravity = Gravity.CENTER
                         letterSpacing = 0.22f
                     },
@@ -1211,7 +1211,7 @@ internal class NativeTemplate(private val activity: Activity) {
                 )
             } else {
                 centerContent.addView(
-                    label("MINIATURA", if (isVertical) 24f else 32f, bold = true).apply {
+                    label("MINIATURA", if (isVertical) 20f else 26f, bold = true).apply {
                         gravity = Gravity.CENTER
                         letterSpacing = 0.08f
                     },
@@ -1304,7 +1304,7 @@ internal class NativeTemplate(private val activity: Activity) {
                 LinearLayout.LayoutParams(dp(22), dp(22)).apply { marginEnd = dp(10) }
             )
             addView(
-                label(btnText, 15f, bold = true, color = TemplateStyle.white).apply {
+                label(btnText, 12f, bold = true, color = TemplateStyle.white).apply {
                     letterSpacing = 0.05f
                 }
             )
@@ -1334,7 +1334,7 @@ internal class NativeTemplate(private val activity: Activity) {
                 }
             }
             timerBox.addView(recDot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
-            val chronoText = label(formatElapsedTime(), 15f, bold = true, color = TemplateStyle.green).apply {
+            val chronoText = label(formatElapsedTime(), 12f, bold = true, color = TemplateStyle.green).apply {
                 letterSpacing = 0.10f
             }
             timerLabel = chronoText
@@ -1361,7 +1361,7 @@ internal class NativeTemplate(private val activity: Activity) {
             setPadding(dp(4), dp(2), dp(4), dp(6))
         }
         banner.addView(icon("gear", TemplateStyle.white), LinearLayout.LayoutParams(dp(26), dp(26)))
-        banner.addView(label("Configuração", 20f, true).apply { marginStart(dp(8)) })
+        banner.addView(label("Configuração", 16f, true).apply { marginStart(dp(8)) })
         banner.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
 
         // Badge: Configuração de Vídeo e Áudio da Transmissão
@@ -1371,18 +1371,19 @@ internal class NativeTemplate(private val activity: Activity) {
         }
         subBadge.addView(icon("video", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(16), dp(16)))
         subBadge.addView(
-            label("Configuração de Vídeo e Áudio", 10.5f, false, TemplateStyle.muted).apply {
+            label("Configuração de Vídeo e Áudio", 8f, false, TemplateStyle.muted).apply {
                 marginStart(dp(6))
             }
         )
-        banner.addView(subBadge)
+        if (wide) banner.addView(subBadge)
         add(this, banner)
+        if (!wide) add(this, subBadge, top = 2)
 
         // Resolução Card (1280x720 / 1920x1080)
         val resCard = card(radius = 14f)
         val resHead = row()
         resHead.addView(icon("screen"), LinearLayout.LayoutParams(dp(18), dp(18)))
-        resHead.addView(label("Resolução", 12.5f, true).apply { marginStart(dp(6)) })
+        resHead.addView(label("Resolução", 10f, true).apply { marginStart(dp(6)) })
         add(resCard, resHead)
         val resChoices = row()
         listOf("720p", "1080p").forEach { res ->
@@ -1400,7 +1401,7 @@ internal class NativeTemplate(private val activity: Activity) {
         val fpsCard = card(radius = 14f)
         val fpsHead = row()
         fpsHead.addView(icon("layers"), LinearLayout.LayoutParams(dp(18), dp(18)))
-        fpsHead.addView(label("FPS (Taxa de Quadros)", 12.5f, true).apply { marginStart(dp(6)) })
+        fpsHead.addView(label("FPS (Taxa de Quadros)", 10f, true).apply { marginStart(dp(6)) })
         add(fpsCard, fpsHead)
         val fpsChoices = row()
         listOf("30 FPS", "60 FPS").forEach { opt ->
@@ -1427,9 +1428,9 @@ internal class NativeTemplate(private val activity: Activity) {
         val bitrateCard = card(radius = 14f)
         val bitHead = row()
         bitHead.addView(icon("broadcast"), LinearLayout.LayoutParams(dp(18), dp(18)))
-        bitHead.addView(label("Bitrate de Vídeo", 12.5f, true).apply { marginStart(dp(6)) })
+        bitHead.addView(label("Bitrate de Vídeo", 10f, true).apply { marginStart(dp(6)) })
         bitHead.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
-        val bitBadge = label("$bitrate Kbps", 11.5f, true).apply {
+        val bitBadge = label("$bitrate Kbps", 9f, true).apply {
             background = TemplateStyle.Panel(density, false, radius = 8f, glow = false)
             setPadding(dp(8), dp(4), dp(8), dp(4))
         }
@@ -1444,16 +1445,16 @@ internal class NativeTemplate(private val activity: Activity) {
         }
         add(bitrateCard, bitSeek, 32, top = 6)
         val bitLimits = row()
-        bitLimits.addView(label("2000 Kbps", 10f, color = TemplateStyle.muted))
+        bitLimits.addView(label("2000 Kbps", 8f, color = TemplateStyle.muted))
         bitLimits.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
-        bitLimits.addView(label("10000 Kbps", 10f, color = TemplateStyle.muted))
+        bitLimits.addView(label("10000 Kbps", 8f, color = TemplateStyle.muted))
         add(bitrateCard, bitLimits)
 
         // Codec Card (H.264 / AAC native MediaCodec)
         val codecCard = card(radius = 14f)
         val codecHead = row()
         codecHead.addView(icon("gear"), LinearLayout.LayoutParams(dp(18), dp(18)))
-        codecHead.addView(label("Codec de Vídeo", 12.5f, true).apply { marginStart(dp(6)) })
+        codecHead.addView(label("Codec de Vídeo", 10f, true).apply { marginStart(dp(6)) })
         add(codecCard, codecHead)
         val codecSelector = action("H.264     ⌄", radius = 10f) {
             codec = "H.264"
@@ -1475,11 +1476,11 @@ internal class NativeTemplate(private val activity: Activity) {
         val audioCard = card(radius = 14f)
         val audioHead = row()
         audioHead.addView(icon("mic"), LinearLayout.LayoutParams(dp(18), dp(18)))
-        audioHead.addView(label("Áudio", 12.5f, true).apply { marginStart(dp(6)) })
+        audioHead.addView(label("Áudio", 10f, true).apply { marginStart(dp(6)) })
         add(audioCard, audioHead)
 
         val micRow = row()
-        weighted(micRow, label("Microfone (Áudio Externo)", 11.5f), 1f)
+        weighted(micRow, label("Microfone (Áudio Externo)", 9f), 1f)
         micRow.addView(neonToggle(micEnabled) {
             micEnabled = it
             StreamingConfig.saveMicEnabled(activity, it)
@@ -1487,7 +1488,7 @@ internal class NativeTemplate(private val activity: Activity) {
         add(audioCard, micRow, 34, top = 4)
 
         val internalRow = row()
-        weighted(internalRow, label("Áudio Interno (Som do Dispositivo)", 11.5f), 1f)
+        weighted(internalRow, label("Áudio Interno (Som do Dispositivo)", 9f), 1f)
         internalRow.addView(neonToggle(internalAudioEnabled) {
             internalAudioEnabled = it
             StreamingConfig.saveInternalAudioEnabled(activity, it)
@@ -1497,12 +1498,12 @@ internal class NativeTemplate(private val activity: Activity) {
         val volumeCard = card(radius = 14f)
         val volumeHead = row()
         volumeHead.addView(icon("volume"), LinearLayout.LayoutParams(dp(18), dp(18)))
-        volumeHead.addView(label("Volume", 12.5f, true).apply { marginStart(dp(6)) })
+        volumeHead.addView(label("Volume", 10f, true).apply { marginStart(dp(6)) })
         add(volumeCard, volumeHead)
 
-        val micVolVal = label("$micVolume%", 11f, true)
+        val micVolVal = label("$micVolume%", 8.5f, true)
         val micVolRow = row()
-        micVolRow.addView(label("Microfone:", 11f, color = TemplateStyle.muted), LinearLayout.LayoutParams(dp(86), -2))
+        micVolRow.addView(label("Microfone:", 8.5f, color = TemplateStyle.muted), LinearLayout.LayoutParams(dp(86), -2))
         weighted(micVolRow, customSeekBar(micVolume, 100) {
             micVolume = it
             micVolVal.text = "$it%"
@@ -1511,9 +1512,9 @@ internal class NativeTemplate(private val activity: Activity) {
         micVolRow.addView(micVolVal, LinearLayout.LayoutParams(dp(40), -2))
         add(volumeCard, micVolRow, top = 3)
 
-        val intVolVal = label("$internalVolume%", 11f, true)
+        val intVolVal = label("$internalVolume%", 8.5f, true)
         val intVolRow = row()
-        intVolRow.addView(label("Áudio Interno:", 11f, color = TemplateStyle.muted), LinearLayout.LayoutParams(dp(86), -2))
+        intVolRow.addView(label("Áudio Interno:", 8.5f, color = TemplateStyle.muted), LinearLayout.LayoutParams(dp(86), -2))
         weighted(intVolRow, customSeekBar(internalVolume, 100) {
             internalVolume = it
             intVolVal.text = "$it%"
@@ -1595,7 +1596,7 @@ internal class NativeTemplate(private val activity: Activity) {
             setPadding(dp(4), dp(2), dp(4), dp(6))
         }
         banner.addView(icon("layers", TemplateStyle.white), LinearLayout.LayoutParams(dp(26), dp(26)))
-        banner.addView(label("Plataformas de Transmissão", 18f, true).apply { marginStart(dp(8)) })
+        banner.addView(label("Plataformas de Transmissão", 14.5f, true).apply { marginStart(dp(8)) })
         banner.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
 
         val linkBadge = row().apply {
@@ -1604,12 +1605,13 @@ internal class NativeTemplate(private val activity: Activity) {
         }
         linkBadge.addView(icon("link", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(16), dp(16)))
         linkBadge.addView(
-            label("Conexão via RTMP / RTMPS", 10.5f, false, TemplateStyle.muted).apply {
+            label("Conexão via RTMP / RTMPS", 8f, false, TemplateStyle.muted).apply {
                 marginStart(dp(6))
             }
         )
-        banner.addView(linkBadge)
+        if (wide) banner.addView(linkBadge)
         add(this, banner)
+        if (!wide) add(this, linkBadge, top = 2)
 
         // 3 Cards: Twitch, YouTube, Kick
         val twitchCard = platformCard(
@@ -1795,7 +1797,7 @@ internal class NativeTemplate(private val activity: Activity) {
         // Platform header: Logo + Name + Status + Switch
         val head = row()
         head.addView(icon(symbol, themeColor), LinearLayout.LayoutParams(dp(26), dp(26)))
-        head.addView(label(name, 16f, true).apply { marginStart(dp(8)) })
+        head.addView(label(name, 12.5f, true).apply { marginStart(dp(8)) })
 
         val statusPill = row().apply {
             background = TemplateStyle.Panel(density, false, radius = 10f, glow = false)
@@ -1821,7 +1823,7 @@ internal class NativeTemplate(private val activity: Activity) {
             }
         }
         statusPill.addView(dot, LinearLayout.LayoutParams(dp(6), dp(6)))
-        statusPill.addView(label(statusLabel, 9.5f, true, statusColor))
+        statusPill.addView(label(statusLabel, 7.5f, true, statusColor))
         head.addView(statusPill)
 
         head.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
@@ -1832,7 +1834,7 @@ internal class NativeTemplate(private val activity: Activity) {
         add(this, head)
 
         // URL Field (tapping edits URL, copy button copies to clipboard)
-        add(this, label("URL do Servidor (${if (url.startsWith("rtmps", ignoreCase = true)) "RTMPS" else "RTMP"})", 9.5f, true, TemplateStyle.muted), top = 6)
+        add(this, label("URL do Servidor (${if (url.startsWith("rtmps", ignoreCase = true)) "RTMPS" else "RTMP"})", 7.5f, true, TemplateStyle.muted), top = 6)
         val urlBox = row().apply {
             background = TemplateStyle.Panel(density, false, radius = 8f, glow = false)
             setPadding(dp(8), dp(4), dp(4), dp(4))
@@ -1840,7 +1842,7 @@ internal class NativeTemplate(private val activity: Activity) {
             setOnClickListener { promptServerUrlDialog(name) }
         }
         urlBox.addView(
-            label(url, 11f, color = TemplateStyle.white).apply {
+            label(url, 8.5f, color = TemplateStyle.white).apply {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.MIDDLE
             },
@@ -1856,7 +1858,7 @@ internal class NativeTemplate(private val activity: Activity) {
         add(this, urlBox, 36, top = 2)
 
         // Stream Key Field (tapping opens dialog to set/edit key; never hardcoded)
-        add(this, label("Stream Key (toque para configurar)", 9.5f, true, TemplateStyle.muted), top = 4)
+        add(this, label("Stream Key (toque para configurar)", 7.5f, true, TemplateStyle.muted), top = 4)
         val keyBox = row().apply {
             background = TemplateStyle.Panel(density, false, radius = 8f, glow = false)
             setPadding(dp(8), dp(4), dp(4), dp(4))
@@ -1869,7 +1871,7 @@ internal class NativeTemplate(private val activity: Activity) {
             else -> "••••••••••••••••"
         }
         keyBox.addView(
-            label(keyDisplay, 12f, true, if (storedKey.isBlank()) TemplateStyle.muted else TemplateStyle.cyan).apply {
+            label(keyDisplay, 9.5f, true, if (storedKey.isBlank()) TemplateStyle.muted else TemplateStyle.cyan).apply {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             },
@@ -1912,7 +1914,7 @@ internal class NativeTemplate(private val activity: Activity) {
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         banner.addView(icon("game", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(28), dp(28)))
-        banner.addView(label("Controles", 20f, true).apply { marginStart(dp(10)) })
+        banner.addView(label("Controles", 16f, true).apply { marginStart(dp(10)) })
         add(this, banner, if (wide) 48 else 52)
 
         // Hotkeys Card
@@ -1920,8 +1922,8 @@ internal class NativeTemplate(private val activity: Activity) {
         val hotHead = row()
         hotHead.addView(icon("keyboard", TemplateStyle.white), LinearLayout.LayoutParams(dp(24), dp(24)))
         val hotTitles = column()
-        hotTitles.addView(label("Hotkeys", 16f, true))
-        hotTitles.addView(label("Atalhos de cenas, subcenas e ações rápidas", 10f, color = TemplateStyle.muted))
+        hotTitles.addView(label("Hotkeys", 12.5f, true))
+        hotTitles.addView(label("Atalhos de cenas, subcenas e ações rápidas", 8f, color = TemplateStyle.muted))
         weighted(hotHead, hotTitles, 1f, gap = 6)
         hotHead.addView(iconAction("info", "Informações dos atalhos", radius = 8f) {
             toast("Hotkeys configuráveis pelo teclado ou toque.")
@@ -2004,7 +2006,7 @@ internal class NativeTemplate(private val activity: Activity) {
             marginStart = dp(4)
             marginEnd = dp(4)
         })
-        val volLabel = label("$playerVolume%", 10.5f, true)
+        val volLabel = label("$playerVolume%", 8f, true)
         mediaBar.addView(volLabel, LinearLayout.LayoutParams(dp(36), -2))
 
         // Transport Controls: Prev, Pause/Play, Next
@@ -2054,13 +2056,15 @@ internal class NativeTemplate(private val activity: Activity) {
 
             if (symbol == "plus" || symbol == "minus") {
                 val sign = if (symbol == "plus") "+" else "−"
-                safeAdd(label(sign, 28f, true, TemplateStyle.cyan).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, dp(34)))
+                safeAdd(label(sign, 23f, true, TemplateStyle.cyan).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, dp(34)))
             } else {
-                safeAdd(icon(symbol, if (selected) TemplateStyle.white else TemplateStyle.magenta), LinearLayout.LayoutParams(dp(28), dp(28)))
+                safeAdd(icon(symbol, if (selected) TemplateStyle.white else TemplateStyle.magenta), LinearLayout.LayoutParams(dp(24), dp(24)))
             }
-            safeAdd(label(title, 10.5f, true).apply {
+            safeAdd(label(title, 8f, true).apply {
                 gravity = Gravity.CENTER
                 maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(dp(2), 0, dp(2), 0)
             }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
         }
 
@@ -2069,7 +2073,7 @@ internal class NativeTemplate(private val activity: Activity) {
     // =========================================================================
     private fun editorHeader(): View = row().apply {
         addView(TemplateStyle.Brand(activity, ""), LinearLayout.LayoutParams(dp(140), dp(46)))
-        addView(label("│  Editor de Cenário / Overlay", 12.5f, true).apply {
+        addView(label("│  Editor de Cenário / Overlay", 10f, true).apply {
             marginStart(dp(6))
         }, LinearLayout.LayoutParams(0, -2, 1f))
 
@@ -2137,7 +2141,7 @@ internal class NativeTemplate(private val activity: Activity) {
                 setPadding(dp(8), dp(3), dp(8), dp(3))
             }
             adjustBar.addView(
-                label("Ajustar '${selElem.title}':", 9.5f, true, TemplateStyle.cyan),
+                label("Ajustar '${selElem.title}':", 7.5f, true, TemplateStyle.cyan),
                 LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) }
             )
             adjustBar.addView(action("Tela Cheia", "expand", radius = 6f) {
@@ -2167,11 +2171,11 @@ internal class NativeTemplate(private val activity: Activity) {
         val footer = row().apply {
             setPadding(dp(6), dp(2), dp(6), dp(2))
         }
-        footer.addView(label("Ajuste do canvas", 10.5f, color = TemplateStyle.muted), LinearLayout.LayoutParams(-2, -2))
+        footer.addView(label("Ajuste do canvas", 8f, color = TemplateStyle.muted), LinearLayout.LayoutParams(-2, -2))
         val isVerticalCanvas = streamOrientation == "Vertical (9:16)"
         val canvasRatioText = if (isVerticalCanvas) "1080 x 1920 (9:16) ⌄" else "1920 x 1080 (16:9) ⌄"
         footer.addView(
-            label(canvasRatioText, 10.5f, true).apply {
+            label(canvasRatioText, 8f, true).apply {
                 background = TemplateStyle.Panel(density, false, radius = 6f, glow = false)
                 setPadding(dp(8), dp(4), dp(8), dp(4))
                 marginStart(dp(10))
@@ -2219,7 +2223,7 @@ internal class NativeTemplate(private val activity: Activity) {
             zoom = maxOf(20, zoom - 10)
             render()
         }, LinearLayout.LayoutParams(dp(32), dp(32)))
-        footer.addView(label("$zoom%", 10.5f, true).apply {
+        footer.addView(label("$zoom%", 8f, true).apply {
             gravity = Gravity.CENTER
             width = dp(46)
         })
@@ -2242,7 +2246,7 @@ internal class NativeTemplate(private val activity: Activity) {
 
         val elHead = row()
         elHead.addView(icon("layers", TemplateStyle.white), LinearLayout.LayoutParams(dp(20), dp(20)))
-        elHead.addView(label("Elementos", 14f, true).apply { marginStart(dp(6)) })
+        elHead.addView(label("Elementos", 11f, true).apply { marginStart(dp(6)) })
         add(elements, elHead)
 
         // Tabs: Todos, Cenas, Camadas
@@ -2304,7 +2308,7 @@ internal class NativeTemplate(private val activity: Activity) {
                 setPadding(dp(2), dp(2), dp(2), dp(6))
             }
             head.addView(icon("video", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(18), dp(18)))
-            head.addView(label("Cenas do Projeto", 11.5f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
+            head.addView(label("Cenas do Projeto", 9f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
             add(box, head)
 
             val sceneItem = row().apply {
@@ -2312,10 +2316,10 @@ internal class NativeTemplate(private val activity: Activity) {
                 setPadding(dp(8), dp(8), dp(8), dp(8))
                 addView(icon("video", TemplateStyle.white), LinearLayout.LayoutParams(dp(18), dp(18)))
                 val col = column().apply { marginStart(dp(6)) }
-                col.addView(label("Cena 1 (Principal)", 10f, true))
-                col.addView(label("1920x1080 • Ao Vivo", 8.5f, false, TemplateStyle.muted))
+                col.addView(label("Cena 1 (Principal)", 8f, true))
+                col.addView(label("1920x1080 • Ao Vivo", 7f, false, TemplateStyle.muted))
                 addView(col, LinearLayout.LayoutParams(0, -2, 1f))
-                addView(label("● ATIVA", 8.5f, true, TemplateStyle.green))
+                addView(label("● ATIVA", 7f, true, TemplateStyle.green))
             }
             add(box, sceneItem, top = 4)
             return
@@ -2327,15 +2331,15 @@ internal class NativeTemplate(private val activity: Activity) {
                 setPadding(dp(2), dp(2), dp(2), dp(6))
             }
             head.addView(icon("layers", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(18), dp(18)))
-            head.addView(label("Camadas (${canvasElements.size})", 11.5f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
+            head.addView(label("Camadas (${canvasElements.size})", 9f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
             add(box, head)
 
             if (canvasElements.isEmpty()) {
                 val emptyBox = column().apply {
                     background = TemplateStyle.Panel(density, false, radius = 6f, glow = false)
                     setPadding(dp(8), dp(12), dp(8), dp(12))
-                    addView(label("Nenhuma camada no cenário", 9.5f, true, TemplateStyle.subtext))
-                    addView(label("Selecione Captura de Tela, Browser Source ou Widgets à esquerda.", 8.5f, false, TemplateStyle.muted).apply {
+                    addView(label("Nenhuma camada no cenário", 7.5f, true, TemplateStyle.subtext))
+                    addView(label("Selecione Captura de Tela, Browser Source ou Widgets à esquerda.", 7f, false, TemplateStyle.muted).apply {
                         setPadding(0, dp(4), 0, 0)
                     })
                 }
@@ -2366,7 +2370,7 @@ internal class NativeTemplate(private val activity: Activity) {
                         LinearLayout.LayoutParams(dp(16), dp(16))
                     )
                     layerRow.addView(
-                        label(elem.title, 9f, elem.isSelected).apply {
+                        label(elem.title, 7.5f, elem.isSelected).apply {
                             marginStart(dp(4))
                             maxLines = 1
                         },
@@ -2402,8 +2406,8 @@ internal class NativeTemplate(private val activity: Activity) {
             val textCol = column().apply {
                 marginStart(dp(6))
             }
-            textCol.addView(label(title, 10f, true).apply { maxLines = 1 })
-            textCol.addView(label(subtitle, 8f, false, TemplateStyle.muted).apply { maxLines = 1 })
+            textCol.addView(label(title, 8f, true).apply { maxLines = 1 })
+            textCol.addView(label(subtitle, 7f, false, TemplateStyle.muted).apply { maxLines = 1 })
             item.addView(textCol, LinearLayout.LayoutParams(0, -2, 1f))
             item.addView(
                 icon("next", if (isActive) TemplateStyle.white else TemplateStyle.muted),
@@ -2420,7 +2424,7 @@ internal class NativeTemplate(private val activity: Activity) {
         when (editorMode) {
             "screen" -> {
                 head.addView(icon("screen", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(18), dp(18)))
-                head.addView(label("Captura de Tela", 11.5f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
+                head.addView(label("Captura de Tela", 9f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
                 add(box, head)
 
                 val isScreenAdded = canvasElements.any { it.title == "Captura de Tela" }
@@ -2452,7 +2456,7 @@ internal class NativeTemplate(private val activity: Activity) {
             }
             "browser" -> {
                 head.addView(icon("browser", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(18), dp(18)))
-                head.addView(label("Browser Source", 11.5f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
+                head.addView(label("Browser Source", 9f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
                 add(box, head)
 
                 val isBrowserAdded = canvasElements.any { it.type == "browser" }
@@ -2467,13 +2471,13 @@ internal class NativeTemplate(private val activity: Activity) {
             }
             "grid" -> {
                 head.addView(icon("grid", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(18), dp(18)))
-                head.addView(label("Widgets", 11.5f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
+                head.addView(label("Widgets", 9f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
                 add(box, head)
 
                 val noticeBox = column().apply {
                     background = TemplateStyle.Panel(density, false, radius = 8f, glow = false)
                     setPadding(dp(10), dp(14), dp(10), dp(14))
-                    addView(label("Widgets serão adicionadas mais à frente.", 9.5f, true, TemplateStyle.muted).apply {
+                    addView(label("Widgets serão adicionadas mais à frente.", 7.5f, true, TemplateStyle.muted).apply {
                         gravity = Gravity.CENTER
                     })
                 }
@@ -2483,15 +2487,15 @@ internal class NativeTemplate(private val activity: Activity) {
                 val sel = getSelectedElement()
                 if (sel != null) {
                     head.addView(icon("cursor", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(18), dp(18)))
-                    head.addView(label("Elemento Selecionado", 11.5f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
+                    head.addView(label("Elemento Selecionado", 9f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
                     add(box, head)
 
                     val infoCard = column().apply {
                         background = TemplateStyle.Panel(density, true, radius = 6f, glow = true)
                         setPadding(dp(8), dp(8), dp(8), dp(8))
-                        addView(label(sel.title, 10.5f, true, TemplateStyle.white).apply { setPadding(0, 0, 0, dp(4)) })
-                        addView(label("Posição: X ${(sel.x * 100).toInt()}% • Y ${(sel.y * 100).toInt()}%", 8.5f, false, TemplateStyle.muted))
-                        addView(label("Dimensão: L ${(sel.width * 100).toInt()}% • A ${(sel.height * 100).toInt()}%", 8.5f, false, TemplateStyle.muted))
+                        addView(label(sel.title, 8f, true, TemplateStyle.white).apply { setPadding(0, 0, 0, dp(4)) })
+                        addView(label("Posição: X ${(sel.x * 100).toInt()}% • Y ${(sel.y * 100).toInt()}%", 7f, false, TemplateStyle.muted))
+                        addView(label("Dimensão: L ${(sel.width * 100).toInt()}% • A ${(sel.height * 100).toInt()}%", 7f, false, TemplateStyle.muted))
                     }
                     add(box, infoCard, top = 4)
 
@@ -2740,11 +2744,11 @@ internal class NativeTemplate(private val activity: Activity) {
                         p.style = Paint.Style.FILL
                         p.typeface = TemplateStyle.font(context, bold = true)
                         p.color = TemplateStyle.cyan
-                        p.textSize = (min(13f * density, eh * 0.20f).coerceAtLeast(6f * density) - 3f).coerceAtLeast(6f)
+                        p.textSize = (min(13f * density, eh * 0.20f).coerceAtLeast(6f * density) - 7f).coerceAtLeast(6f)
                         c.drawText(title, ex + 8f * density, ey + eh * 0.46f, p)
                         p.typeface = TemplateStyle.font(context)
                         p.color = TemplateStyle.white
-                        p.textSize = (min(10f * density, eh * 0.15f).coerceAtLeast(5f * density) - 3f).coerceAtLeast(6f)
+                        p.textSize = (min(10f * density, eh * 0.15f).coerceAtLeast(5f * density) - 7f).coerceAtLeast(6f)
                         c.drawText(detail, ex + 8f * density, ey + eh * 0.62f, p)
                     }
                 } else if (el.type == "browser" && BrowserSourceManager.draw(el.id, c, RectF(ex, ey, er, eb))) {
@@ -2759,13 +2763,13 @@ internal class NativeTemplate(private val activity: Activity) {
                     c.drawRect(ex, ey, er, ey + headerH, p)
 
                     p.color = if (el.type == "browser") TemplateStyle.cyan else TemplateStyle.magenta
-                    p.textSize = (min(8.5f * density, headerH * 0.65f) - 3f).coerceAtLeast(6f)
+                    p.textSize = (min(8.5f * density, headerH * 0.65f) - 7f).coerceAtLeast(6f)
                     p.typeface = TemplateStyle.font(context, bold = true)
                     val tag = if (el.type == "browser") "BROWSER SOURCE" else "WIDGET"
                     c.drawText("$tag | ${el.title}", ex + 8f * density, ey + headerH * 0.72f, p)
 
                     p.color = Color.WHITE
-                    p.textSize = (min(10.5f * density, eh * 0.25f) - 3f).coerceAtLeast(6f)
+                    p.textSize = (min(10.5f * density, eh * 0.25f) - 7f).coerceAtLeast(6f)
                     c.drawText(el.title, ex + 10f * density, ey + eh * 0.62f, p)
                 }
 
@@ -2814,7 +2818,7 @@ internal class NativeTemplate(private val activity: Activity) {
 
                     p.style = Paint.Style.FILL
                     p.color = TemplateStyle.cyan
-                    p.textSize = (7f * density - 3f).coerceAtLeast(6f)
+                    p.textSize = (7f * density - 7f).coerceAtLeast(6f)
                     p.typeface = TemplateStyle.font(context, bold = true)
                     val dimStr = "${(el.width * 100).toInt()}% × ${(el.height * 100).toInt()}%"
                     c.drawText("${el.title} [$dimStr] • Ajustável", ex + 6f * density, badgeY + badgeH * 0.7f, p)
@@ -3015,8 +3019,8 @@ internal class NativeTemplate(private val activity: Activity) {
         val head = row()
         head.addView(icon("check", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(24), dp(24)))
         val headTextCol = column().apply { marginStart(dp(8)) }
-        headTextCol.addView(label("Permissões Necessárias", 16f, true, TemplateStyle.white))
-        headTextCol.addView(label("Autorize as permissões para iniciar a transmissão", 10.5f, false, TemplateStyle.muted))
+        headTextCol.addView(label("Permissões Necessárias", 12.5f, true, TemplateStyle.white))
+        headTextCol.addView(label("Autorize as permissões para iniciar a transmissão", 8f, false, TemplateStyle.muted))
         head.addView(headTextCol, LinearLayout.LayoutParams(0, -2, 1f))
         head.addView(iconAction("close", "Fechar", radius = 8f) {
             showPermissionsModal = false
@@ -3049,8 +3053,8 @@ internal class NativeTemplate(private val activity: Activity) {
                 LinearLayout.LayoutParams(dp(22), dp(22))
             )
             val info = column().apply { marginStart(dp(10)) }
-            info.addView(label(title, 12.5f, true, TemplateStyle.white))
-            info.addView(label(subtitle, 9.5f, false, TemplateStyle.muted))
+            info.addView(label(title, 10f, true, TemplateStyle.white))
+            info.addView(label(subtitle, 7.5f, false, TemplateStyle.muted))
             addView(info, LinearLayout.LayoutParams(0, -2, 1f))
             addView(neonToggle(granted) {
                 onToggle(it)
@@ -3178,7 +3182,7 @@ internal class NativeTemplate(private val activity: Activity) {
         )
 
         box.addView(
-            label("Iniciando Transmissão...", 15f, true, TemplateStyle.cyan).apply {
+            label("Iniciando Transmissão...", 12f, true, TemplateStyle.cyan).apply {
                 gravity = Gravity.CENTER
             },
             LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.CENTER_HORIZONTAL }
@@ -3193,7 +3197,7 @@ internal class NativeTemplate(private val activity: Activity) {
                 borderTint = TemplateStyle.green
             )
         }
-        val numText = label(countdownSeconds.toString(), 48f, true, TemplateStyle.white).apply {
+        val numText = label(countdownSeconds.toString(), 42f, true, TemplateStyle.white).apply {
             gravity = Gravity.CENTER
         }
         countdownLabel = numText
@@ -3209,7 +3213,7 @@ internal class NativeTemplate(private val activity: Activity) {
         )
 
         box.addView(
-            label("Minimizando APK para a Sobreposição do Smartphone...", 11f, false, TemplateStyle.muted).apply {
+            label("Minimizando APK para a Sobreposição do Smartphone...", 8.5f, false, TemplateStyle.muted).apply {
                 gravity = Gravity.CENTER
             },
             LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.CENTER_HORIZONTAL }
@@ -3291,7 +3295,7 @@ internal class NativeTemplate(private val activity: Activity) {
                         }
                     }
                     addView(dot, LinearLayout.LayoutParams(dp(7), dp(7)).apply { marginEnd = dp(6) })
-                    val tLabel = label(formatElapsedTime(), 13f, true, TemplateStyle.green).apply {
+                    val tLabel = label(formatElapsedTime(), 10.5f, true, TemplateStyle.green).apply {
                         letterSpacing = 0.08f
                     }
                     overlayTimerLabel = tLabel
@@ -3386,7 +3390,7 @@ internal class NativeTemplate(private val activity: Activity) {
                     LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(8) }
                 )
                 val titleCol = column()
-                titleCol.addView(label("LiveNEXUS • Sobreposição", 13f, true, TemplateStyle.white))
+                titleCol.addView(label("LiveNEXUS • Sobreposição", 10.5f, true, TemplateStyle.white))
                 val timerRow = row()
                 val dot = View(activity).apply {
                     background = GradientDrawable().apply {
@@ -3395,7 +3399,7 @@ internal class NativeTemplate(private val activity: Activity) {
                     }
                 }
                 timerRow.addView(dot, LinearLayout.LayoutParams(dp(6), dp(6)).apply { marginEnd = dp(5) })
-                val panelTimer = label(formatElapsedTime(), 11.5f, true, TemplateStyle.green)
+                val panelTimer = label(formatElapsedTime(), 9f, true, TemplateStyle.green)
                 overlayPanelTimerLabel = panelTimer
                 timerRow.addView(panelTimer)
                 titleCol.addView(timerRow)
@@ -3524,8 +3528,8 @@ internal class NativeTemplate(private val activity: Activity) {
         val hotHead = row()
         hotHead.addView(icon("keyboard", TemplateStyle.white), LinearLayout.LayoutParams(dp(20), dp(20)))
         val hotTitles = column().apply { marginStart(dp(6)) }
-        hotTitles.addView(label("Hotkeys", 14f, true))
-        hotTitles.addView(label("Atalhos de cenas, subcenas e ações rápidas", 9.5f, color = TemplateStyle.muted))
+        hotTitles.addView(label("Hotkeys", 11f, true))
+        hotTitles.addView(label("Atalhos de cenas, subcenas e ações rápidas", 7.5f, color = TemplateStyle.muted))
         hotHead.addView(hotTitles, LinearLayout.LayoutParams(0, -2, 1f))
         add(hotkeys, hotHead)
 
@@ -3568,7 +3572,7 @@ internal class NativeTemplate(private val activity: Activity) {
         mediaBar.addView(cover, LinearLayout.LayoutParams(dp(40), dp(40)))
         mediaBar.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
 
-        val volLabel = label("$playerVolume%", 10f, true)
+        val volLabel = label("$playerVolume%", 8f, true)
         val volSeek = customSeekBar(playerVolume, 100) {
             playerVolume = it
             volLabel.text = "$it%"
@@ -3613,11 +3617,11 @@ internal class NativeTemplate(private val activity: Activity) {
         val audioCard = card(radius = 14f)
         val audioHead = row()
         audioHead.addView(icon("mic"), LinearLayout.LayoutParams(dp(18), dp(18)))
-        audioHead.addView(label("Áudio", 12.5f, true).apply { marginStart(dp(6)) })
+        audioHead.addView(label("Áudio", 10f, true).apply { marginStart(dp(6)) })
         add(audioCard, audioHead)
 
         val micRow = row()
-        weighted(micRow, label("Microfone (Áudio Externo)", 11.5f), 1f)
+        weighted(micRow, label("Microfone (Áudio Externo)", 9f), 1f)
         micRow.addView(neonToggle(micEnabled) {
             micEnabled = it
             StreamingConfig.saveMicEnabled(activity, it)
@@ -3625,7 +3629,7 @@ internal class NativeTemplate(private val activity: Activity) {
         add(audioCard, micRow, 34, top = 4)
 
         val internalRow = row()
-        weighted(internalRow, label("Áudio Interno (Som do Dispositivo)", 11.5f), 1f)
+        weighted(internalRow, label("Áudio Interno (Som do Dispositivo)", 9f), 1f)
         internalRow.addView(neonToggle(internalAudioEnabled) {
             internalAudioEnabled = it
             StreamingConfig.saveInternalAudioEnabled(activity, it)
@@ -3637,12 +3641,12 @@ internal class NativeTemplate(private val activity: Activity) {
         val volumeCard = card(radius = 14f)
         val volumeHead = row()
         volumeHead.addView(icon("volume"), LinearLayout.LayoutParams(dp(18), dp(18)))
-        volumeHead.addView(label("Volume", 12.5f, true).apply { marginStart(dp(6)) })
+        volumeHead.addView(label("Volume", 10f, true).apply { marginStart(dp(6)) })
         add(volumeCard, volumeHead)
 
-        val micVolVal = label("$micVolume%", 11f, true)
+        val micVolVal = label("$micVolume%", 8.5f, true)
         val micVolRow = row()
-        micVolRow.addView(label("Microfone:", 11f, color = TemplateStyle.muted), LinearLayout.LayoutParams(dp(86), -2))
+        micVolRow.addView(label("Microfone:", 8.5f, color = TemplateStyle.muted), LinearLayout.LayoutParams(dp(86), -2))
         weighted(micVolRow, customSeekBar(micVolume, 100) {
             micVolume = it
             micVolVal.text = "$it%"
@@ -3651,9 +3655,9 @@ internal class NativeTemplate(private val activity: Activity) {
         micVolRow.addView(micVolVal, LinearLayout.LayoutParams(dp(40), -2))
         add(volumeCard, micVolRow, top = 3)
 
-        val intVolVal = label("$internalVolume%", 11f, true)
+        val intVolVal = label("$internalVolume%", 8.5f, true)
         val intVolRow = row()
-        intVolRow.addView(label("Áudio Interno:", 11f, color = TemplateStyle.muted), LinearLayout.LayoutParams(dp(86), -2))
+        intVolRow.addView(label("Áudio Interno:", 8.5f, color = TemplateStyle.muted), LinearLayout.LayoutParams(dp(86), -2))
         weighted(intVolRow, customSeekBar(internalVolume, 100) {
             internalVolume = it
             intVolVal.text = "$it%"
