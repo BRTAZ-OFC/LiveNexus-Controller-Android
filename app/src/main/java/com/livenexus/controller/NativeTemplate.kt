@@ -724,7 +724,7 @@ internal class NativeTemplate(private val activity: Activity) {
             clipToPadding=true
         }
         val sidebar=column().apply {
-            background=TemplateStyle.Panel(density,radius=3f,glow=false)
+            background=TemplateStyle.Panel(density,radius=0f,glow=false)
             setPadding(dp(3),dp(4),dp(3),dp(4))
         }
         listOf("cursor","move","text","image","video","layers","trash").forEach { key ->
@@ -737,17 +737,7 @@ internal class NativeTemplate(private val activity: Activity) {
             item.contentDescription=key
             add(sidebar,item,40,2)
         }
-        // A barra esquerda rola apenas dentro do espaço do editor.
-        // Não deixa os ícones invadirem o cabeçalho ao arrastar.
-        val sidebarScroll=ScrollView(activity).apply {
-            isVerticalScrollBarEnabled=false
-            isFillViewport=false
-            overScrollMode=View.OVER_SCROLL_NEVER
-            clipChildren=true
-            clipToPadding=true
-            addView(sidebar,FrameLayout.LayoutParams(-1,-2))
-        }
-        workspace.addView(sidebarScroll,LinearLayout.LayoutParams(dp(53),-1))
+        workspace.addView(sidebar,LinearLayout.LayoutParams(dp(53),-1))
         val center=column().apply {
             setPadding(dp(5),dp(4),dp(5),dp(4))
             gravity=Gravity.CENTER_VERTICAL
@@ -758,15 +748,18 @@ internal class NativeTemplate(private val activity: Activity) {
         center.addView(previewBox,LinearLayout.LayoutParams(-1,0,1f))
         val footer=row()
         footer.addView(label("Ajuste do canvas",10f),LinearLayout.LayoutParams(0,-2,1f))
-        footer.addView(label("1920 x 1080 (16:9)",10f,true),LinearLayout.LayoutParams(dp(145),-2))
-        footer.addView(iconAction("back","Diminuir zoom") {zoom=maxOf(10,zoom-10);render()},LinearLayout.LayoutParams(dp(36),dp(36)))
-        footer.addView(label("$zoom%",10f).apply {gravity=Gravity.CENTER},LinearLayout.LayoutParams(dp(44),-2))
+        val compactFooter=availableWidth/density<750f
+        footer.addView(label(if(compactFooter)"16:9" else "1920 x 1080 (16:9)",10f,true),
+            LinearLayout.LayoutParams(dp(if(compactFooter)42 else 145),-2))
+        footer.addView(iconAction("back","Diminuir zoom") {zoom=maxOf(10,zoom-10);render()},LinearLayout.LayoutParams(dp(if(compactFooter)30 else 36),dp(if(compactFooter)30 else 36)))
+        footer.addView(label("$zoom%",10f).apply {gravity=Gravity.CENTER},
+            LinearLayout.LayoutParams(dp(if(compactFooter)34 else 44),-2))
         footer.addView(iconAction("next","Aumentar zoom") {zoom=minOf(200,zoom+10);render()},LinearLayout.LayoutParams(dp(36),dp(36)))
         footer.addView(iconAction("expand","Tela cheia") {showExpandedPreview()},LinearLayout.LayoutParams(dp(36),dp(36)))
         add(center,footer,40,2)
         workspace.addView(center,LinearLayout.LayoutParams(0,-1,1f))
         val elements=column().apply {
-            background=TemplateStyle.Panel(density,radius=3f,glow=false)
+            background=TemplateStyle.Panel(density,radius=0f,glow=false)
             setPadding(dp(5),dp(5),dp(5),dp(5))
             clipChildren=true
             clipToPadding=true
@@ -794,14 +787,31 @@ internal class NativeTemplate(private val activity: Activity) {
         }
         val scroll=ScrollView(activity).apply {
             isVerticalScrollBarEnabled=false
+            isFillViewport=false
+            isVerticalFadingEdgeEnabled=false
+            isNestedScrollingEnabled=false
             overScrollMode=View.OVER_SCROLL_NEVER
             clipChildren=true
             clipToPadding=true
-            addView(elementItems)
+            addView(elementItems,FrameLayout.LayoutParams(-1,-2))
         }
-        elements.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
-        add(elements,action("Voltar","back",true) {navigate("transmission")},42,4)
-        workspace.addView(elements,LinearLayout.LayoutParams(dp(184),-1))
+        val rightListViewport=FrameLayout(activity).apply {
+            clipChildren=true
+            clipToPadding=true
+            addView(scroll,FrameLayout.LayoutParams(-1,-1))
+        }
+        elements.addView(rightListViewport,LinearLayout.LayoutParams(-1,0,1f))
+        add(elements,action("Voltar","back",true).apply {
+            background=TemplateStyle.Panel(density,true,radius=4f,glow=false)
+            setOnClickListener {navigate("transmission")}
+        },42,4)
+        val rightViewport=FrameLayout(activity).apply {
+            clipChildren=true
+            clipToPadding=true
+            addView(elements,FrameLayout.LayoutParams(-1,-1))
+        }
+        val rightWidthDp=(availableWidth/density*.26f).coerceIn(140f,184f)
+        workspace.addView(rightViewport,LinearLayout.LayoutParams(dp(rightWidthDp),-1))
         addView(workspace,LinearLayout.LayoutParams(-1,-1))
     }
 
