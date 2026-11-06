@@ -118,6 +118,13 @@ object StreamingConfig {
         getAudioPrefs(context).edit().putBoolean("internal_enabled", enabled).apply()
     }
 
+    fun loadNoiseSuppressionEnabled(context: Context): Boolean =
+        getAudioPrefs(context).getBoolean("noise_suppression", true)
+
+    fun saveNoiseSuppressionEnabled(context: Context, enabled: Boolean) {
+        getAudioPrefs(context).edit().putBoolean("noise_suppression", enabled).apply()
+    }
+
     fun loadMicVolume(context: Context): Int =
         getAudioPrefs(context).getInt("mic_volume", 100).coerceIn(0, 100)
 

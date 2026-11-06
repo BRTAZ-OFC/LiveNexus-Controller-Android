@@ -5,11 +5,13 @@ plugins {
 
 android {
     namespace = "com.livenexus.controller"
+    ndkVersion = "27.0.12077973"
     compileSdk = 36
     defaultConfig {
         applicationId = "com.livenexus.controller"
         minSdk = 29
         targetSdk = 33
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         val runNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
         versionCode = 200000 + runNumber
         versionName = "1.0.$runNumber"
@@ -36,6 +38,12 @@ android {
         getByName("release") {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("existingRelease")
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
         }
     }
     compileOptions {

@@ -289,7 +289,7 @@ class MainActivity : ComponentActivity() {
         val screen = FrameLayout(this).apply { setBackgroundColor(backgroundColor) }
         val label = TextView(this).apply {
             text = "Verificando sessão…"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, fontPixels(10.5f))
             typeface = TemplateStyle.font(this@MainActivity)
             setTextColor(color("#B8C6EA"))
             gravity = Gravity.CENTER
@@ -431,11 +431,16 @@ class MainActivity : ComponentActivity() {
         setContentView(root)
     }
 
+    private fun fontPixels(sizeSp: Float): Float =
+        (TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_SP, sizeSp, resources.displayMetrics
+        ) - 2f).coerceAtLeast(6f)
+
     private fun brandPart(value: String, size: Float, hex: String): TextView =
         TextView(this).apply {
             text = value
             setTextColor(color(hex))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, size)
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, fontPixels(size))
             typeface = if (value == "▷") Typeface.DEFAULT else TemplateStyle.font(this@MainActivity, bold = true)
             includeFontPadding = false
             setSingleLine(true)
@@ -445,7 +450,7 @@ class MainActivity : ComponentActivity() {
         TextView(this).apply {
             text = value
             setTextColor(color(hex))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, size)
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, fontPixels(size))
             typeface = TemplateStyle.font(this@MainActivity)
             gravity = Gravity.CENTER
         }
@@ -478,13 +483,13 @@ class MainActivity : ComponentActivity() {
         val label = TextView(this).apply {
             text = caption
             setTextColor(color("#C4D7FF"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 8.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, fontPixels(8.5f))
             typeface = TemplateStyle.font(this@MainActivity, bold = true)
         }
         panel.addView(label, row(top = 12, bottom = 6))
         val field = EditText(this).apply {
             setSingleLine(true)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, fontPixels(11.5f))
             typeface = TemplateStyle.font(this@MainActivity)
             setTextColor(color("#F6FAFF"))
             setHintTextColor(color("#B8C6EA"))
@@ -518,7 +523,7 @@ class MainActivity : ComponentActivity() {
         Button(this).apply {
             text = title
             isAllCaps = false
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, fontPixels(10.5f))
             setTextColor(Color.WHITE)
             typeface = TemplateStyle.font(this@MainActivity, bold = true)
             minHeight = 0

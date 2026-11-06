@@ -192,7 +192,7 @@ internal object TemplateStyle {
             p.style = Paint.Style.FILL
             p.shader = null
             p.color = white
-            p.textSize = 29f
+            p.textSize = 27f
             p.typeface = font(context, bold = true)
             c.drawText("Live", 60f, 36f, p)
 
@@ -264,7 +264,7 @@ internal object TemplateStyle {
 
             // Status text
             p.color = statusColor
-            p.textSize = (10.0f * density - 7f).coerceAtLeast(6f)
+            p.textSize = (10.0f * density - 9f).coerceAtLeast(6f)
             p.typeface = font(context, bold = true)
             c.drawText(statusText, dotX + 6.5f * density, dotY + 3.6f * density, p)
         }

@@ -7,6 +7,7 @@ import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
@@ -110,20 +111,49 @@ class LocalAudioEncoder(
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, bufferSize)
         }
 
-        val createdCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-        try {
-            createdCodec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            createdCodec.start()
-            codec = createdCodec
-        } catch (e: Exception) {
+        // No AOSP, os encoders AAC de software C2/OMX.google usam FDK-AAC.
+        // Preferir o componente fornecido pelo Android, sem incorporar bibliotecas
+        // com licenças de patentes externas. Não altera AAC/RTMP nem o vídeo.
+        val preferredCodec = try {
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull { info ->
+                info.isEncoder &&
+                    (info.name == "c2.android.aac.encoder" || info.name == "OMX.google.aac.encoder") &&
+                    info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_AUDIO_AAC, ignoreCase = true) }
+            }?.name
+        } catch (error: Exception) {
+            Log.w(TAG, "Não foi possível consultar codecs AAC instalados", error)
+            null
+        }
+        var createdCodec: MediaCodec? = null
+        var codecError: Exception? = null
+        for (codecName in listOfNotNull(preferredCodec) + listOf<String?>(null)) {
+            var candidate: MediaCodec? = null
+            try {
+                candidate = if (codecName == null) {
+                    MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+                } else {
+                    MediaCodec.createByCodecName(codecName)
+                }
+                candidate.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                candidate.start()
+                createdCodec = candidate
+                Log.i(TAG, "Encoder AAC em uso: ${candidate.name}")
+                break
+            } catch (error: Exception) {
+                codecError = error
+                Log.w(TAG, "Falha ao abrir encoder AAC ${codecName ?: "padrão"}, tentando alternativa", error)
+                try { candidate?.release() } catch (_: Exception) {}
+            }
+        }
+        val readyCodec = createdCodec ?: run {
             releaseAudioEffects()
             try { record?.release() } catch (_: Exception) {}
             audioRecord = null
             try { internalRecord?.release() } catch (_: Exception) {}
             internalRecord = null
-            try { createdCodec.release() } catch (_: Exception) {}
-            throw e
+            throw IllegalStateException("Nenhum encoder AAC disponível", codecError)
         }
+        codec = readyCodec
 
         // Gera e despacha o cabeçalho ASC para RTMP imediatamente
         val asc = createAudioSpecificConfig(sampleRate, channelCount)
@@ -154,7 +184,7 @@ class LocalAudioEncoder(
             try {
                 Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
             } catch (_: Exception) {}
-            encodeLoop(activeRecord, createdCodec, bufferSize)
+            encodeLoop(activeRecord, readyCodec, bufferSize)
         }, "LiveNexusAudioEncoder").apply { start() }
 
         Log.i(TAG, "MediaCodec AAC iniciado ($sampleRate Hz, $channelCount canais, mic=${activeRecord != null}, interno=${internalRecord != null})")
@@ -242,7 +272,7 @@ class LocalAudioEncoder(
         try {
             if (NoiseSuppressor.isAvailable()) {
                 noiseSuppressor = NoiseSuppressor.create(audioSessionId)?.apply {
-                    enabled = initialNs
+                    enabled = initialNs && !SpeexNoiseSuppressor.available
                 }
                 Log.i(TAG, "NoiseSuppressor de hardware ativo: ${noiseSuppressor?.enabled == true}")
                 if (noiseSuppressor == null) Log.w(TAG, "Supressor não criado para a sessão de áudio.")
@@ -313,14 +343,18 @@ class LocalAudioEncoder(
         pcmBuffer: ByteArray,
         length: Int,
         userGain: Float,
-        suppressNoise: Boolean
+        suppressNoise: Boolean,
+        speex: SpeexNoiseSuppressor?
     ) {
+        val speexProcessed = suppressNoise && (speex?.process(pcmBuffer, length) == true)
+        // Nunca empilhar dois supressores, para evitar voz robótica.
+        val hardwareEnabled = suppressNoise && !speexProcessed
         try {
             noiseSuppressor?.let { ns ->
-                if (ns.enabled != suppressNoise) ns.enabled = suppressNoise
+                if (ns.enabled != hardwareEnabled) ns.enabled = hardwareEnabled
             }
         } catch (error: RuntimeException) {
-            Log.w(TAG, "Não foi possível alterar a supressão de ruído", error)
+            Log.w(TAG, "Não foi possível alternar a supressão de ruído", error)
         }
         applyGainInPlace(pcmBuffer, length, userGain)
     }
@@ -344,13 +378,16 @@ class LocalAudioEncoder(
     }
 
     private fun encodeLoop(record: AudioRecord?, mediaCodec: MediaCodec, bufferSize: Int) {
-        val frameChunkBytes = 4096.coerceAtMost(bufferSize)
+        val frameChunkBytes = (sampleRate / 50 * channelCount * 2).coerceAtMost(bufferSize)
         val micBuffer = ByteArray(frameChunkBytes)
         val internalBuffer = ByteArray(frameChunkBytes)
         val mixedBuffer = ByteArray(frameChunkBytes)
         val info = MediaCodec.BufferInfo()
         val bytesPerFrame = (channelCount * 2).coerceAtLeast(2)
         var totalFramesSubmitted = 0L
+        val speex = SpeexNoiseSuppressor.create(sampleRate, channelCount, sampleRate / 50)
+        if (speex != null) Log.i(TAG, "SpeexDSP ativo para supressão de ruído do microfone")
+        else Log.i(TAG, "SpeexDSP indisponível; fallback para NoiseSuppressor do Android")
 
         try {
             while (running) {
@@ -362,7 +399,7 @@ class LocalAudioEncoder(
                 val micRead = if (record != null && micGain > 0.001f) {
                     val r = record.read(micBuffer, 0, micBuffer.size)
                     if (r > 0) {
-                        processMicDspInPlace(micBuffer, r, micGain, suppressNoise)
+                        processMicDspInPlace(micBuffer, r, micGain, suppressNoise, speex)
                         r
                     } else 0
                 } else 0
@@ -489,6 +526,8 @@ class LocalAudioEncoder(
                 lastError = e.message ?: "Falha na captura/codificação de áudio"
                 Log.w(TAG, "Erro no loop de áudio", e)
             }
+        } finally {
+            speex?.close()
         }
     }
 

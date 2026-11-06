@@ -445,8 +445,8 @@ class ScreenCaptureService : Service() {
                         if (!enabled) 0f else (audioPrefs.getInt("internal_volume", 100) / 100f).coerceIn(0f, 1f)
                     },
                     noiseSuppressionProvider = {
-                        // Ativa o supressor durante a fala, sem gate adicional.
-                        true
+                        // Preferência lida durante a transmissão: switch funciona sem reiniciar.
+                        audioPrefs.getBoolean("noise_suppression", true)
                     },
                     mediaProjectionProvider = {
                         mediaProjection
