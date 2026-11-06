@@ -428,7 +428,7 @@ internal class NativeTemplate(private val activity: Activity) {
             toast("Elemento 'Captura de Tela' adicionado ao cenário!")
         }
         syncSceneLayersToEncoder()
-        render()
+        root.handler?.post { render() } ?: render()
     }
 
     private fun addTextElement() {
@@ -447,7 +447,7 @@ internal class NativeTemplate(private val activity: Activity) {
         selectedElementId = newElement.id
         syncSceneLayersToEncoder()
         toast("Elemento 'Texto' adicionado ao cenário!")
-        render()
+        root.handler?.post { render() } ?: render()
     }
 
     private fun removeSelectedElement() {
@@ -458,7 +458,7 @@ internal class NativeTemplate(private val activity: Activity) {
             canvasElements.lastOrNull()?.isSelected = true
             syncSceneLayersToEncoder()
             toast("Elemento '${selected.title}' removido do cenário.")
-            render()
+            root.handler?.post { render() } ?: render()
         } else {
             toast("Nenhum elemento selecionado para remover.")
         }
@@ -627,8 +627,13 @@ internal class NativeTemplate(private val activity: Activity) {
             includeFontPadding = false
         }
 
-    private fun add(parent: LinearLayout, child: View, height: Int = ViewGroup.LayoutParams.WRAP_CONTENT, top: Int = 0) {
-        parent.addView(
+    private fun ViewGroup?.safeAdd(child: View?, params: ViewGroup.LayoutParams? = null) {
+        if (this == null || child == null) return
+        if (params != null) addView(child, params) else addView(child)
+    }
+
+    private fun add(parent: LinearLayout?, child: View?, height: Int = ViewGroup.LayoutParams.WRAP_CONTENT, top: Int = 0) {
+        parent.safeAdd(
             child,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -638,13 +643,13 @@ internal class NativeTemplate(private val activity: Activity) {
     }
 
     private fun weighted(
-        parent: LinearLayout,
-        child: View,
+        parent: LinearLayout?,
+        child: View?,
         weight: Float = 1f,
         height: Int = ViewGroup.LayoutParams.WRAP_CONTENT,
         gap: Int = 3
     ) {
-        parent.addView(
+        parent.safeAdd(
             child,
             LinearLayout.LayoutParams(
                 0,
