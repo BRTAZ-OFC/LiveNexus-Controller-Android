@@ -30,7 +30,13 @@ internal object LiveNexusControllerApi {
         "music-volume-up", "music-volume-down", "scenario-select"
     )
 
-    data class Scenario(val id: String, val name: String, val subScenarioId: String)
+    data class SubScenario(val id: String, val name: String)
+    data class Scenario(
+        val id: String,
+        val name: String,
+        val subScenarioId: String,
+        val subScenarios: List<SubScenario> = emptyList()
+    )
 
     fun sendCommand(
         context: Context,
@@ -123,27 +129,32 @@ internal object LiveNexusControllerApi {
         val settings = record.optJSONObject("settings")
         val config = record.optJSONObject("config")
         val data = record.optJSONObject("data")
+        // A estrutura de cenários pode estar no registro principal ou aninhada.
+        // Escolha apenas um objeto que contenha a lista real de subcenários.
         val source = when {
-            settings != null && settings.length() > 0 -> settings
-            config?.has("subScenarios") == true -> config
-            data != null && data.length() > 0 -> data
-            else -> record
+            record.optJSONArray("subScenarios") != null -> record
+            settings?.optJSONArray("subScenarios") != null -> settings
+            config?.optJSONArray("subScenarios") != null -> config
+            data?.optJSONArray("subScenarios") != null -> data
+            else -> return null
         }
         val id = record.optString("id", source.optString("id", "")).trim()
         if (id.isBlank()) return null
         val subs = source.optJSONArray("subScenarios") ?: return null
         val current = source.optString("selectedSubScenarioId", "").trim()
-        var first = ""
-        var chosen = ""
+        val list = ArrayList<SubScenario>()
+        val seen = HashSet<String>()
         for (i in 0 until subs.length()) {
-            val candidate = subs.optJSONObject(i)?.optString("id", "")?.trim().orEmpty()
-            if (candidate.isBlank()) continue
-            if (first.isBlank()) first = candidate
-            if (candidate == current) chosen = candidate
+            val item = subs.optJSONObject(i) ?: continue
+            val subId = item.optString("id", "").trim()
+            if (subId.isBlank() || !seen.add(subId)) continue
+            val realName = item.optString("name", "").trim().ifEmpty { subId }
+            list.add(SubScenario(subId, realName))
         }
-        val subId = if (chosen.isNotBlank()) chosen else first
-        if (subId.isBlank()) return null
-        return Scenario(id, source.optString("name", record.optString("name", "Cenário")), subId)
+        if (list.isEmpty()) return null
+        val selectedId = list.find { it.id == current }?.id ?: list.first().id
+        val realScenarioName = source.optString("name", record.optString("name", "")).trim().ifEmpty { id }
+        return Scenario(id, realScenarioName, selectedId, list)
     }
 
     private fun verifiedToken(context: Context): String {

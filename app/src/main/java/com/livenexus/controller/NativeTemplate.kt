@@ -358,59 +358,183 @@ internal class NativeTemplate(private val activity: Activity) {
         return String.format("%02d:%02d:%02d", hours, minutes, seconds)
     }
 
-    // Controls state
-    private var addedSceneCount = 0
+    // Controls state: cada botão representa um subcenário real selecionado no LiveNEXUS.
     private var playerPlaying = true
     private var playerVolume = 75
     private val serverScenarios = mutableListOf<LiveNexusControllerApi.Scenario>()
+    private val sceneButtonSlots = mutableListOf<SceneShortcutStore.Assignment?>()
+    private var shortcutStoreLoaded = false
+    private var shortcutLayoutSaved = false
+    private var scenariosLoaded = false
     private var scenarioRequestVersion = 0
-    private var creatingScenario = false
 
-    /** Busca cenários reais, sem converter os cenários locais do encoder em registros web. */
+    private fun restoreSceneShortcutSlots() {
+        if (shortcutStoreLoaded) return
+        shortcutStoreLoaded = true
+        val saved = SceneShortcutStore.load(activity)
+        if (saved != null) {
+            sceneButtonSlots.clear()
+            sceneButtonSlots.addAll(saved)
+            shortcutLayoutSaved = true
+        }
+    }
+
+    private fun refreshSceneShortcutButtons() {
+        if (page == "controls") render()
+        if (overlayExpanded && systemOverlayView != null) refreshSystemOverlayWindow()
+    }
+
+    private fun applyServerScenarios(scenes: List<LiveNexusControllerApi.Scenario>) {
+        restoreSceneShortcutSlots()
+        serverScenarios.clear()
+        serverScenarios.addAll(scenes)
+        scenariosLoaded = true
+        // Primeira utilização: os próprios subcenários cadastrados são os atalhos iniciais.
+        // Depois disso, a organização escolhida pelo usuário não é substituída por uma busca.
+        if (!shortcutLayoutSaved && sceneButtonSlots.isEmpty()) {
+            for (scene in scenes) {
+                for (sub in scene.subScenarios) {
+                    sceneButtonSlots.add(SceneShortcutStore.Assignment(scene.id, sub.id))
+                }
+            }
+            if (sceneButtonSlots.isNotEmpty()) {
+                shortcutLayoutSaved = SceneShortcutStore.save(activity, sceneButtonSlots)
+                if (!shortcutLayoutSaved) toast("Não foi possível armazenar os atalhos de subcenários.")
+            }
+        }
+        refreshSceneShortcutButtons()
+    }
+
     private fun loadServerScenarios() {
         val requestVersion = ++scenarioRequestVersion
         LiveNexusControllerApi.fetchScenarios(activity) { scenes, error ->
-            if (activity.isFinishing || activity.isDestroyed || requestVersion != scenarioRequestVersion) return@fetchScenarios
+            if (activity.isFinishing || activity.isDestroyed ||
+                requestVersion != scenarioRequestVersion) return@fetchScenarios
             if (scenes == null) {
-                if (page == "controls") toast(error ?: "Não foi possível carregar cenários.")
+                if (page == "controls" || overlayExpanded) {
+                    toast(error ?: "Não foi possível carregar os subcenários.")
+                }
             } else {
-                serverScenarios.clear()
-                serverScenarios.addAll(scenes)
-                addedSceneCount = serverScenarios.size
-                if (page == "controls") render()
-                if (overlayExpanded && systemOverlayView != null) refreshSystemOverlayWindow()
+                applyServerScenarios(scenes)
             }
         }
     }
 
-    private fun addServerScenario(fromOverlay: Boolean) {
-        if (creatingScenario) return
-        creatingScenario = true
-        ++scenarioRequestVersion
-        val name = "Cenário " + (serverScenarios.size + 1)
-        LiveNexusControllerApi.createScenario(activity, name) { scene, error ->
-            creatingScenario = false
-            if (activity.isFinishing || activity.isDestroyed) return@createScenario
-            if (scene != null) {
-                serverScenarios.add(scene)
-                addedSceneCount = serverScenarios.size
-                toast("Cenário criado no LiveNEXUS.")
-                if (fromOverlay) refreshSystemOverlayWindow() else render()
-            } else {
-                toast(error ?: "Não foi possível criar o cenário.")
+    private fun sceneShortcutTitle(index: Int): String {
+        val assigned = sceneButtonSlots.getOrNull(index) ?: return "Selecionar"
+        val sub = serverScenarios.firstOrNull { it.id == assigned.scenarioId }
+            ?.subScenarios?.firstOrNull { it.id == assigned.subcenarioId }
+        return sub?.name ?: if (scenariosLoaded) "Indisponível" else "Carregando"
+    }
+
+    private fun addSceneButtonSlot() {
+        restoreSceneShortcutSlots()
+        sceneButtonSlots.add(null)
+        if (!SceneShortcutStore.save(activity, sceneButtonSlots)) {
+            sceneButtonSlots.removeAt(sceneButtonSlots.lastIndex)
+            toast("Não foi possível salvar o novo botão.")
+            return
+        }
+        shortcutLayoutSaved = true
+        val index = sceneButtonSlots.lastIndex
+        refreshSceneShortcutButtons()
+        chooseSceneForButton(index)
+    }
+
+    private fun assignSubScenario(
+        slotIndex: Int,
+        scene: LiveNexusControllerApi.Scenario,
+        sub: LiveNexusControllerApi.SubScenario
+    ) {
+        if (slotIndex !in sceneButtonSlots.indices) return
+        val previous = sceneButtonSlots[slotIndex]
+        sceneButtonSlots[slotIndex] = SceneShortcutStore.Assignment(scene.id, sub.id)
+        if (!SceneShortcutStore.save(activity, sceneButtonSlots)) {
+            sceneButtonSlots[slotIndex] = previous
+            toast("Não foi possível salvar a configuração do botão.")
+            return
+        }
+        shortcutLayoutSaved = true
+        refreshSceneShortcutButtons()
+        toast("Subcenário atribuído: " + sub.name)
+    }
+
+    private fun showSceneSelectionDialog(
+        title: String,
+        choices: List<String>,
+        onSelect: (Int) -> Unit
+    ) {
+        if (choices.isEmpty() || activity.isFinishing || activity.isDestroyed) return
+        val dialog = android.app.AlertDialog.Builder(activity)
+            .setTitle(title)
+            .setItems(choices.toTypedArray()) { _, index -> onSelect(index) }
+            .setNegativeButton("Cancelar", null)
+            .create()
+        // Ao controlar uma live minimizada, o diálogo precisa ficar acima de outros apps.
+        // A permissão de sobreposição já é utilizada pelo painel flutuante do Controller.
+        if (activityInBackground && systemOverlayView != null && canDrawSystemOverlay()) {
+            dialog.window?.setType(android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+        }
+        try {
+            dialog.show()
+        } catch (error: Exception) {
+            Log.w("NativeTemplate", "Não foi possível abrir a seleção de subcenário", error)
+            toast("Abra o APK para configurar este botão.")
+        }
+    }
+
+    private fun chooseSceneForButton(slotIndex: Int) {
+        if (slotIndex !in sceneButtonSlots.indices) return
+        val requestVersion = ++scenarioRequestVersion
+        LiveNexusControllerApi.fetchScenarios(activity) { scenes, error ->
+            if (activity.isFinishing || activity.isDestroyed ||
+                requestVersion != scenarioRequestVersion) return@fetchScenarios
+            if (scenes == null) {
+                toast(error ?: "Não foi possível consultar os cenários.")
+                return@fetchScenarios
+            }
+            applyServerScenarios(scenes)
+            val available = scenes.filter { it.subScenarios.isNotEmpty() }
+            if (available.isEmpty()) {
+                toast("Não há cenários com subcenários cadastrados.")
+                return@fetchScenarios
+            }
+            showSceneSelectionDialog("Selecionar cenário", available.map { it.name }) { sceneIndex ->
+                if (sceneIndex in available.indices) {
+                    val scene = available[sceneIndex]
+                    showSceneSelectionDialog(
+                        "Subcenários - " + scene.name,
+                        scene.subScenarios.map { it.name }
+                    ) { subIndex ->
+                        if (subIndex in scene.subScenarios.indices) {
+                            assignSubScenario(slotIndex, scene, scene.subScenarios[subIndex])
+                        }
+                    }
+                }
             }
         }
     }
 
     private fun selectServerScenario(index: Int) {
-        val scene = serverScenarios.getOrNull(index)
-        if (scene == null) {
-            toast("Cenário não carregado do LiveNEXUS.")
+        val assigned = sceneButtonSlots.getOrNull(index)
+        if (assigned == null) {
+            chooseSceneForButton(index)
             return
         }
-        LiveNexusControllerApi.sendCommand(activity, "scenario-select", scene) { accepted ->
+        val scene = serverScenarios.firstOrNull { it.id == assigned.scenarioId }
+        val sub = scene?.subScenarios?.firstOrNull { it.id == assigned.subcenarioId }
+        if (scene == null || sub == null) {
+            toast("Subcenário não encontrado. Segure o botão para escolher outro.")
+            return
+        }
+        LiveNexusControllerApi.sendCommand(
+            activity, "scenario-select", scene.copy(subScenarioId = sub.id)
+        ) { accepted ->
             if (!activity.isFinishing && !activity.isDestroyed) {
-                toast(if (accepted) "Troca de subcenário enviada ao LiveNEXUS." else "Não foi possível solicitar a troca de subcenário.")
+                toast(
+                    if (accepted) "Subcenário enviado ao LiveNEXUS: " + sub.name
+                    else "Falha ao solicitar a troca de subcenário."
+                )
             }
         }
     }
@@ -582,6 +706,7 @@ internal class NativeTemplate(private val activity: Activity) {
     private fun toast(msg: String) = Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
 
     fun show() {
+        restoreSceneShortcutSlots()
         // Restaura apenas o último cenário salvo explicitamente pelo usuário.
         ScenarioStorage.load(activity)?.let { saved ->
             canvasElements.clear()
@@ -1824,11 +1949,14 @@ internal class NativeTemplate(private val activity: Activity) {
             }
         })
         buttons.add(sceneButton("plus", "Adicionar\ncenário", selected = false) {
-            addServerScenario(fromOverlay = false)
+            addSceneButtonSlot()
         })
-        for (i in 1..addedSceneCount) {
-            buttons.add(sceneButton("video", "Cena $i", selected = false) {
-                selectServerScenario(i - 1)
+        for (i in sceneButtonSlots.indices) {
+            buttons.add(sceneButton(
+                "video", sceneShortcutTitle(i), selected = false,
+                longClick = { chooseSceneForButton(i) }
+            ) {
+                selectServerScenario(i)
             })
         }
 
@@ -1905,7 +2033,13 @@ internal class NativeTemplate(private val activity: Activity) {
         add(this, player, top = 8)
     }
 
-    private fun sceneButton(symbol: String, title: String, selected: Boolean, click: () -> Unit): View =
+    private fun sceneButton(
+        symbol: String,
+        title: String,
+        selected: Boolean,
+        longClick: (() -> Unit)? = null,
+        click: () -> Unit
+    ): View =
         column().apply {
             gravity = Gravity.CENTER
             background = TemplateStyle.Panel(density, selected, radius = 12f, glow = selected)
@@ -1913,6 +2047,10 @@ internal class NativeTemplate(private val activity: Activity) {
             isFocusable = true
             contentDescription = title.replace("\n", " ")
             setOnClickListener { click() }
+            if (longClick != null) setOnLongClickListener {
+                longClick.invoke()
+                true
+            }
 
             if (symbol == "plus" || symbol == "minus") {
                 val sign = if (symbol == "plus") "+" else "−"
@@ -3396,11 +3534,14 @@ internal class NativeTemplate(private val activity: Activity) {
             reloadControllerScene()
         })
         buttons.add(sceneButton("plus", "Adicionar\ncenário", selected = false) {
-            addServerScenario(fromOverlay = true)
+            addSceneButtonSlot()
         })
-        for (i in 1..addedSceneCount) {
-            buttons.add(sceneButton("video", "Cena $i", selected = false) {
-                selectServerScenario(i - 1)
+        for (i in sceneButtonSlots.indices) {
+            buttons.add(sceneButton(
+                "video", sceneShortcutTitle(i), selected = false,
+                longClick = { chooseSceneForButton(i) }
+            ) {
+                selectServerScenario(i)
             })
         }
 
