@@ -43,6 +43,7 @@ class StreamPublisher(
     @Volatile private var lastAudioTimestampMs: Long = 0L
 
     @Volatile private var active = false
+    @Volatile private var closed = false
 
     @Volatile private var cachedSps: ByteArray? = null
     @Volatile private var cachedPps: ByteArray? = null
@@ -74,8 +75,15 @@ class StreamPublisher(
             val future = threadPool.submit {
                 try {
                     client.connect()
-                    clients.add(Pair(target, client))
-                    Log.i(TAG, "Conexão estabelecida com ${target.platformName}")
+                    synchronized(clients) {
+                        if (closed) {
+                            // O usuário encerrou enquanto o handshake ainda estava acontecendo.
+                            client.close()
+                        } else {
+                            clients.add(Pair(target, client))
+                            Log.i(TAG, "Conexão estabelecida com ${target.platformName}")
+                        }
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG, "Falha ao conectar com ${target.platformName}", e)
                     client.close()
@@ -97,7 +105,7 @@ class StreamPublisher(
         }
 
         streamMediaStartMs = -1L
-        active = clients.any { it.second.isPublishing }
+        active = !closed && clients.any { it.second.isPublishing }
         return errors
     }
 
@@ -228,20 +236,19 @@ class StreamPublisher(
 
     @Synchronized
     override fun close() {
+        closed = true
         active = false
-        sendExecutor.shutdown()
-        try {
-            sendExecutor.awaitTermination(600, java.util.concurrent.TimeUnit.MILLISECONDS)
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
+        // Fechar o transporte primeiro interrompe escritas bloqueadas e impede o envio de
+        // quadros remanescentes enquanto o executor termina.
+        synchronized(clients) {
+            for ((_, client) in clients) {
+                try {
+                    client.close()
+                } catch (_: Exception) {}
+            }
+            clients.clear()
         }
         sendExecutor.shutdownNow()
-        for ((_, client) in clients) {
-            try {
-                client.close()
-            } catch (_: Exception) {}
-        }
-        clients.clear()
         threadPool.shutdownNow()
         Log.i(TAG, "StreamPublisher finalizado.")
     }

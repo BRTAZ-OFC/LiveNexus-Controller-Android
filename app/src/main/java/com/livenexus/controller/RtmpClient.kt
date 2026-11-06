@@ -1376,13 +1376,17 @@ class RtmpClient(
         cachedAsc = null
         try { readerThread?.interrupt() } catch (_: Exception) {}
         readerThread = null
-        try { outStream?.flush() } catch (_: Exception) {}
-        try { inStream?.close() } catch (_: Exception) {}
-        try { outStream?.close() } catch (_: Exception) {}
-        try { socket?.close() } catch (_: Exception) {}
+        // A thread RTMP lê com soTimeout=0. Fechar o socket PRIMEIRO desbloqueia a
+        // leitura e qualquer escrita pendente; fechar o InputStream antes pode bloquear.
+        val currentSocket = socket
+        val currentInput = inStream
+        val currentOutput = outStream
         socket = null
         inStream = null
         outStream = null
+        try { currentSocket?.close() } catch (_: Exception) {}
+        try { currentOutput?.close() } catch (_: Exception) {}
+        try { currentInput?.close() } catch (_: Exception) {}
     }
 
     @Synchronized

@@ -271,6 +271,10 @@ class ScreenCaptureService : Service() {
         targets: List<StreamPublisher.StreamTarget>
     ) {
         if (!starting.compareAndSet(false, true)) return
+        if (stopping.get()) {
+            starting.set(false)
+            return
+        }
         isConnecting = true
         lastError = null
         notifyListeners()
@@ -318,6 +322,7 @@ class ScreenCaptureService : Service() {
 
                 activePlatforms.clear()
                 val errorsByPlatform = publisher.start()
+                if (stopping.get()) return@Thread
                 activePlatforms.addAll(publisher.connectedPlatforms)
 
                 if (!publisher.hasActivePublishing) {
@@ -344,6 +349,7 @@ class ScreenCaptureService : Service() {
                 )
                 videoEncoder = vEncoder
                 vEncoder.start()
+                if (stopping.get()) return@Thread
                 val encoderInputSurface = vEncoder.surface
 
                 // 5. Start MediaProjection VirtualDisplay + ImageReader + SceneCompositor
@@ -407,6 +413,7 @@ class ScreenCaptureService : Service() {
                     null,
                     imgHandler
                 )
+                if (stopping.get()) return@Thread
 
                 val compositor = SceneCompositor(
                     outputSurface = encoderInputSurface,
@@ -421,6 +428,7 @@ class ScreenCaptureService : Service() {
                         SceneRenderer.renderScene(canvas, cWidth, cHeight, layersSnapshot, latestScreenBitmap)
                     }
                 }
+                if (stopping.get()) return@Thread
 
                 // 6. Start AAC MediaCodec Audio Encoder + Microphone AudioRecord + Internal Audio
                 val audioPrefs = getSharedPreferences(StreamingConfig.AUDIO_PREFS, Context.MODE_PRIVATE)
@@ -437,7 +445,7 @@ class ScreenCaptureService : Service() {
                         if (!enabled) 0f else (audioPrefs.getInt("internal_volume", 100) / 100f).coerceIn(0f, 1f)
                     },
                     noiseSuppressionProvider = {
-                        audioPrefs.getBoolean("noise_suppression", false)
+                        audioPrefs.getBoolean("noise_suppression", true)
                     },
                     mediaProjectionProvider = {
                         mediaProjection
@@ -451,6 +459,7 @@ class ScreenCaptureService : Service() {
                 )
                 audioEncoder = aEncoder
                 aEncoder.start()
+                if (stopping.get()) return@Thread
 
                 streamStartTimeMs = System.currentTimeMillis()
                 isConnecting = false

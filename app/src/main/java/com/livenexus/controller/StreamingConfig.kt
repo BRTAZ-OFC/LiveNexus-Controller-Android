@@ -235,15 +235,8 @@ object StreamingConfig {
     }
 
     fun stopLiveStream(context: Context) {
-        try {
-            val stopIntent = Intent(context, ScreenCaptureService::class.java).apply {
-                action = ScreenCaptureService.ACTION_STOP_STREAM
-            }
-            context.startService(stopIntent)
-        } catch (_: Exception) {
-            try {
-                context.stopService(Intent(context, ScreenCaptureService::class.java))
-            } catch (_: Exception) {}
-        }
+        // Não inicia outro serviço para solicitar parada: encerra o serviço já existente.
+        // onDestroy() do ScreenCaptureService libera MediaProjection, encoders e RTMP.
+        context.stopService(Intent(context, ScreenCaptureService::class.java))
     }
 }
