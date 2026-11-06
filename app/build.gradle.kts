@@ -15,6 +15,12 @@ android {
         versionName = "1.0.$runNumber"
     }
     signingConfigs {
+        create("debugConfig") {
+            storeFile = file("${rootDir}/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
         create("existingRelease") {
             val path = System.getenv("LIVENEXUS_KEYSTORE_PATH")
             if (!path.isNullOrBlank()) storeFile = file(path)
@@ -24,6 +30,9 @@ android {
         }
     }
     buildTypes {
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("debugConfig")
+        }
         getByName("release") {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("existingRelease")

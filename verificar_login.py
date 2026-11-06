@@ -10,7 +10,7 @@ gradle = (root / "app/build.gradle.kts").read_text(encoding="utf-8")
 checks = {
     "interface sem HTML, CSS ou JavaScript": not any(
         p.suffix.lower() in {".html", ".htm", ".js", ".css"}
-        for p in root.rglob("*") if p.is_file()
+        for p in root.rglob("*") if p.is_file() and not any(part in p.parts for part in ("build", ".gradle"))
     ),
     "sem WebView": "WebView" not in activity + auth and "android.webkit" not in activity + auth,
     "UI realmente nativa em Kotlin": all(

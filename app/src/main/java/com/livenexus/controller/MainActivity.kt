@@ -339,7 +339,7 @@ class MainActivity : ComponentActivity() {
                 GradientDrawable.Orientation.TL_BR,
                 intArrayOf(color("#0E1234"), color("#05081E"), color("#030516"))
             ).apply {
-                cornerRadius = dp(13).toFloat()
+                cornerRadius = 0f
                 setStroke(dp(1), color("#8B33FF"))
             }
             elevation = dp(12).toFloat()
@@ -453,7 +453,7 @@ class MainActivity : ComponentActivity() {
     private fun fieldBackground(focused: Boolean): GradientDrawable =
         GradientDrawable().apply {
             setColor(color("#09132C"))
-            cornerRadius = dp(8).toFloat()
+            cornerRadius = 0f
             setStroke(dp(1), color(if (focused) "#00EAFF" else "#42518B"))
         }
 

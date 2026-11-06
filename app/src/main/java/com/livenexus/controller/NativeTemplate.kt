@@ -1,914 +1,3019 @@
 package com.livenexus.controller
 
 import android.app.Activity
+import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
-import android.graphics.Color
-import android.graphics.Typeface
+import android.graphics.*
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.text.InputType
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.MotionEvent
 import android.widget.*
+import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.hypot
 
-/** Native, independently measured components; artwork never receives control events. */
+/**
+ * LiveNEXUS Controller: Native user interface replicating the exact
+ * visual fidelity, cyberpunk neon palette, and component layouts of the design specifications.
+ */
 internal class NativeTemplate(private val activity: Activity) {
     private val density = activity.resources.displayMetrics.density
     private val root = FrameLayout(activity)
+
+    // Navigation and screen state
     private var page = "transmission"
     private var wide = false
     private var availableWidth = 0
     private var availableHeight = 0
     private var popup: PopupWindow? = null
     private var menuAnchor: View? = null
+
+    // Encoder settings state
     private var resolution = "1080p"
     private var streamOrientation = "Horizontal (16:9)"
     private var fps = "60 FPS"
     private var bitrate = 6000
-    private var mic = true
-    private var internalAudio = true
+    private var codec = "H.264"
+    private var micEnabled = true
+    private var internalAudioEnabled = true
     private var micVolume = 100
     private var internalVolume = 100
-    private var ttsText = ""
+
+    // Platform settings state
+    private var twitchEnabled = true
+    private var youtubeEnabled = true
+    private var kickEnabled = true
+    private var twitchKeyVisible = false
+    private var youtubeKeyVisible = false
+    private var kickKeyVisible = false
+    private var streamConnected = false
+    private var streamStartTimeMs = 0L
+    private var timerLabel: TextView? = null
+    private var overlayTimerLabel: TextView? = null
+    private var overlayPanelTimerLabel: TextView? = null
+
+    // Permissions & Smartphone System Overlay (WindowManager) state
+    private var micPermGranted = false
+    private var galleryPermGranted = false
+    private var overlayPermGranted = false
+    private var pendingConnectAfterPermissions = false
+    private var showPermissionsModal = false
+    private var overlayExpanded = false
+    private var overlayMenuTab = "controls" // "controls" or "audio"
+    private var sysOverlayX = -1
+    private var sysOverlayY = -1
+    private var countdownSeconds = 0
+    private var countdownLabel: TextView? = null
+    private var lifecycleRegistered = false
+    private var activityInBackground = false
+    private var systemOverlayView: View? = null
+
+    private val timerRunnable = object : Runnable {
+        override fun run() {
+            if (streamConnected) {
+                val formatted = formatElapsedTime()
+                timerLabel?.text = formatted
+                overlayTimerLabel?.text = formatted
+                overlayPanelTimerLabel?.text = formatted
+                root.postDelayed(this, 1000L)
+            }
+        }
+    }
+
+    private val countdownRunnable = object : Runnable {
+        override fun run() {
+            if (countdownSeconds > 1) {
+                countdownSeconds--
+                countdownLabel?.text = countdownSeconds.toString()
+                root.postDelayed(this, 1000L)
+            } else if (countdownSeconds == 1) {
+                countdownSeconds = 0
+                streamConnected = true
+                streamStartTimeMs = System.currentTimeMillis()
+                overlayExpanded = false
+                root.removeCallbacks(timerRunnable)
+                root.postDelayed(timerRunnable, 1000L)
+                render()
+                // Minimiza o APK para a tela do smartphone e exibe somente a Sobreposição de Tela no sistema
+                minimizeApkToOverlay()
+            }
+        }
+    }
+
+    private fun startConnectionCountdown() {
+        val activePlatforms = mutableListOf<String>()
+        if (twitchEnabled) activePlatforms.add("Twitch")
+        if (youtubeEnabled) activePlatforms.add("YouTube")
+        if (kickEnabled) activePlatforms.add("Kick")
+        if (activePlatforms.isEmpty()) {
+            toast("Não há plataforma conectada.")
+            return
+        }
+        countdownSeconds = 3
+        root.removeCallbacks(countdownRunnable)
+        root.postDelayed(countdownRunnable, 1000L)
+        render()
+    }
+
+    private fun minimizeApkToOverlay() {
+        if (!streamConnected) return
+        overlayExpanded = false
+        activityInBackground = true
+        showSystemOverlayWindow()
+        try {
+            activity.moveTaskToBack(true)
+        } catch (_: Throwable) {}
+    }
+
+    private fun returnToApkFromOverlay() {
+        overlayExpanded = false
+        removeSystemOverlayWindow()
+        try {
+            val intent = activity.packageManager.getLaunchIntentForPackage(activity.packageName)
+            if (intent != null) {
+                intent.addFlags(
+                    android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                        android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                        android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                )
+                activity.startActivity(intent)
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun hasMicPermission(): Boolean {
+        return if (android.os.Build.VERSION.SDK_INT >= 23) {
+            activity.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    private fun hasGalleryPermission(): Boolean {
+        return if (android.os.Build.VERSION.SDK_INT >= 33) {
+            activity.checkSelfPermission(android.Manifest.permission.READ_MEDIA_IMAGES) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else if (android.os.Build.VERSION.SDK_INT >= 23) {
+            activity.checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    private fun canDrawSystemOverlay(): Boolean {
+        return if (android.os.Build.VERSION.SDK_INT >= 23) {
+            try {
+                android.provider.Settings.canDrawOverlays(activity)
+            } catch (_: Throwable) {
+                false
+            }
+        } else {
+            true
+        }
+    }
+
+    private fun syncSystemPermissions() {
+        if (hasMicPermission()) micPermGranted = true
+        if (hasGalleryPermission()) galleryPermGranted = true
+        overlayPermGranted = canDrawSystemOverlay()
+    }
+
+    private fun requestSystemOverlayPermission() {
+        if (android.os.Build.VERSION.SDK_INT >= 23 && !canDrawSystemOverlay()) {
+            try {
+                val intent = android.content.Intent(
+                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    android.net.Uri.parse("package:${activity.packageName}")
+                )
+                activity.startActivity(intent)
+            } catch (_: Throwable) {}
+        }
+    }
+
+    private fun requestRuntimeMicAndGalleryPermissions() {
+        if (android.os.Build.VERSION.SDK_INT >= 23) {
+            val perms = mutableListOf<String>()
+            if (!hasMicPermission()) {
+                perms.add(android.Manifest.permission.RECORD_AUDIO)
+            }
+            if (!hasGalleryPermission()) {
+                if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    perms.add(android.Manifest.permission.READ_MEDIA_IMAGES)
+                } else {
+                    perms.add(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                }
+            }
+            if (perms.isNotEmpty()) {
+                try {
+                    activity.requestPermissions(perms.toTypedArray(), 1001)
+                } catch (_: Throwable) {}
+            }
+        }
+    }
+
+    private fun formatElapsedTime(): String {
+        if (!streamConnected || streamStartTimeMs <= 0L) return "00:00:00"
+        val totalSec = ((System.currentTimeMillis() - streamStartTimeMs) / 1000L).coerceAtLeast(0L)
+        val hours = totalSec / 3600L
+        val minutes = (totalSec % 3600L) / 60L
+        val seconds = totalSec % 60L
+        return String.format("%02d:%02d:%02d", hours, minutes, seconds)
+    }
+
+    // Controls state
     private var addedSceneCount = 0
+    private var playerPlaying = true
     private var playerVolume = 75
-    private var zoom = 66
-    private var filter = "Todos"
-    private var editorTab = "Cenário / Overlay"
+
+    // Canvas Element Model (Adjustable elements on the scenario canvas)
+    data class CanvasElement(
+        val id: String,
+        val type: String, // "screen_capture", "text", "image"
+        var title: String,
+        var x: Float = 0.10f, // 0.0 to 1.0 (relative to canvas width)
+        var y: Float = 0.10f, // 0.0 to 1.0 (relative to canvas height)
+        var width: Float = 0.80f, // 0.0 to 1.0
+        var height: Float = 0.80f, // 0.0 to 1.0
+        var isSelected: Boolean = true,
+        var aspectRatio: String = "16:9" // "16:9" or "9:16"
+    )
+
+    // Editor state (Canvas starts completely blank)
+    private var editorTab = "Todos"
     private var editorMode = "cursor"
-    private var editorLocked = false
-    private var editorPositionX = .5f
-    private var editorPositionY = .5f
-    private var editorArtwork: View? = null
+    private var zoom = 68
+    private val canvasElements = mutableListOf<CanvasElement>()
+    private var selectedElementId: String? = null
     private var expandedPreview: View? = null
+
+    private fun getSelectedElement(): CanvasElement? =
+        canvasElements.find { it.id == selectedElementId } ?: canvasElements.find { it.isSelected }
+
+    private fun addScreenCapture() {
+        val existing = canvasElements.find { it.type == "screen_capture" }
+        if (existing != null) {
+            canvasElements.forEach { it.isSelected = (it.id == existing.id) }
+            selectedElementId = existing.id
+            toast("Captura de Tela selecionada! Arraste ou redimensione pelos pontos.")
+        } else {
+            canvasElements.forEach { it.isSelected = false }
+            val newElement = CanvasElement(
+                id = "screen_${System.currentTimeMillis()}",
+                type = "screen_capture",
+                title = "Captura de Tela",
+                x = 0.10f,
+                y = 0.10f,
+                width = 0.80f,
+                height = 0.80f,
+                isSelected = true
+            )
+            canvasElements.add(newElement)
+            selectedElementId = newElement.id
+            toast("Elemento 'Captura de Tela' adicionado ao cenário!")
+        }
+        render()
+    }
+
+    private fun addTextElement() {
+        canvasElements.forEach { it.isSelected = false }
+        val newElement = CanvasElement(
+            id = "text_${System.currentTimeMillis()}",
+            type = "text",
+            title = "Texto: LiveNEXUS Stream",
+            x = 0.20f,
+            y = 0.05f,
+            width = 0.60f,
+            height = 0.15f,
+            isSelected = true
+        )
+        canvasElements.add(newElement)
+        selectedElementId = newElement.id
+        toast("Elemento 'Texto' adicionado ao cenário!")
+        render()
+    }
+
+    private fun removeSelectedElement() {
+        val selected = getSelectedElement()
+        if (selected != null) {
+            canvasElements.remove(selected)
+            selectedElementId = canvasElements.lastOrNull()?.id
+            canvasElements.lastOrNull()?.isSelected = true
+            toast("Elemento '${selected.title}' removido do cenário.")
+            render()
+        } else {
+            toast("Nenhum elemento selecionado para remover.")
+        }
+    }
+
+    private fun adjustSelected(action: String) {
+        val elem = getSelectedElement() ?: run {
+            toast("Selecione um elemento para ajustar.")
+            return
+        }
+        when (action) {
+            "fullscreen" -> {
+                elem.x = 0f
+                elem.y = 0f
+                elem.width = 1f
+                elem.height = 1f
+                toast("Captura de Tela ajustada para Tela Cheia!")
+            }
+            "center" -> {
+                elem.x = ((1f - elem.width) / 2f).coerceIn(0f, 1f)
+                elem.y = ((1f - elem.height) / 2f).coerceIn(0f, 1f)
+                toast("Elemento centralizado.")
+            }
+            "grow" -> {
+                val nw = (elem.width + 0.06f).coerceAtMost(1f)
+                val nh = (elem.height + 0.06f).coerceAtMost(1f)
+                elem.x = (elem.x - 0.03f).coerceIn(0f, 1f - nw)
+                elem.y = (elem.y - 0.03f).coerceIn(0f, 1f - nh)
+                elem.width = nw
+                elem.height = nh
+            }
+            "shrink" -> {
+                val nw = (elem.width - 0.06f).coerceAtLeast(0.15f)
+                val nh = (elem.height - 0.06f).coerceAtLeast(0.15f)
+                elem.x = (elem.x + 0.03f).coerceIn(0f, 1f - nw)
+                elem.y = (elem.y + 0.03f).coerceIn(0f, 1f - nh)
+                elem.width = nw
+                elem.height = nh
+            }
+        }
+        render()
+    }
+
     private val scrollPositions = mutableMapOf<String, Int>()
     private var currentScroll: ScrollView? = null
 
-    private fun dp(value: Number) = (value.toFloat() * density + .5f).toInt()
-    private fun unavailable() = Toast.makeText(activity,
-        "Comando não conectado à função real nesta versão.", Toast.LENGTH_SHORT).show()
+    private fun dp(value: Number): Int = (value.toFloat() * density + 0.5f).toInt()
+    private fun toast(msg: String) = Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
 
     fun show() {
-        // A tela inicial sempre abre limpa: o menu rápido só aparece após um toque.
         popup?.dismiss()
         popup = null
         menuAnchor = null
         page = "transmission"
         root.background = TemplateStyle.Backdrop()
+        registerLifecycleObserver()
         root.addOnLayoutChangeListener { _, l, t, r, b, _, _, _, _ ->
-            val width = r-l; val height = b-t
+            val width = r - l
+            val height = b - t
             if (width > 0 && height > 0 && (width != availableWidth || height != availableHeight)) {
                 rememberScroll()
-                availableWidth=width; availableHeight=height
-                wide=width>height
+                availableWidth = width
+                availableHeight = height
+                wide = width > height
                 root.post { render() }
             }
         }
         activity.setContentView(root)
     }
 
-    private fun rememberScroll() { currentScroll?.let { scrollPositions[page]=it.scrollY } }
+    private fun registerLifecycleObserver() {
+        if (lifecycleRegistered) return
+        lifecycleRegistered = true
+        syncSystemPermissions()
+        activity.application.registerActivityLifecycleCallbacks(object : android.app.Application.ActivityLifecycleCallbacks {
+            override fun onActivityCreated(a: Activity, b: android.os.Bundle?) {}
+            override fun onActivityStarted(a: Activity) {
+                if (a === activity) {
+                    activityInBackground = false
+                    // Quando voltar para o APK, a sobreposição de tela do smartphone some
+                    removeSystemOverlayWindow()
+                }
+            }
+            override fun onActivityResumed(a: Activity) {
+                if (a === activity) {
+                    activityInBackground = false
+                    syncSystemPermissions()
+                    // Quando está dentro do APK, a sobreposição de tela some
+                    removeSystemOverlayWindow()
+                    if (pendingConnectAfterPermissions && canDrawSystemOverlay()) {
+                        pendingConnectAfterPermissions = false
+                        showPermissionsModal = false
+                        micPermGranted = true
+                        galleryPermGranted = true
+                        overlayPermGranted = true
+                        root.post { startConnectionCountdown() }
+                    } else {
+                        root.post { render() }
+                    }
+                }
+            }
+            override fun onActivityPaused(a: Activity) {}
+            override fun onActivityStopped(a: Activity) {
+                if (a === activity) {
+                    activityInBackground = true
+                    // Quando você minimiza o APK para o smartphone, a sobreposição de tela volta a aparecer
+                    if (streamConnected && canDrawSystemOverlay()) {
+                        showSystemOverlayWindow()
+                    }
+                }
+            }
+            override fun onActivitySaveInstanceState(a: Activity, outState: android.os.Bundle) {}
+            override fun onActivityDestroyed(a: Activity) {
+                if (a === activity) {
+                    removeSystemOverlayWindow()
+                }
+            }
+        })
+    }
+
+    private fun rememberScroll() {
+        currentScroll?.let { scrollPositions[page] = it.scrollY }
+    }
+
     private fun navigate(destination: String) {
-        rememberScroll(); popup?.dismiss(); page=destination; activity.requestedOrientation=if(destination=="editor") ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED; render()
+        rememberScroll()
+        popup?.dismiss()
+        popup = null
+        page = destination
+        activity.requestedOrientation = if (destination == "editor") {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+        render()
     }
-    private fun column() = LinearLayout(activity).apply { orientation=LinearLayout.VERTICAL; clipChildren=false; clipToPadding=false }
-    private fun row() = LinearLayout(activity).apply { orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL; clipChildren=false; clipToPadding=false }
-    private fun label(value: String, size: Float = 13f, bold: Boolean = false) = TextView(activity).apply {
-        text=value; setTextColor(TemplateStyle.white); textSize=size
-        typeface=Typeface.create("sans-serif",if(bold) Typeface.BOLD else Typeface.NORMAL)
-        includeFontPadding=false
+
+    private fun column() = LinearLayout(activity).apply {
+        orientation = LinearLayout.VERTICAL
+        clipChildren = false
+        clipToPadding = false
     }
+
+    private fun row() = LinearLayout(activity).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        clipChildren = false
+        clipToPadding = false
+    }
+
+    private fun label(value: String, size: Float = 13f, bold: Boolean = false, color: Int = TemplateStyle.white) =
+        TextView(activity).apply {
+            text = value
+            setTextColor(color)
+            textSize = size
+            typeface = Typeface.create("sans-serif", if (bold) Typeface.BOLD else Typeface.NORMAL)
+            includeFontPadding = false
+        }
+
     private fun add(parent: LinearLayout, child: View, height: Int = ViewGroup.LayoutParams.WRAP_CONTENT, top: Int = 0) {
-        parent.addView(child,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,if(height>=0)dp(height) else height).apply { topMargin=dp(top) })
+        parent.addView(
+            child,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                if (height >= 0) dp(height) else height
+            ).apply { topMargin = dp(top) }
+        )
     }
-    private fun weighted(parent: LinearLayout, child: View, weight: Float=1f, height: Int=ViewGroup.LayoutParams.WRAP_CONTENT, gap: Int=3) {
-        parent.addView(child,LinearLayout.LayoutParams(0,if(height>=0)dp(height) else height,weight).apply { marginStart=dp(gap);marginEnd=dp(gap) })
+
+    private fun weighted(
+        parent: LinearLayout,
+        child: View,
+        weight: Float = 1f,
+        height: Int = ViewGroup.LayoutParams.WRAP_CONTENT,
+        gap: Int = 3
+    ) {
+        parent.addView(
+            child,
+            LinearLayout.LayoutParams(
+                0,
+                if (height >= 0) dp(height) else height,
+                weight
+            ).apply {
+                marginStart = dp(gap)
+                marginEnd = dp(gap)
+            }
+        )
     }
-    private fun icon(name: String, tint: Int=TemplateStyle.cyan) = TemplateStyle.Icon(activity,name,tint)
-    private fun card(radius: Float=12f, prominent: Boolean=true) = column().apply {
-        background=TemplateStyle.Panel(density,radius=radius,glow=prominent)
-        setPadding(dp(11),dp(9),dp(11),dp(10))
+
+    private fun icon(name: String, tint: Int = TemplateStyle.cyan) = TemplateStyle.Icon(activity, name, tint)
+
+    private fun card(radius: Float = 16f, prominent: Boolean = true, borderTint: Int? = null) = column().apply {
+        background = TemplateStyle.Panel(density, false, radius, prominent, borderTint)
+        setPadding(dp(12), dp(10), dp(12), dp(10))
     }
-    private fun action(title: String, symbol: String?=null, selected: Boolean=false,
-                       stacked: Boolean=false, click: () -> Unit = { unavailable() }): LinearLayout {
+
+    private fun action(
+        title: String,
+        symbol: String? = null,
+        selected: Boolean = false,
+        stacked: Boolean = false,
+        radius: Float = 10f,
+        tint: Int? = null,
+        click: () -> Unit = { toast("Comando executado.") }
+    ): LinearLayout {
         return LinearLayout(activity).apply {
-            orientation=if(stacked) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
-            gravity=Gravity.CENTER;minimumHeight=dp(38)
-            setPadding(dp(5),dp(5),dp(5),dp(5))
-            background=TemplateStyle.Panel(density,selected,8f,false)
-            isClickable=true;isFocusable=true;contentDescription=title
+            orientation = if (stacked) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            minimumHeight = dp(38)
+            setPadding(dp(7), dp(6), dp(7), dp(6))
+            background = TemplateStyle.Panel(density, selected, radius, selected, tint)
+            isClickable = true
+            isFocusable = true
+            contentDescription = title
             setOnClickListener { click() }
-            if(symbol!=null) addView(icon(symbol,if(selected) TemplateStyle.white else TemplateStyle.cyan),
-                LinearLayout.LayoutParams(dp(if(stacked)26 else 20),dp(if(stacked)26 else 20)).apply {
-                    if(stacked) bottomMargin=dp(4) else marginEnd=dp(5)
-                })
-            if(title.isNotEmpty()) addView(label(title,if(stacked)10f else 12f,true).apply {
-                gravity=Gravity.CENTER;maxLines=2;ellipsize=TextUtils.TruncateAt.END
-                setAutoSizeTextTypeUniformWithConfiguration(9,if(stacked)12 else 14,1,TypedValue.COMPLEX_UNIT_SP)
-            },LinearLayout.LayoutParams(if(stacked) ViewGroup.LayoutParams.MATCH_PARENT else ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT))
+
+            if (symbol != null) {
+                addView(
+                    icon(symbol, if (selected) TemplateStyle.white else (tint ?: TemplateStyle.cyan)),
+                    LinearLayout.LayoutParams(dp(if (stacked) 24 else 19), dp(if (stacked) 24 else 19)).apply {
+                        if (stacked) bottomMargin = dp(3) else marginEnd = dp(6)
+                    }
+                )
+            }
+            if (title.isNotEmpty()) {
+                addView(
+                    label(title, if (stacked) 9.5f else 12f, true).apply {
+                        gravity = Gravity.CENTER
+                        maxLines = 2
+                        ellipsize = TextUtils.TruncateAt.END
+                    },
+                    LinearLayout.LayoutParams(
+                        if (stacked) ViewGroup.LayoutParams.MATCH_PARENT else ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
+            }
         }
     }
-    private fun iconAction(symbol:String, description:String, click:()->Unit={unavailable()}): View =
-        action("",symbol,click=click).apply { contentDescription=description;minimumWidth=dp(38) }
 
+    private fun iconAction(
+        symbol: String,
+        description: String,
+        radius: Float = 10f,
+        click: () -> Unit = { toast("Ação: $description") }
+    ): View = action("", symbol, radius = radius, click = click).apply {
+        contentDescription = description
+        minimumWidth = dp(40)
+    }
+
+    // =========================================================================
+    // RENDER DISPATCHER
+    // =========================================================================
     private fun render() {
-        if(availableWidth==0)return
-        popup?.dismiss();popup=null;menuAnchor=null
-        currentScroll=null;expandedPreview=null;root.removeAllViews()
-        val shell=column().apply { setPadding(dp(if(wide)12 else 8),dp(3),dp(if(wide)12 else 8),dp(8)) }
-        root.addView(shell,FrameLayout.LayoutParams(-1,-1))
-        add(shell,if(page=="editor") editorHeader() else header(),if(wide)54 else 72)
-        if(page=="editor") {
-            shell.addView(editor(),LinearLayout.LayoutParams(-1,0,1f))
-        } else if(page=="controls") {
-            shell.addView(controls(),LinearLayout.LayoutParams(-1,0,1f))
-        } else if(page=="transmission") {
-            shell.addView(home(),LinearLayout.LayoutParams(-1,0,1f))
-        } else {
-            val scroll=ScrollView(activity).apply {
-                isFillViewport=true;isVerticalScrollBarEnabled=false;clipToPadding=false
-                overScrollMode=View.OVER_SCROLL_NEVER
-            }
-            currentScroll=scroll
-            val body=when(page) {
-                "controls" -> controls()
-                "encoder" -> encoder()
-                "platforms" -> platforms()
-                else -> editor()
-            }
-            body.setPadding(dp(2),dp(4),dp(2),dp(6))
-            scroll.addView(body,FrameLayout.LayoutParams(-1,-2))
-            shell.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
-            scroll.post { scroll.scrollTo(0,scrollPositions[page]?:0) }
+        if (availableWidth == 0) return
+        popup?.dismiss()
+        popup = null
+        menuAnchor = null
+        currentScroll = null
+        expandedPreview = null
+        countdownLabel = null
+        root.removeAllViews()
+
+        val shell = column().apply {
+            setPadding(dp(if (wide) 12 else 8), dp(4), dp(if (wide) 12 else 8), dp(6))
         }
-        if(page!="encoder" && page!="editor" && page!="controls" && !(page=="platforms" && wide))add(shell,navigation(),if(wide)48 else 66,6)
-        if(page=="transmission" && !wide)add(shell,Space(activity),(availableHeight/density*.14f).toInt())
-    }
+        root.addView(shell, FrameLayout.LayoutParams(-1, -1))
 
-    private fun editorHeader():View = row().apply {
-        addView(TemplateStyle.Brand(activity,""),LinearLayout.LayoutParams(dp(135),dp(46)))
-        addView(label("│  Editor de Cenário / Overlay",12f,true),LinearLayout.LayoutParams(0,-2,1f))
-        addView(iconAction("back","Desfazer"),LinearLayout.LayoutParams(dp(38),dp(38)))
-        addView(iconAction("refresh","Refazer"),LinearLayout.LayoutParams(dp(38),dp(38)))
-        addView(action("Visualizar","eye") { showExpandedPreview() },LinearLayout.LayoutParams(dp(102),dp(40)))
-        addView(action("Salvar","save",true),LinearLayout.LayoutParams(dp(88),dp(40)))
-    }
-
-    private fun header():View = row().apply {
-        if(wide && page=="transmission") {
-            addView(TemplateStyle.Brand(activity,""),LinearLayout.LayoutParams(dp(140),dp(48)))
-            addView(label("│  ▦  Painel de Controle (APK)",12f,true))
-            addView(Space(activity),LinearLayout.LayoutParams(0,1,1f))
-            addView(icon("gear",TemplateStyle.white),LinearLayout.LayoutParams(dp(23),dp(23)))
-        } else {
-            val back=page=="encoder" || page=="platforms" || page=="editor" || page=="controls"
-            addView(iconAction(if(back)"back" else "menu",if(back)"Voltar à transmissão" else "Abrir menu") {
-                if(back)navigate("transmission") else showMenu()
-            },LinearLayout.LayoutParams(dp(48),dp(48)))
-            addView(TemplateStyle.Brand(activity),LinearLayout.LayoutParams(0,dp(if(wide)52 else 62),1f))
-            if(wide && page!="transmission" && page!="controls") addView(label("Sessão ativa",11f).apply {
-                setTextColor(0xff00e8b4.toInt())
-                background=TemplateStyle.Panel(density,radius=20f,glow=false)
-            }) else addView(Space(activity),LinearLayout.LayoutParams(dp(12),1))
-        }
-    }
-
-    private fun navigation():View = row().apply {
-        val items=listOf(Triple("MENU","menu","menu"),Triple("TRANSMISSÃO","broadcast","transmission"),
-            Triple("CONFIGURAÇÃO","gear","encoder"),Triple("PLATAFORMAS","layers","platforms"))
-        items.forEach { (title,symbol,destination) ->
-            val selected=if(destination=="transmission")page!="platforms"&&page!="encoder" else destination==page
-            val button=action(title,symbol,selected,stacked=true) {
-                if(destination=="menu")showMenu() else navigate(destination)
+        // Screen Header
+        if (page == "editor") {
+            add(shell, editorHeader(), if (wide) 52 else 64)
+            shell.addView(editor(), LinearLayout.LayoutParams(-1, 0, 1f))
+            if (showPermissionsModal) {
+                attachPermissionsModal()
             }
-            weighted(this,button,height=64,gap=0)
-            if(destination=="menu")menuAnchor=button
+            if (countdownSeconds > 0) {
+                attachCountdownOverlay()
+            }
+            return
+        }
+
+        add(shell, header(), if (wide) 52 else 66)
+
+        // Body Content
+        when (page) {
+            "transmission" -> {
+                shell.addView(home(), LinearLayout.LayoutParams(-1, 0, 1f))
+                add(shell, navigation(), if (wide) 50 else 66, 4)
+            }
+            "controls" -> {
+                shell.addView(controls(), LinearLayout.LayoutParams(-1, 0, 1f))
+                if (!wide) add(shell, navigation(), 66, 4)
+            }
+            "encoder" -> {
+                val scroll = ScrollView(activity).apply {
+                    isFillViewport = true
+                    isVerticalScrollBarEnabled = false
+                    clipToPadding = false
+                }
+                currentScroll = scroll
+                val body = encoder()
+                scroll.addView(body, FrameLayout.LayoutParams(-1, -2))
+                shell.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+                scroll.post { scroll.scrollTo(0, scrollPositions[page] ?: 0) }
+                if (!wide) add(shell, navigation(), 66, 4)
+            }
+            "platforms" -> {
+                val scroll = ScrollView(activity).apply {
+                    isFillViewport = true
+                    isVerticalScrollBarEnabled = false
+                    clipToPadding = false
+                }
+                currentScroll = scroll
+                val body = platforms()
+                scroll.addView(body, FrameLayout.LayoutParams(-1, -2))
+                shell.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+                scroll.post { scroll.scrollTo(0, scrollPositions[page] ?: 0) }
+                add(shell, navigation(), if (wide) 50 else 66, 4)
+            }
+        }
+
+        if (showPermissionsModal) {
+            attachPermissionsModal()
+        }
+        if (countdownSeconds > 0) {
+            attachCountdownOverlay()
         }
     }
 
+    // =========================================================================
+    // COMMON HEADER (Images 1, 2, 3, 5, 6, 7, 8, 9)
+    // =========================================================================
+    private fun header(): View = row().apply {
+        val isSubPage = page == "encoder" || page == "platforms" || page == "controls"
+
+        // Left Action: Back or Menu
+        val leftButton = action(
+            "",
+            if (isSubPage) "back" else "menu",
+            radius = 12f
+        ) {
+            if (isSubPage) navigate("transmission") else showMenu()
+        }
+        addView(leftButton, LinearLayout.LayoutParams(dp(44), dp(44)))
+
+        // Center Brand Logo
+        val brand = TemplateStyle.Brand(activity)
+        addView(brand, LinearLayout.LayoutParams(0, dp(if (wide) 50 else 60), 1f).apply {
+            marginStart = dp(8)
+            marginEnd = dp(8)
+        })
+
+        // Right Action: Status Badge and optional Gear icon
+        val badge = TemplateStyle.ConnectionBadge(activity)
+        addView(badge, LinearLayout.LayoutParams(dp(112), dp(32)))
+
+        if (wide) {
+            val gear = iconAction("gear", "Configurações", radius = 10f) { navigate("encoder") }
+            addView(gear, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(8) })
+        }
+    }
+
+    // =========================================================================
+    // BOTTOM NAVIGATION DOCK (Images 1, 5, 7)
+    // =========================================================================
+    private fun navigation(): View = row().apply {
+        val tabs = listOf(
+            Triple("MENU", "menu", "menu"),
+            Triple("TRANSMISSÃO", "broadcast", "transmission"),
+            Triple("CONFIGURAÇÃO", "gear", "encoder"),
+            Triple("PLATAFORMAS", "layers", "platforms")
+        )
+        tabs.forEach { (title, symbol, dest) ->
+            val isSelected = when (dest) {
+                "transmission" -> page == "transmission"
+                "encoder" -> page == "encoder"
+                "platforms" -> page == "platforms"
+                else -> false
+            }
+            val button = action(title, symbol, isSelected, stacked = true, radius = 12f) {
+                if (dest == "menu") showMenu() else navigate(dest)
+            }
+            weighted(this, button, 1f, if (wide) 48 else 62, gap = 2)
+            if (dest == "menu") menuAnchor = button
+        }
+    }
+
+    // =========================================================================
+    // QUICK MENU POPUP (Image 1)
+    // =========================================================================
     private fun showMenu() {
-        if(popup?.isShowing==true) { popup?.dismiss();popup=null;return }
-        val anchor=menuAnchor ?: root
-        val panel=card(18f).apply { setPadding(dp(12),dp(8),dp(12),dp(14)) }
-        val heading=row()
-        weighted(heading,TemplateStyle.Brand(activity,"MENU RÁPIDO"),height=51,gap=0)
-        heading.addView(iconAction("close","Fechar menu") { popup?.dismiss() },LinearLayout.LayoutParams(dp(48),dp(48)))
-        add(panel,heading)
-        add(panel,action("Cenários     ›","layers",true){navigate("editor")},48,4)
-        add(panel,action("Controles     ›","game"){navigate("controls")},48,5)
-        popup=PopupWindow(panel,min(dp(285),(availableWidth-dp(16)).coerceAtLeast(dp(1))),ViewGroup.LayoutParams.WRAP_CONTENT,true).apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT));isOutsideTouchable=true;elevation=dp(8).toFloat()
-            panel.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(availableHeight,View.MeasureSpec.AT_MOST))
-            val position=IntArray(2);anchor.getLocationOnScreen(position)
-            showAtLocation(root,Gravity.TOP or Gravity.START,dp(8),maxOf(dp(56),position[1]-panel.measuredHeight))
+        if (popup?.isShowing == true) {
+            popup?.dismiss()
+            popup = null
+            return
         }
-    }
+        val anchor = menuAnchor ?: root
+        val panel = card(radius = 18f).apply {
+            setPadding(dp(14), dp(10), dp(14), dp(14))
+        }
 
-    /** Mede a prévia dentro do espaço disponível e preserva 16:9 nos dois eixos. */
-    private class SixteenByNine(context: android.content.Context): FrameLayout(context) {
-        override fun onMeasure(widthMeasureSpec:Int,heightMeasureSpec:Int) {
-            val availableWidth=View.MeasureSpec.getSize(widthMeasureSpec).coerceAtLeast(0)
-            val heightMode=View.MeasureSpec.getMode(heightMeasureSpec)
-            val availableHeight=if(heightMode==View.MeasureSpec.UNSPECIFIED) Int.MAX_VALUE
-                                else View.MeasureSpec.getSize(heightMeasureSpec).coerceAtLeast(0)
-            val fittedWidth=if(availableHeight==Int.MAX_VALUE) availableWidth else
-                min(availableWidth,(availableHeight.toLong()*16L/9L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
-            val fittedHeight=(fittedWidth.toLong()*9L/16L).toInt()
-            super.onMeasure(
-                View.MeasureSpec.makeMeasureSpec(fittedWidth,View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(fittedHeight,View.MeasureSpec.EXACTLY)
+        // Header with Logo and Close 'X'
+        val heading = row()
+        heading.addView(TemplateStyle.Brand(activity, "MENU RÁPIDO"), LinearLayout.LayoutParams(0, dp(44), 1f))
+        heading.addView(iconAction("close", "Fechar menu", radius = 10f) { popup?.dismiss() }, LinearLayout.LayoutParams(dp(38), dp(38)))
+        add(panel, heading)
+
+        // Menu Items: Cenários & Controles
+        add(panel, action("Cenários", "layers", selected = true, radius = 12f) {
+            navigate("editor")
+        }, 46, top = 8)
+
+        add(panel, action("Controles", "game", selected = false, radius = 12f) {
+            navigate("controls")
+        }, 46, top = 6)
+
+        popup = PopupWindow(
+            panel,
+            min(dp(290), (availableWidth - dp(24)).coerceAtLeast(dp(1))),
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            true
+        ).apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            isOutsideTouchable = true
+            elevation = dp(16).toFloat()
+            panel.measure(
+                View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(availableHeight, View.MeasureSpec.AT_MOST)
+            )
+            val pos = IntArray(2)
+            anchor.getLocationOnScreen(pos)
+            showAtLocation(
+                root,
+                Gravity.TOP or Gravity.START,
+                dp(12),
+                maxOf(dp(64), pos[1] - panel.measuredHeight - dp(8))
             )
         }
     }
 
-    private fun home(): View = FrameLayout(activity).apply {
-        // A miniatura da transmissão jamais vira quadrada em retrato.
-        val preview=SixteenByNine(activity).apply {
-            addView(if(wide)TemplateStyle.Brand(activity,"CENTRAL DE TRANSMISSÃO") else art("MINIATURA"),FrameLayout.LayoutParams(-1,-1))
+    // =========================================================================
+    // 16:9 OR 9:16 ASPECT RATIO CONTAINER
+    // =========================================================================
+    private class SixteenByNine(
+        context: Context,
+        private val vertical: Boolean = false
+    ) : FrameLayout(context) {
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val availableWidth = View.MeasureSpec.getSize(widthMeasureSpec).coerceAtLeast(0)
+            val heightMode = View.MeasureSpec.getMode(heightMeasureSpec)
+            val availableHeight = if (heightMode == View.MeasureSpec.UNSPECIFIED) Int.MAX_VALUE
+            else View.MeasureSpec.getSize(heightMeasureSpec).coerceAtLeast(0)
+            val ratioW = if (vertical) 9L else 16L
+            val ratioH = if (vertical) 16L else 9L
+            val fittedWidth = if (availableHeight == Int.MAX_VALUE) availableWidth
+            else min(availableWidth, (availableHeight.toLong() * ratioW / ratioH).coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+            val fittedHeight = (fittedWidth.toLong() * ratioH / ratioW).toInt()
+            super.onMeasure(
+                View.MeasureSpec.makeMeasureSpec(fittedWidth, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(fittedHeight, View.MeasureSpec.EXACTLY)
+            )
         }
-        addView(preview,FrameLayout.LayoutParams(if(wide)(availableWidth*.76f).toInt() else -1,if(wide)(availableHeight*.7f).toInt() else -1,Gravity.CENTER))
-    }
-    private fun art(title:String):View = FrameLayout(activity).apply {
-        background=TemplateStyle.Panel(density,radius=24f)
-        setPadding(dp(5),dp(5),dp(5),dp(5))
-        clipToOutline=true
-        outlineProvider=object:android.view.ViewOutlineProvider(){
-            override fun getOutline(view:View,outline:android.graphics.Outline){ outline.setRoundRect(0,0,view.width,view.height,dp(24).toFloat()) }
-        }
-        val inner=FrameLayout(activity).apply { background=TemplateStyle.Backdrop() }
-        addView(inner,FrameLayout.LayoutParams(-1,-1))
-        val content=column().apply { gravity=Gravity.CENTER }
-        inner.addView(content,FrameLayout.LayoutParams(-2,-2,Gravity.CENTER))
-        content.addView(icon("play"),LinearLayout.LayoutParams(dp(58),dp(58)))
-        content.addView(label(title,if(title=="MINIATURA")30f else 27f,true).apply {
-            gravity=Gravity.CENTER;typeface=Typeface.create("sans-serif",if(title=="MINIATURA")Typeface.BOLD else Typeface.BOLD_ITALIC)
-        },LinearLayout.LayoutParams(-2,-2).apply { topMargin=dp(16) })
-        if(title=="LiveNEXUS") editorArtwork=content
-    }
-    private fun title(title:String,symbol:String):View = row().apply {
-        background=TemplateStyle.Panel(density,radius=18f)
-        setPadding(dp(8),dp(4),dp(8),dp(4))
-        addView(iconAction("back","Voltar à transmissão"){navigate("transmission")},LinearLayout.LayoutParams(dp(48),dp(48)))
-        val center=row().apply { gravity=Gravity.CENTER }
-        center.addView(icon(symbol),LinearLayout.LayoutParams(dp(28),dp(28)))
-        center.addView(label(title,20f,true),LinearLayout.LayoutParams(-2,-2).apply { marginStart=dp(9) })
-        weighted(this,center)
-        addView(Space(activity),LinearLayout.LayoutParams(dp(48),1))
-    }
-    private fun sectionHeader(parent:LinearLayout,title:String,symbol:String,subtitle:String?=null) {
-        val heading=row()
-        heading.addView(icon(symbol,TemplateStyle.white),LinearLayout.LayoutParams(dp(27),dp(27)).apply { marginEnd=dp(8) })
-        val texts=column();add(texts,label(title,16f,true))
-        if(subtitle!=null)add(texts,label(subtitle,10f),top=2)
-        weighted(heading,texts,gap=0);add(parent,heading,top=1)
     }
 
-    private fun controls():LinearLayout = column().apply {
-        val content=if(wide) controlsWide() else controlsPortrait()
-        addView(content,LinearLayout.LayoutParams(-1,-1))
-    }
+    // =========================================================================
+    // 1. TRANSMISSION HOME SCREEN (Images 1 & 5)
+    // =========================================================================
+    private fun home(): View = column().apply {
+        gravity = Gravity.CENTER
 
-    private fun controlsWide():View = column().apply {
-        val heading=row().apply {
-            gravity=Gravity.CENTER
-            background=TemplateStyle.Panel(density,radius=6f)
-        }
-        heading.addView(icon("game"),LinearLayout.LayoutParams(dp(30),dp(30)))
-        heading.addView(label("Controles",21f,true),
-            LinearLayout.LayoutParams(-2,-2).apply {marginStart=dp(9)})
-        add(this,heading,48)
+        val isVertical = streamOrientation == "Vertical (9:16)"
 
-        val hotkeys=card(radius=6f).apply {
-            setPadding(dp(9),dp(6),dp(9),dp(7))
-        }
-        sectionHeader(hotkeys,"Hotkeys","keyboard","Atalhos de cenas, subcenas e ações rápidas")
-        val buttons=mutableListOf<View>()
-        buttons.add(portraitSceneButton("refresh","Reload",true) {unavailable()})
-        buttons.add(portraitSceneButton("plus","Adicionar\ncenário",false) {
-            addedSceneCount++
-            render()
-        })
-        for(index in 1..addedSceneCount) {
-            buttons.add(portraitSceneButton("video","Cena $index",false) {unavailable()})
-        }
-        val buttonList=column()
-        val columns=((availableWidth/density-42f)/90f).toInt().coerceAtLeast(2)
-        buttons.chunked(columns).forEach { group ->
-            val line=row().apply {gravity=Gravity.START}
-            group.forEach { button ->
-                line.addView(button,LinearLayout.LayoutParams(dp(82),dp(72)).apply {
-                    marginEnd=dp(7)
-                })
+        val preview = SixteenByNine(activity, vertical = isVertical).apply {
+            background = TemplateStyle.Panel(density, false, radius = 0f, glow = true)
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+
+            val inner = FrameLayout(activity).apply {
+                background = TemplateStyle.Backdrop()
             }
-            add(buttonList,line,72,top=5)
-        }
-        val scroller=ScrollView(activity).apply {
-            isVerticalScrollBarEnabled=false
-            overScrollMode=View.OVER_SCROLL_NEVER
-            addView(buttonList)
-        }
-        hotkeys.addView(scroller,LinearLayout.LayoutParams(-1,0,1f))
-        addView(hotkeys,LinearLayout.LayoutParams(-1,0,1f).apply {
-            topMargin=dp(6)
-        })
+            addView(inner, FrameLayout.LayoutParams(-1, -1))
 
-        val player=card(radius=6f).apply {
-            setPadding(dp(8),dp(5),dp(8),dp(6))
-        }
-        val bar=row()
-        bar.addView(icon("music",TemplateStyle.white),
-            LinearLayout.LayoutParams(dp(27),dp(27)))
-        bar.addView(label("Player (Mídia)",14f,true),
-            LinearLayout.LayoutParams(0,-2,.8f).apply {marginStart=dp(6)})
-        listOf("back" to "Anterior","pause" to "Pausar","next" to "Próxima")
-            .forEach { (symbol,name) ->
-                bar.addView(iconAction(symbol,name),
-                    LinearLayout.LayoutParams(dp(42),dp(42)).apply {marginStart=dp(3)})
+            val centerContent = column().apply {
+                gravity = Gravity.CENTER
             }
-        bar.addView(icon("volume",TemplateStyle.white),
-            LinearLayout.LayoutParams(dp(21),dp(21)).apply {marginStart=dp(12)})
-        val valueLabel=label("$playerVolume%",12f,true).apply {gravity=Gravity.CENTER}
-        weighted(bar,seek(playerVolume,100) {
-            playerVolume=it
-            valueLabel.text="$it%"
-        },1f,38,2)
-        bar.addView(valueLabel,LinearLayout.LayoutParams(dp(44),-2))
-        add(player,bar,45)
-        add(this,player,68,top=7)
-    }
+            inner.addView(centerContent, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
 
-    private fun controlsPortrait():View = column().apply {
-        val heading=row().apply {
-            gravity=Gravity.CENTER
-            background=TemplateStyle.Panel(density,radius=6f)
-        }
-        heading.addView(icon("game"),LinearLayout.LayoutParams(dp(31),dp(31)))
-        heading.addView(label("Controles",21f,true),
-            LinearLayout.LayoutParams(-2,-2).apply {marginStart=dp(9)})
-        add(this,heading,53)
+            // Large glowing play triangle
+            centerContent.addView(icon("play"), LinearLayout.LayoutParams(dp(if (isVertical) 60 else 76), dp(if (isVertical) 60 else 76)))
 
-        val keys=card(radius=6f)
-        sectionHeader(keys,"Hotkeys","keyboard","Atalhos de cenas, subcenas e ações rápidas")
-        val buttonList=column()
-        val buttons=mutableListOf<View>()
-        buttons.add(portraitSceneButton("refresh","Reload",true) {unavailable()})
-        buttons.add(portraitSceneButton("plus","Adicionar\ncenário",false) {
-            addedSceneCount++
-            render()
-        })
-        for(index in 1..addedSceneCount) {
-            buttons.add(portraitSceneButton("video","Cena $index",false) {unavailable()})
-        }
-        val columns=if(availableWidth/density<305f) 2 else 3
-        buttons.chunked(columns).forEach { group ->
-            val line=row().apply {gravity=Gravity.START}
-            group.forEach { button ->
-                line.addView(button,LinearLayout.LayoutParams(dp(80),dp(76)).apply {
-                    marginEnd=dp(7)
-                })
-            }
-            add(buttonList,line,76,top=6)
-        }
-        val scroll=ScrollView(activity).apply {
-            isVerticalScrollBarEnabled=false
-            overScrollMode=View.OVER_SCROLL_NEVER
-            addView(buttonList)
-        }
-        keys.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
-        addView(keys,LinearLayout.LayoutParams(-1,0,1f).apply {topMargin=dp(7)})
-
-        val player=card(radius=6f).apply {
-            setPadding(dp(7),dp(5),dp(7),dp(6))
-        }
-        val playerTitle=row()
-        playerTitle.addView(icon("music",TemplateStyle.white),
-            LinearLayout.LayoutParams(dp(24),dp(24)))
-        playerTitle.addView(label("Player (Mídia)",15f,true),
-            LinearLayout.LayoutParams(-2,-2).apply {marginStart=dp(7)})
-        add(player,playerTitle,26)
-        val playback=row()
-        playback.addView(icon("volume",TemplateStyle.white),
-            LinearLayout.LayoutParams(dp(19),dp(19)))
-        val valueLabel=label("$playerVolume%",11f,true).apply {gravity=Gravity.CENTER}
-        val volume=seek(playerVolume,100) {
-            playerVolume=it
-            valueLabel.text="$it%"
-        }
-        weighted(playback,volume,1f,36,0)
-        playback.addView(valueLabel,LinearLayout.LayoutParams(dp(39),-2))
-        listOf("back" to "Anterior","pause" to "Pausar","next" to "Próxima")
-            .forEach { (symbol,name) ->
-                playback.addView(iconAction(symbol,name),
-                    LinearLayout.LayoutParams(dp(37),dp(38)).apply {marginStart=dp(2)})
-            }
-        add(player,playback,41,top=2)
-        add(this,player,83,top=8)
-    }
-
-    private fun portraitSceneButton(symbol:String,title:String,selected:Boolean,click:()->Unit):View =
-        column().apply {
-            gravity=Gravity.CENTER
-            background=TemplateStyle.Panel(density,selected,radius=6f)
-            isClickable=true
-            isFocusable=true
-            contentDescription=title.replace("\n"," ")
-            setOnClickListener {click()}
-            if(symbol=="plus") {
-                addView(label("+",29f,true).apply {gravity=Gravity.CENTER},
-                    LinearLayout.LayoutParams(-1,dp(35)))
+            if (wide) {
+                centerContent.addView(
+                    label("LiveNEXUS", if (isVertical) 22f else 32f, bold = true).apply {
+                        gravity = Gravity.CENTER
+                        typeface = Typeface.create("sans-serif", Typeface.BOLD_ITALIC)
+                    },
+                    LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) }
+                )
+                centerContent.addView(
+                    label("— CENTRAL DE TRANSMISSÃO —", if (isVertical) 9f else 11f, bold = false, color = TemplateStyle.muted).apply {
+                        gravity = Gravity.CENTER
+                        letterSpacing = 0.22f
+                    },
+                    LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(4) }
+                )
             } else {
-                addView(icon(symbol),LinearLayout.LayoutParams(dp(29),dp(29)))
+                centerContent.addView(
+                    label("MINIATURA", if (isVertical) 24f else 32f, bold = true).apply {
+                        gravity = Gravity.CENTER
+                        letterSpacing = 0.08f
+                    },
+                    LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(14) }
+                )
             }
-            addView(label(title,11f,true).apply {
-                gravity=Gravity.CENTER
-                maxLines=2
-            },LinearLayout.LayoutParams(-1,-2).apply {topMargin=dp(3)})
         }
 
-    private fun hotkeys():View = card().apply {
-        sectionHeader(this,"Hotkeys","keyboard","Atalhos de cenas, subcenas e ações rápidas")
-        val keys=row();listOf("Cena 1  F1","Cena 2  F2","Subcena  F3").forEachIndexed { i,s -> weighted(keys,action(s,if(i==2)"layers" else "video"),height=48,gap=1) }
-        add(this,keys,top=5)
-        val commands=row()
-        listOf("Iniciar Transmissão" to "play","Parar Transmissão" to "stop","Reiniciar" to "refresh").forEach { (s,i)->weighted(commands,action(s,i),height=48,gap=1) }
-        add(this,commands,top=3)
-    }
-    private fun player():View = card(radius=5f).apply {
-        sectionHeader(this,"Player (Mídia)","music","Controle de músicas e mídias")
-        val media=row()
-        val cover=FrameLayout(activity).apply {
-            background=TemplateStyle.Panel(density,true,5f)
-            addView(icon("music"),FrameLayout.LayoutParams(dp(31),dp(31),Gravity.CENTER))
-        }
-        media.addView(cover,LinearLayout.LayoutParams(dp(55),dp(55)))
-        val information=column()
-        add(information,label("Nenhuma mídia carregada",12f,true))
-        add(information,label("--:-- / --:--",10f),top=4)
-        weighted(media,information,1f,gap=6)
-        val transport=row().apply { gravity=Gravity.CENTER }
-        listOf("back" to "Anterior","pause" to "Pausar","next" to "Próxima").forEach { (symbol,name) ->
-            transport.addView(iconAction(symbol,name),
-                LinearLayout.LayoutParams(dp(48),dp(48)).apply {
-                    marginStart=dp(3);marginEnd=dp(3)
-                })
-        }
-        // Mantém o tamanho dos controles, sem comprimir a capa ou o texto.
-        val usableWidth=availableWidth/density-40f
-        if(usableWidth>=445f) {
-            media.addView(transport,LinearLayout.LayoutParams(dp(162),dp(48)))
-            add(this,media,top=6)
+        val maxWidth = if (wide) (availableWidth * 0.78f).toInt() else -1
+        val maxHeight = if (wide) {
+            (availableHeight * 0.54f).toInt()
         } else {
-            add(this,media,top=6)
-            add(this,transport,48,top=5)
+            (availableHeight * (if (isVertical) 0.44f else 0.36f)).toInt()
         }
-        add(this,volumeRow("",75){},top=5)
+        addView(preview, LinearLayout.LayoutParams(maxWidth, maxHeight).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+        })
+
+        // Botão para alternar o cenário entre Horizontal (16:9) e Vertical (9:16)
+        val aspectButtonText = if (isVertical) {
+            "Cenário: Vertical (9:16) ⇄ Mudar p/ 16:9"
+        } else {
+            "Cenário: Horizontal (16:9) ⇄ Mudar p/ 9:16"
+        }
+        val aspectToggleBtn = action(
+            aspectButtonText,
+            "screen",
+            selected = isVertical,
+            radius = 12f
+        ) {
+            streamOrientation = if (isVertical) "Horizontal (16:9)" else "Vertical (9:16)"
+            toast("Cenário alterado para $streamOrientation")
+            render()
+        }
+        val aspectBtnWidth = min(dp(300), (availableWidth * 0.84f).toInt())
+        addView(aspectToggleBtn, LinearLayout.LayoutParams(aspectBtnWidth, dp(40)).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            topMargin = dp(if (wide) 10 else 14)
+        })
+
+        // Botão Conectar / Conectado (Vermelho quando desconectado, Verde quando conectado)
+        val hasActivePlatform = twitchEnabled || youtubeEnabled || kickEnabled
+        if (!hasActivePlatform && streamConnected) {
+            streamConnected = false
+            root.removeCallbacks(timerRunnable)
+        }
+
+        val btnPrimary = if (streamConnected) Color.rgb(0, 215, 115) else Color.rgb(255, 34, 60)
+        val btnDark = if (streamConnected) Color.rgb(0, 140, 72) else Color.rgb(160, 0, 28)
+        val btnDeep = if (streamConnected) Color.rgb(0, 80, 40) else Color.rgb(90, 0, 16)
+        val btnBorder = if (streamConnected) TemplateStyle.green else btnPrimary
+        val btnText = if (streamConnected) "Conectado" else "Conectar"
+
+        val connectionButton = row().apply {
+            gravity = Gravity.CENTER
+            background = TemplateStyle.Panel(
+                density,
+                selected = true,
+                radius = 16f,
+                glow = true,
+                borderTint = btnBorder,
+                fillGradient = intArrayOf(btnPrimary, btnDark, btnDeep)
+            )
+            isClickable = true
+            isFocusable = true
+            contentDescription = btnText
+            setPadding(dp(28), dp(12), dp(28), dp(12))
+            setOnClickListener {
+                val activePlatforms = mutableListOf<String>()
+                if (twitchEnabled) activePlatforms.add("Twitch")
+                if (youtubeEnabled) activePlatforms.add("YouTube")
+                if (kickEnabled) activePlatforms.add("Kick")
+
+                if (activePlatforms.isEmpty()) {
+                    streamConnected = false
+                    overlayExpanded = false
+                    countdownSeconds = 0
+                    root.removeCallbacks(timerRunnable)
+                    root.removeCallbacks(countdownRunnable)
+                    removeSystemOverlayWindow()
+                    toast("Não há plataforma conectada.")
+                    render()
+                } else if (!streamConnected && countdownSeconds == 0) {
+                    syncSystemPermissions()
+                    if (!micPermGranted || !galleryPermGranted || !overlayPermGranted) {
+                        showPermissionsModal = true
+                        requestRuntimeMicAndGalleryPermissions()
+                        render()
+                    } else {
+                        startConnectionCountdown()
+                    }
+                } else {
+                    streamConnected = false
+                    overlayExpanded = false
+                    countdownSeconds = 0
+                    root.removeCallbacks(timerRunnable)
+                    root.removeCallbacks(countdownRunnable)
+                    removeSystemOverlayWindow()
+                    toast("Transmissão desconectada.")
+                    render()
+                }
+            }
+
+            addView(
+                icon(if (streamConnected) "check" else "link", TemplateStyle.white),
+                LinearLayout.LayoutParams(dp(22), dp(22)).apply { marginEnd = dp(10) }
+            )
+            addView(
+                label(btnText, 15f, bold = true, color = TemplateStyle.white).apply {
+                    letterSpacing = 0.05f
+                }
+            )
+        }
+
+        val btnWidth = min(dp(260), (availableWidth * 0.72f).toInt())
+        val btnParams = LinearLayout.LayoutParams(
+            btnWidth,
+            dp(52)
+        ).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            topMargin = dp(if (wide) 12 else 20)
+        }
+        addView(connectionButton, btnParams)
+
+        // Cronômetro logo abaixo do botão quando estiver Conectado
+        if (streamConnected) {
+            val timerBox = row().apply {
+                gravity = Gravity.CENTER
+                background = TemplateStyle.Panel(density, false, radius = 12f, glow = true, borderTint = TemplateStyle.green)
+                setPadding(dp(16), dp(6), dp(16), dp(6))
+            }
+            val recDot = View(activity).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(TemplateStyle.green)
+                }
+            }
+            timerBox.addView(recDot, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(8) })
+            val chronoText = label(formatElapsedTime(), 15f, bold = true, color = TemplateStyle.green).apply {
+                letterSpacing = 0.10f
+            }
+            timerLabel = chronoText
+            timerBox.addView(chronoText)
+
+            addView(timerBox, LinearLayout.LayoutParams(-2, dp(36)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                topMargin = dp(8)
+            })
+            root.removeCallbacks(timerRunnable)
+            root.postDelayed(timerRunnable, 1000L)
+        } else {
+            timerLabel = null
+        }
     }
-    private fun tts():View = card().apply {
-        val heading=row()
-        val title=column();sectionHeader(title,"TTS (Voz)","mic","Leitura de mensagens por voz")
-        weighted(heading,title,gap=0)
-        heading.addView(label("Ativar TTS",9f))
-        heading.addView(toggle(false){ unavailable() })
-        add(this,heading)
-        val input=row()
-        val field=EditText(activity).apply {
-            setText(ttsText);hint="Digite uma mensagem para o TTS...";textSize=11f;setTextColor(TemplateStyle.white)
-            setHintTextColor(TemplateStyle.muted);setSingleLine(true);inputType=InputType.TYPE_CLASS_TEXT
-            background=TemplateStyle.Panel(density,radius=7f,glow=false);setPadding(dp(8),0,dp(8),0)
-            addTextChangedListener(object:android.text.TextWatcher {
-                override fun beforeTextChanged(s:CharSequence?,start:Int,count:Int,after:Int) {}
-                override fun onTextChanged(s:CharSequence?,start:Int,before:Int,count:Int) { ttsText=s?.toString().orEmpty() }
-                override fun afterTextChanged(s:android.text.Editable?) {}
+
+    // =========================================================================
+    // 2. CONFIGURAÇÃO SCREEN (Images 2 & 3)
+    // =========================================================================
+    private fun encoder(): LinearLayout = column().apply {
+        // Subheader banner: Configuração
+        val banner = row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(2), dp(4), dp(6))
+        }
+        banner.addView(icon("gear", TemplateStyle.white), LinearLayout.LayoutParams(dp(26), dp(26)))
+        banner.addView(label("Configuração", 20f, true).apply { marginStart(dp(8)) })
+        banner.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
+
+        // Badge: Configuração de Vídeo e Áudio da Transmissão
+        val subBadge = row().apply {
+            background = TemplateStyle.Panel(density, false, radius = 16f, glow = false)
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+        }
+        subBadge.addView(icon("video", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(16), dp(16)))
+        subBadge.addView(
+            label("Configuração de Vídeo e Áudio", 10.5f, false, TemplateStyle.muted).apply {
+                marginStart(dp(6))
+            }
+        )
+        banner.addView(subBadge)
+        add(this, banner)
+
+        // Resolução Card
+        val resCard = card(radius = 14f)
+        val resHead = row()
+        resHead.addView(icon("screen"), LinearLayout.LayoutParams(dp(18), dp(18)))
+        resHead.addView(label("Resolução", 12.5f, true).apply { marginStart(dp(6)) })
+        add(resCard, resHead)
+        val resChoices = row()
+        listOf("720p", "1080p").forEach { res ->
+            weighted(resChoices, action(res, selected = res == resolution, radius = 12f) {
+                resolution = res
+                render()
+            }, 1f, 38, 2)
+        }
+        add(resCard, resChoices, top = 6)
+
+        // FPS Card
+        val fpsCard = card(radius = 14f)
+        val fpsHead = row()
+        fpsHead.addView(icon("layers"), LinearLayout.LayoutParams(dp(18), dp(18)))
+        fpsHead.addView(label("FPS (Taxa de Quadros)", 12.5f, true).apply { marginStart(dp(6)) })
+        add(fpsCard, fpsHead)
+        val fpsChoices = row()
+        listOf("30 FPS", "60 FPS").forEach { opt ->
+            weighted(fpsChoices, action(opt, selected = opt == fps, radius = 12f) {
+                fps = opt
+                render()
+            }, 1f, 38, 2)
+        }
+        add(fpsCard, fpsChoices, top = 6)
+
+        if (wide) {
+            val topRow = row()
+            weighted(topRow, resCard, 1f, gap = 2)
+            weighted(topRow, fpsCard, 1f, gap = 2)
+            add(this, topRow, top = 4)
+        } else {
+            add(this, resCard, top = 4)
+            add(this, fpsCard, top = 4)
+        }
+
+        // Bitrate Card
+        val bitrateCard = card(radius = 14f)
+        val bitHead = row()
+        bitHead.addView(icon("broadcast"), LinearLayout.LayoutParams(dp(18), dp(18)))
+        bitHead.addView(label("Bitrate de Vídeo", 12.5f, true).apply { marginStart(dp(6)) })
+        bitHead.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
+        val bitBadge = label("$bitrate Kbps", 11.5f, true).apply {
+            background = TemplateStyle.Panel(density, false, radius = 8f, glow = false)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+        }
+        bitHead.addView(bitBadge)
+        add(bitrateCard, bitHead)
+
+        val bitSeek = customSeekBar(bitrate - 2000, 8000) {
+            bitrate = it + 2000
+            bitBadge.text = "$bitrate Kbps"
+        }
+        add(bitrateCard, bitSeek, 32, top = 6)
+        val bitLimits = row()
+        bitLimits.addView(label("2000 Kbps", 10f, color = TemplateStyle.muted))
+        bitLimits.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
+        bitLimits.addView(label("10000 Kbps", 10f, color = TemplateStyle.muted))
+        add(bitrateCard, bitLimits)
+
+        // Codec Card
+        val codecCard = card(radius = 14f)
+        val codecHead = row()
+        codecHead.addView(icon("gear"), LinearLayout.LayoutParams(dp(18), dp(18)))
+        codecHead.addView(label("Codec de Vídeo", 12.5f, true).apply { marginStart(dp(6)) })
+        add(codecCard, codecHead)
+        val codecSelector = action("H.264     ⌄", radius = 10f) {
+            codec = if (codec == "H.264") "H.265 (HEVC)" else "H.264"
+            toast("Codec selecionado: $codec")
+        }
+        add(codecCard, codecSelector, 38, top = 6)
+
+        if (wide) {
+            val midRow = row()
+            weighted(midRow, bitrateCard, 1.8f, gap = 2)
+            weighted(midRow, codecCard, 1f, gap = 2)
+            add(this, midRow, top = 4)
+        } else {
+            add(this, bitrateCard, top = 4)
+            add(this, codecCard, top = 4)
+        }
+
+        // Audio & Volume Cards
+        val audioCard = card(radius = 14f)
+        val audioHead = row()
+        audioHead.addView(icon("mic"), LinearLayout.LayoutParams(dp(18), dp(18)))
+        audioHead.addView(label("Áudio", 12.5f, true).apply { marginStart(dp(6)) })
+        add(audioCard, audioHead)
+
+        val micRow = row()
+        weighted(micRow, label("Microfone (Áudio Externo)", 11.5f), 1f)
+        micRow.addView(neonToggle(micEnabled) { micEnabled = it })
+        add(audioCard, micRow, 34, top = 4)
+
+        val internalRow = row()
+        weighted(internalRow, label("Áudio Interno (Som do Dispositivo)", 11.5f), 1f)
+        internalRow.addView(neonToggle(internalAudioEnabled) { internalAudioEnabled = it })
+        add(audioCard, internalRow, 34, top = 2)
+
+        val volumeCard = card(radius = 14f)
+        val volumeHead = row()
+        volumeHead.addView(icon("volume"), LinearLayout.LayoutParams(dp(18), dp(18)))
+        volumeHead.addView(label("Volume", 12.5f, true).apply { marginStart(dp(6)) })
+        add(volumeCard, volumeHead)
+
+        val micVolVal = label("$micVolume%", 11f, true)
+        val micVolRow = row()
+        micVolRow.addView(label("Microfone:", 11f, color = TemplateStyle.muted), LinearLayout.LayoutParams(dp(86), -2))
+        weighted(micVolRow, customSeekBar(micVolume, 100) {
+            micVolume = it
+            micVolVal.text = "$it%"
+        }, 1f, 30)
+        micVolRow.addView(micVolVal, LinearLayout.LayoutParams(dp(40), -2))
+        add(volumeCard, micVolRow, top = 3)
+
+        val intVolVal = label("$internalVolume%", 11f, true)
+        val intVolRow = row()
+        intVolRow.addView(label("Áudio Interno:", 11f, color = TemplateStyle.muted), LinearLayout.LayoutParams(dp(86), -2))
+        weighted(intVolRow, customSeekBar(internalVolume, 100) {
+            internalVolume = it
+            intVolVal.text = "$it%"
+        }, 1f, 30)
+        intVolRow.addView(intVolVal, LinearLayout.LayoutParams(dp(40), -2))
+        add(volumeCard, intVolRow, top = 2)
+
+        if (wide) {
+            val lowerRow = row()
+            weighted(lowerRow, audioCard, 1.2f, gap = 2)
+            weighted(lowerRow, volumeCard, 1f, gap = 2)
+            add(this, lowerRow, top = 4)
+        } else {
+            add(this, audioCard, top = 4)
+            add(this, volumeCard, top = 4)
+        }
+
+        // Action Buttons: Restaurar Padrão, Salvar Configurações, Aplicar
+        val footer = row()
+        weighted(footer, action("Restaurar\nPadrão", "refresh", radius = 12f) {
+            resolution = "1080p"
+            streamOrientation = "Horizontal (16:9)"
+            fps = "60 FPS"
+            bitrate = 6000
+            micVolume = 100
+            internalVolume = 100
+            toast("Configurações padrão restauradas.")
+            render()
+        }, 1f, 48, 2)
+
+        weighted(footer, action("Salvar Configurações", "save", selected = true, radius = 14f) {
+            toast("Configurações salvas com sucesso!")
+        }, 1.6f, 48, 2)
+
+        weighted(footer, action("Aplicar", "check", radius = 12f) {
+            toast("Configurações aplicadas à transmissão.")
+        }, 1f, 48, 2)
+
+        add(this, footer, 48, top = 8)
+    }
+
+    // =========================================================================
+    // 3. PLATAFORMAS SCREEN (Images 6 & 7)
+    // =========================================================================
+    private fun platforms(): LinearLayout = column().apply {
+        // Subheader banner: Plataformas de Transmissão
+        val banner = row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(2), dp(4), dp(6))
+        }
+        banner.addView(icon("layers", TemplateStyle.white), LinearLayout.LayoutParams(dp(26), dp(26)))
+        banner.addView(label("Plataformas de Transmissão", 18f, true).apply { marginStart(dp(8)) })
+        banner.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
+
+        val linkBadge = row().apply {
+            background = TemplateStyle.Panel(density, false, radius = 16f, glow = false)
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+        }
+        linkBadge.addView(icon("link", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(16), dp(16)))
+        linkBadge.addView(
+            label("Conexão via RTMP / RTMPS", 10.5f, false, TemplateStyle.muted).apply {
+                marginStart(dp(6))
+            }
+        )
+        banner.addView(linkBadge)
+        add(this, banner)
+
+        // 3 Cards: Twitch, YouTube, Kick
+        val twitchCard = platformCard(
+            name = "Twitch",
+            symbol = "twitch",
+            themeColor = TemplateStyle.twitch,
+            enabled = twitchEnabled,
+            url = "rtmp://live.twitch.tv/app/",
+            keyRevealed = twitchKeyVisible,
+            onToggle = { twitchEnabled = it },
+            onPeek = { twitchKeyVisible = !twitchKeyVisible; render() }
+        )
+
+        val youtubeCard = platformCard(
+            name = "YouTube",
+            symbol = "youtube",
+            themeColor = TemplateStyle.youtube,
+            enabled = youtubeEnabled,
+            url = "rtmps://a.rtmps.youtube.com:443/live2",
+            keyRevealed = youtubeKeyVisible,
+            onToggle = { youtubeEnabled = it },
+            onPeek = { youtubeKeyVisible = !youtubeKeyVisible; render() }
+        )
+
+        val kickCard = platformCard(
+            name = "Kick",
+            symbol = "kick",
+            themeColor = TemplateStyle.kick,
+            enabled = kickEnabled,
+            url = "rtmps://fa723fc63517111e61a2a3b.",
+            keyRevealed = kickKeyVisible,
+            onToggle = { kickEnabled = it },
+            onPeek = { kickKeyVisible = !kickKeyVisible; render() }
+        )
+
+        if (wide) {
+            val list = row()
+            weighted(list, twitchCard, 1f, gap = 2)
+            weighted(list, youtubeCard, 1f, gap = 2)
+            weighted(list, kickCard, 1f, gap = 2)
+            add(this, list, top = 4)
+        } else {
+            add(this, twitchCard, top = 4)
+            add(this, youtubeCard, top = 4)
+            add(this, kickCard, top = 4)
+        }
+    }
+
+    private fun platformCard(
+        name: String,
+        symbol: String,
+        themeColor: Int,
+        enabled: Boolean,
+        url: String,
+        keyRevealed: Boolean,
+        onToggle: (Boolean) -> Unit,
+        onPeek: () -> Unit
+    ): View = card(radius = 16f, borderTint = themeColor).apply {
+        // Platform header: Logo + Name + Status + Switch
+        val head = row()
+        head.addView(icon(symbol, themeColor), LinearLayout.LayoutParams(dp(26), dp(26)))
+        head.addView(label(name, 16f, true).apply { marginStart(dp(8)) })
+
+        val statusPill = row().apply {
+            background = TemplateStyle.Panel(density, false, radius = 10f, glow = false)
+            setPadding(dp(6), dp(2), dp(6), dp(2))
+            marginStart(dp(8))
+        }
+        val statusColor = if (enabled) TemplateStyle.green else TemplateStyle.muted
+        val dot = View(activity).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(statusColor)
+            }
+        }
+        statusPill.addView(dot, LinearLayout.LayoutParams(dp(6), dp(6)))
+        statusPill.addView(label(if (enabled) " Conectado" else " Desconectado", 9.5f, true, statusColor))
+        head.addView(statusPill)
+
+        head.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
+        head.addView(neonToggle(enabled) {
+            onToggle(it)
+            render()
+        })
+        add(this, head)
+
+        // URL Field
+        add(this, label("URL do Servidor (${if (name == "Twitch") "RTMP" else "RTMPS"})", 9.5f, true, TemplateStyle.muted), top = 6)
+        val urlBox = row().apply {
+            background = TemplateStyle.Panel(density, false, radius = 8f, glow = false)
+            setPadding(dp(8), dp(4), dp(4), dp(4))
+        }
+        urlBox.addView(
+            label(url, 11f, color = TemplateStyle.white).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.MIDDLE
+            },
+            LinearLayout.LayoutParams(0, -2, 1f)
+        )
+        urlBox.addView(iconAction("copy", "Copiar URL", radius = 6f) {
+            toast("URL copiada: $url")
+        }, LinearLayout.LayoutParams(dp(32), dp(32)))
+        add(this, urlBox, 36, top = 2)
+
+        // Stream Key Field
+        add(this, label("Stream Key", 9.5f, true, TemplateStyle.muted), top = 4)
+        val keyBox = row().apply {
+            background = TemplateStyle.Panel(density, false, radius = 8f, glow = false)
+            setPadding(dp(8), dp(4), dp(4), dp(4))
+        }
+        val keyDisplay = if (keyRevealed) "live_sk_8928471029841" else "••••••••••••••••"
+        keyBox.addView(
+            label(keyDisplay, 12f, true, TemplateStyle.cyan).apply {
+                maxLines = 1
+            },
+            LinearLayout.LayoutParams(0, -2, 1f)
+        )
+        keyBox.addView(iconAction("eye", "Revelar chave", radius = 6f) {
+            onPeek()
+        }, LinearLayout.LayoutParams(dp(32), dp(32)))
+        add(this, keyBox, 36, top = 2)
+
+        // Card Action Buttons: Testar & Desconectar
+        val btns = row()
+        weighted(btns, action("Testar", "broadcast", selected = true, radius = 10f) {
+            onToggle(true)
+            toast("Testando conexão RTMP em $name...")
+            render()
+        }, 1f, 36, 2)
+        weighted(btns, action("Desconectar", "link", selected = false, radius = 10f) {
+            onToggle(false)
+            toast("$name desconectado.")
+            render()
+        }, 1f, 36, 2)
+        add(this, btns, 36, top = 6)
+    }
+
+    // =========================================================================
+    // 4. CONTROLES SCREEN (Images 8 & 9)
+    // =========================================================================
+    private fun controls(): LinearLayout = column().apply {
+        // Title Banner: Controles
+        val banner = row().apply {
+            gravity = Gravity.CENTER
+            background = TemplateStyle.Panel(density, false, radius = 18f, glow = true)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+        banner.addView(icon("game", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(28), dp(28)))
+        banner.addView(label("Controles", 20f, true).apply { marginStart(dp(10)) })
+        add(this, banner, if (wide) 48 else 52)
+
+        // Hotkeys Card
+        val hotkeys = card(radius = 16f)
+        val hotHead = row()
+        hotHead.addView(icon("keyboard", TemplateStyle.white), LinearLayout.LayoutParams(dp(24), dp(24)))
+        val hotTitles = column()
+        hotTitles.addView(label("Hotkeys", 16f, true))
+        hotTitles.addView(label("Atalhos de cenas, subcenas e ações rápidas", 10f, color = TemplateStyle.muted))
+        weighted(hotHead, hotTitles, 1f, gap = 6)
+        hotHead.addView(iconAction("info", "Informações dos atalhos", radius = 8f) {
+            toast("Hotkeys configuráveis pelo teclado ou toque.")
+        }, LinearLayout.LayoutParams(dp(34), dp(34)))
+        add(hotkeys, hotHead)
+
+        // Hotkey Scene Buttons Grid
+        val buttonList = column()
+        val buttons = mutableListOf<View>()
+        buttons.add(sceneButton("refresh", "Reload", selected = true) {
+            toast("Cena recarregada.")
+        })
+        buttons.add(sceneButton("plus", "Adicionar\ncenário", selected = false) {
+            addedSceneCount++
+            toast("Novo cenário adicionado.")
+            render()
+        })
+        for (i in 1..addedSceneCount) {
+            buttons.add(sceneButton("video", "Cena $i", selected = false) {
+                toast("Alternando para Cena $i")
             })
         }
-        weighted(input,field,3f,48,0);weighted(input,action("Ler","play",true),1f,48,0);add(this,input,top=3)
-        val duck=row();weighted(duck,label("Ducking (reduzir áudio da mídia)",10f));duck.addView(label("-12 dB",11f,true))
-        add(this,duck,27,3)
-    }
-    private fun toggle(checked:Boolean,changed:(Boolean)->Unit):Switch = Switch(activity).apply {
-        isChecked=checked;showText=false;minimumHeight=dp(28)
-        thumbTintList=ColorStateList.valueOf(TemplateStyle.white)
-        trackTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(TemplateStyle.cyan,0xff35304b.toInt()))
-        setOnCheckedChangeListener { _,value -> changed(value) }
-    }
-    private fun bots():View=card().apply {
-        sectionHeader(this,"Bots (Chat)","bot","Controle dos bots do chat nas plataformas")
-        val list=row()
-        listOf("Twitch","Kick","YouTube").forEach { name ->
-            val item=row().apply { background=TemplateStyle.Panel(density,radius=8f,glow=false);setPadding(dp(5),dp(8),dp(5),dp(8)) }
-            item.addView(icon(name.lowercase()),LinearLayout.LayoutParams(dp(19),dp(24)))
-            val words=column();add(words,label(name,10f,true));add(words,label("Bot do chat",8f),top=2)
-            weighted(item,words,gap=2)
-            item.addView(toggle(false){unavailable()}.apply{scaleX=.8f;scaleY=.8f},LinearLayout.LayoutParams(dp(33),dp(28)))
-            weighted(list,item,gap=2)
-        };add(this,list,top=6)
-    }
-    private fun integrations():View=card().apply {
-        val content=if(wide)row() else column()
-        val heading=column();sectionHeader(heading,"Integrações","link","Serviços e integrações conectados")
-        val list=column()
-        listOf("OBS (WebSocket)","StreamElements","Streamlabs").forEach { name ->
-            val item=action("$name     ›","link")
-            add(list,item,48,2)
-        }
-        if(wide){weighted(content,heading,1f);weighted(content,list,2f)}else{add(content,heading);add(content,list,top=5)}
-        add(this,content)
-    }
 
-    private fun choices(title:String,symbol:String,options:List<String>,value:String,changed:(String)->Unit):View=card(prominent=false).apply {
-        val head=row();head.addView(icon(symbol),LinearLayout.LayoutParams(dp(19),dp(19)));weighted(head,label(title,12f,true));add(this,head)
-        val optionsRow=row()
-        options.forEach { option -> weighted(optionsRow,action(option,selected=option==value) { rememberScroll();changed(option);render() },height=48,gap=1) }
-        add(this,optionsRow,top=3)
-    }
-    private fun volumeRow(name:String,value:Int,changed:(Int)->Unit):View=row().apply {
-        if(name.isNotEmpty())addView(label(name,10f),LinearLayout.LayoutParams(dp(68),-2))
-        else addView(icon("volume"),LinearLayout.LayoutParams(dp(20),dp(20)))
-        val number=label("$value%",10f,true)
-        val seek=seek(value,100) { number.text="$it%";changed(it) }
-        weighted(this,seek,height=29,gap=0);addView(number,LinearLayout.LayoutParams(dp(36),-2))
-    }
-    private fun seek(value:Int,maximum:Int,changed:(Int)->Unit):SeekBar=SeekBar(activity).apply {
-        max=maximum;progress=value;progressTintList=ColorStateList.valueOf(TemplateStyle.pink)
-        thumbTintList=ColorStateList.valueOf(TemplateStyle.white)
-        setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s:SeekBar?,p:Int,fromUser:Boolean) {if(fromUser)changed(p)}
-            override fun onStartTrackingTouch(s:SeekBar?) {}
-            override fun onStopTrackingTouch(s:SeekBar?) {}
-        })
-    }
-    private fun encoder():LinearLayout=column().apply {
-        // Configurações: tela própria, sem navegação inferior. Voltar fica no cabeçalho.
-        val content=row().apply { gravity=Gravity.TOP }
-        if(wide) {
-            val side=card(radius=5f)
-            listOf("Configurações" to "gear","Vídeo" to "screen","Áudio" to "mic",
-                "Avançado" to "gear","Pré-visualização" to "eye").forEachIndexed { index,item ->
-                add(side,action(item.first,item.second,index==0),45,3)
+        val columns = if (wide) ((availableWidth / density - 60f) / 95f).toInt().coerceAtLeast(3)
+        else if (availableWidth / density < 340f) 2 else 3
+
+        buttons.chunked(columns).forEach { group ->
+            val gridLine = row().apply { gravity = Gravity.START }
+            group.forEach { b ->
+                gridLine.addView(b, LinearLayout.LayoutParams(dp(82), dp(78)).apply {
+                    marginEnd = dp(8)
+                })
             }
-            content.addView(side,LinearLayout.LayoutParams(dp(165),-2))
+            add(buttonList, gridLine, 78, top = 8)
         }
-        val main=card(radius=5f)
-        val heading=row()
-        heading.addView(icon("gear",TemplateStyle.white),LinearLayout.LayoutParams(dp(30),dp(30)))
-        weighted(heading,label("Configurações",20f,true),gap=6)
-        heading.addView(action("Configuração de\nVídeo e Áudio","video"),
-            LinearLayout.LayoutParams(dp(145),dp(48)))
-        add(main,heading,52)
 
-        val res=choices("Resolução","screen",listOf("720p","1080p"),resolution){resolution=it}
-        if(!wide) add(main,res,top=5)
-        val orient=choices("Orientação","copy",listOf("Horizontal (16:9)","Vertical (9:16)"),streamOrientation){streamOrientation=it}
-        if(!wide) add(main,orient,top=4)
-        val frames=choices("FPS (Taxa de Quadros)","layers",listOf("30 FPS","60 FPS"),fps){fps=it}
-        if(wide) {
-            val top=row().apply {gravity=Gravity.TOP}
-            weighted(top,res,1f,gap=1)
-            weighted(top,orient,1.2f,gap=1)
-            weighted(top,frames,1f,gap=1)
-            add(main,top,top=4)
-        } else add(main,frames,top=4)
+        val scroller = ScrollView(activity).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(buttonList)
+        }
+        hotkeys.addView(scroller, LinearLayout.LayoutParams(-1, 0, 1f))
+        addView(hotkeys, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(8) })
 
-        val rate=card(radius=5f,prominent=false)
-        sectionHeader(rate,"Bitrate de Vídeo","broadcast")
-        val rateRow=row()
-        val bitrateLabel=label("$bitrate Kbps",12f,true)
-        weighted(rateRow,seek(bitrate-2000,8000){
-            bitrate=it+2000
-            bitrateLabel.text="$bitrate Kbps"
-        },height=33)
-        rateRow.addView(bitrateLabel,LinearLayout.LayoutParams(dp(85),-2))
-        add(rate,rateRow,top=3)
-        val limits=row()
-        weighted(limits,label("2000 Kbps",10f))
-        limits.addView(label("10000 Kbps",10f))
-        add(rate,limits)
-        if(!wide) add(main,rate,top=4)
+        // Player (Mídia) Card at Bottom
+        val player = card(radius = 16f)
+        val mediaBar = row()
 
-        val codec=card(radius=5f,prominent=false)
-        sectionHeader(codec,"Codec de Vídeo","grid")
-        add(codec,action("H.264     ⌄"),44,3)
-        if(wide) {
-            val middle=row().apply {gravity=Gravity.TOP}
-            weighted(middle,rate,1.8f,gap=1)
-            weighted(middle,codec,1f,gap=1)
-            add(main,middle,top=4)
-        } else add(main,codec,top=4)
+        // Equalizer Cover art
+        val cover = FrameLayout(activity).apply {
+            background = TemplateStyle.Panel(density, true, radius = 10f, glow = false)
+            addView(icon("music", TemplateStyle.white), FrameLayout.LayoutParams(dp(26), dp(26), Gravity.CENTER))
+        }
+        mediaBar.addView(cover, LinearLayout.LayoutParams(dp(44), dp(44)))
 
-        val audio=card(radius=5f,prominent=false)
-        sectionHeader(audio,"Áudio","mic")
-        val external=row()
-        weighted(external,label("Microfone (Áudio Externo)",11f))
-        external.addView(toggle(mic){mic=it})
-        add(audio,external,38,3)
-        val internal=row()
-        weighted(internal,label("Áudio Interno (Som do Dispositivo)",11f))
-        internal.addView(toggle(internalAudio){internalAudio=it})
-        add(audio,internal,38,2)
-        if(!wide) add(main,audio,top=4)
+        // Empty space (sem escrita nenhuma)
+        mediaBar.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
 
-        val volume=card(radius=5f,prominent=false)
-        sectionHeader(volume,"Volume","volume")
-        add(volume,volumeRow("Microfone:",micVolume){micVolume=it},top=5)
-        add(volume,volumeRow("Áudio Interno:",internalVolume){internalVolume=it},top=5)
-        if(wide) {
-            val lower=row().apply {gravity=Gravity.TOP}
-            weighted(lower,audio,1.25f,gap=1)
-            weighted(lower,volume,1f,gap=1)
-            add(main,lower,top=4)
-        } else add(main,volume,top=4)
-        weighted(content,main,1f,gap=2)
-        add(this,content)
+        // Volume slider
+        val volSeek = customSeekBar(playerVolume, 100) {
+            playerVolume = it
+        }
+        mediaBar.addView(icon("volume", TemplateStyle.white), LinearLayout.LayoutParams(dp(18), dp(18)))
+        mediaBar.addView(volSeek, LinearLayout.LayoutParams(dp(if (wide) 140 else 90), dp(28)).apply {
+            marginStart = dp(4)
+            marginEnd = dp(4)
+        })
+        val volLabel = label("$playerVolume%", 10.5f, true)
+        mediaBar.addView(volLabel, LinearLayout.LayoutParams(dp(36), -2))
 
-        // Estes três botões pertencem à página, não à barra de menu do aplicativo.
-        val footer=row()
-        weighted(footer,action("Restaurar\nPadrão","refresh") {
-            resolution="1080p"
-            streamOrientation="Horizontal (16:9)"
-            fps="60 FPS"
-            bitrate=6000
-            mic=true
-            internalAudio=true
-            micVolume=100
-            internalVolume=100
-            rememberScroll()
+        // Transport Controls: Prev, Pause/Play, Next
+        val controlsGroup = row()
+        controlsGroup.addView(iconAction("prev_track", "Anterior", radius = 8f) {
+            toast("Faixa anterior.")
+        }, LinearLayout.LayoutParams(dp(36), dp(36)))
+
+        val playPause = action("", if (playerPlaying) "pause" else "play", selected = true, radius = 10f) {
+            playerPlaying = !playerPlaying
             render()
-        },height=62,gap=1)
-        weighted(footer,action("Salvar\nConfigurações","save",true),1.4f,62,1)
-        weighted(footer,action("Aplicar","check"),height=62,gap=1)
-        add(this,footer,62,top=12)
-    }
-
-    private fun platforms():LinearLayout=column().apply {
-        val content=row().apply {gravity=Gravity.TOP}
-        if(wide) {
-            val side=card(radius=5f)
-            listOf(Triple("Configuração","gear","encoder"),Triple("Plataformas","layers","platforms"),
-                Triple("Transmissão","broadcast","transmission"),Triple("Visualização","screen","transmission"),
-                Triple("Cenário / Overlay","layers","editor")).forEach { (name,symbol,dest) ->
-                add(side,action(name,symbol,dest==page){navigate(dest)},45,3)
-            }
-            content.addView(side,LinearLayout.LayoutParams(dp(185),-2))
         }
-        val main=column()
-        val heading=row()
-        heading.addView(icon("layers",TemplateStyle.white),LinearLayout.LayoutParams(dp(24),dp(24)))
-        weighted(heading,label("Plataformas de Transmissão",if(wide)17f else 16f,true),gap=4)
-        if(wide) {
-            val titleRow=row()
-            weighted(titleRow,heading,1f,gap=0)
-            titleRow.addView(action("Conexão via RTMP / RTMPS","link"),
-                LinearLayout.LayoutParams(dp(220),dp(38)))
-            add(main,titleRow,43)
-        } else {
-            add(main,heading,34)
-            add(main,action("Conexão via RTMP / RTMPS","link"),36,2)
-        }
-        val items=if(wide)row().apply {gravity=Gravity.TOP} else column()
-        listOf("Twitch","YouTube","Kick").forEach { name ->
-            if(wide) weighted(items,platform(name),gap=1)
-            else add(items,platform(name),top=3)
-        }
-        add(main,items,top=3)
-        weighted(content,main)
-        add(this,content)
-        val startButton=action("Iniciar Transmissão em Todas","broadcast",true)
-        val updateButton=action("Atualizar Conexões","refresh")
-        val stopButton=action("Encerrar Todas","stop")
-        if(wide) {
-            val footer=row()
-            weighted(footer,updateButton,1f,44,1)
-            weighted(footer,startButton,1.7f,44,1)
-            weighted(footer,stopButton,1f,44,1)
-            add(this,footer,44,top=5)
-        } else {
-            add(this,startButton,44,top=5)
-            val footer=row()
-            weighted(footer,updateButton,1f,42,1)
-            weighted(footer,stopButton,1f,42,1)
-            add(this,footer,42,top=3)
-        }
-    }
-
-    private fun platform(name:String):View=card(radius=5f).apply {
-        setPadding(dp(8),dp(6),dp(8),dp(7))
-        val heading=row()
-        heading.addView(icon(name.lowercase()),LinearLayout.LayoutParams(dp(26),dp(26)))
-        weighted(heading,label(name,16f,true),gap=3)
-        val status=label("Não conectado",9f,true).apply {
-            setTextColor(TemplateStyle.muted)
-        }
-        heading.addView(status)
-        heading.addView(toggle(false){unavailable()})
-        add(this,heading,31)
-        add(this,label("URL do Servidor (RTMP / RTMPS)",9f,true),top=3)
-        add(this,action("Configuração não disponível","copy"),34,1)
-        add(this,label("Stream Key",9f,true),top=3)
-        add(this,action("Não configurada","eye"),34,1)
-        val buttons=row()
-        weighted(buttons,action("Testar","broadcast",true),1f,38,1)
-        weighted(buttons,action("Conectar","link"),1f,38,1)
-        add(this,buttons,38,top=4)
-    }
-
-    private fun editor():LinearLayout=column().apply {
-        val workspace=row().apply {
-            gravity=Gravity.TOP
-            clipChildren=true
-            clipToPadding=true
-        }
-        val sidebar=column().apply {
-            background=TemplateStyle.Panel(density,radius=0f,glow=false)
-            setPadding(dp(3),dp(4),dp(3),dp(4))
-        }
-        listOf("cursor","move","text","image","video","layers","trash").forEach { key ->
-            val item=action("",key,editorMode==key) {
-                when(key) {
-                    "cursor","move" -> {editorMode=key;render()}
-                    else -> unavailable()
-                }
-            }
-            item.contentDescription=key
-            add(sidebar,item,40,2)
-        }
-        workspace.addView(sidebar,LinearLayout.LayoutParams(dp(53),-1))
-        val center=column().apply {
-            setPadding(dp(5),dp(4),dp(5),dp(4))
-            gravity=Gravity.CENTER_VERTICAL
-        }
-        val previewBox=FrameLayout(activity)
-        val preview=editorPreview()
-        previewBox.addView(preview,FrameLayout.LayoutParams(-1,-1,Gravity.CENTER))
-        center.addView(previewBox,LinearLayout.LayoutParams(-1,0,1f))
-        val footer=row()
-        footer.addView(label("Ajuste do canvas",10f),LinearLayout.LayoutParams(0,-2,1f))
-        val compactFooter=availableWidth/density<750f
-        footer.addView(label(if(compactFooter)"16:9" else "1920 x 1080 (16:9)",10f,true),
-            LinearLayout.LayoutParams(dp(if(compactFooter)42 else 145),-2))
-        footer.addView(iconAction("back","Diminuir zoom") {zoom=maxOf(10,zoom-10);render()},LinearLayout.LayoutParams(dp(if(compactFooter)30 else 36),dp(if(compactFooter)30 else 36)))
-        footer.addView(label("$zoom%",10f).apply {gravity=Gravity.CENTER},
-            LinearLayout.LayoutParams(dp(if(compactFooter)34 else 44),-2))
-        footer.addView(iconAction("next","Aumentar zoom") {zoom=minOf(200,zoom+10);render()},LinearLayout.LayoutParams(dp(36),dp(36)))
-        footer.addView(iconAction("expand","Tela cheia") {showExpandedPreview()},LinearLayout.LayoutParams(dp(36),dp(36)))
-        add(center,footer,40,2)
-        workspace.addView(center,LinearLayout.LayoutParams(0,-1,1f))
-        val elements=column().apply {
-            background=TemplateStyle.Panel(density,radius=0f,glow=false)
-            setPadding(dp(5),dp(5),dp(5),dp(5))
-            clipChildren=true
-            clipToPadding=true
-        }
-        sectionHeader(elements,"Elementos","layers")
-        val filters=row()
-        listOf("Todos","Cenas","Overlays").forEach { value ->
-            weighted(filters,action(value,selected=filter==value) {filter=value;render()},height=31,gap=0)
-        }
-        add(elements,filters,34,3)
-        val search=EditText(activity).apply {
-            hint="Buscar elemento..."
-            setSingleLine(true)
-            textSize=10f
-            setTextColor(TemplateStyle.white)
-            setHintTextColor(TemplateStyle.muted)
-            background=TemplateStyle.Panel(density,radius=4f,glow=false)
-        }
-        add(elements,search,37,4)
-        val elementItems=column()
-        listOf("Texto" to "text","Imagem" to "image","Vídeo / Fonte" to "video",
-            "Alertas" to "bell","Widgets" to "grid","Mídia Social" to "share",
-            "Formas" to "shape","Cenas Salvas" to "folder").forEach { (name,symbol) ->
-            add(elementItems,action("$name    ›",symbol),37,2)
-        }
-        val scroll=ScrollView(activity).apply {
-            isVerticalScrollBarEnabled=false
-            isFillViewport=false
-            isVerticalFadingEdgeEnabled=false
-            isNestedScrollingEnabled=false
-            overScrollMode=View.OVER_SCROLL_NEVER
-            clipChildren=true
-            clipToPadding=true
-            addView(elementItems,FrameLayout.LayoutParams(-1,-2))
-        }
-        val rightListViewport=FrameLayout(activity).apply {
-            clipChildren=true
-            clipToPadding=true
-            addView(scroll,FrameLayout.LayoutParams(-1,-1))
-        }
-        elements.addView(rightListViewport,LinearLayout.LayoutParams(-1,0,1f))
-        add(elements,action("Voltar","back",true).apply {
-            background=TemplateStyle.Panel(density,true,radius=4f,glow=false)
-            setOnClickListener {navigate("transmission")}
-        },42,4)
-        val rightViewport=FrameLayout(activity).apply {
-            clipChildren=true
-            clipToPadding=true
-            addView(elements,FrameLayout.LayoutParams(-1,-1))
-        }
-        val rightWidthDp=(availableWidth/density*.26f).coerceIn(140f,184f)
-        workspace.addView(rightViewport,LinearLayout.LayoutParams(dp(rightWidthDp),-1))
-        addView(workspace,LinearLayout.LayoutParams(-1,-1))
-    }
-
-    private fun positionEditorArtwork(frame:View) {
-        val element=editorArtwork ?: return
-        val freeX=(frame.width-element.width).coerceAtLeast(0)
-        val freeY=(frame.height-element.height).coerceAtLeast(0)
-        element.translationX=(editorPositionX-.5f)*freeX
-        element.translationY=(editorPositionY-.5f)*freeY
-        val zoomScale=zoom/66f
-        element.scaleX=zoomScale
-        element.scaleY=zoomScale
-    }
-
-    private fun editorPreview(): View {
-        val frame=SixteenByNine(activity)
-        frame.background=TemplateStyle.Backdrop()
-        val artwork=TemplateStyle.Brand(activity,"")
-        frame.addView(artwork,FrameLayout.LayoutParams(-1,-1).apply {
-            leftMargin=dp(25);rightMargin=dp(25);topMargin=dp(18);bottomMargin=dp(18)
+        controlsGroup.addView(playPause, LinearLayout.LayoutParams(dp(42), dp(42)).apply {
+            marginStart = dp(4)
+            marginEnd = dp(4)
         })
-        editorArtwork=artwork
-        if(editorTab!="Visualizar") frame.foreground=SelectionBorder(density,editorLocked)
-        frame.isClickable=true
-        var previousX=0f
-        var previousY=0f
-        frame.setOnTouchListener { target,event ->
-            if(editorLocked || editorMode!="move" || editorTab=="Visualizar") {
-                false
+
+        controlsGroup.addView(iconAction("next_track", "Próxima", radius = 8f) {
+            toast("Próxima faixa.")
+        }, LinearLayout.LayoutParams(dp(36), dp(36)))
+
+        mediaBar.addView(controlsGroup)
+        add(player, mediaBar)
+        add(this, player, top = 8)
+    }
+
+    private fun sceneButton(symbol: String, title: String, selected: Boolean, click: () -> Unit): View =
+        column().apply {
+            gravity = Gravity.CENTER
+            background = TemplateStyle.Panel(density, selected, radius = 12f, glow = selected)
+            isClickable = true
+            isFocusable = true
+            contentDescription = title.replace("\n", " ")
+            setOnClickListener { click() }
+
+            if (symbol == "plus") {
+                addView(label("+", 28f, true, TemplateStyle.cyan).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, dp(34)))
             } else {
-                when(event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        previousX=event.x;previousY=event.y
-                        target.parent?.requestDisallowInterceptTouchEvent(true)
-                        true
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        val element=editorArtwork
-                        if(element!=null) {
-                            val freeX=(frame.width-element.width).coerceAtLeast(1)
-                            val freeY=(frame.height-element.height).coerceAtLeast(1)
-                            editorPositionX=(editorPositionX+(event.x-previousX)/freeX).coerceIn(0f,1f)
-                            editorPositionY=(editorPositionY+(event.y-previousY)/freeY).coerceIn(0f,1f)
-                            positionEditorArtwork(frame)
+                addView(icon(symbol, if (selected) TemplateStyle.white else TemplateStyle.magenta), LinearLayout.LayoutParams(dp(28), dp(28)))
+            }
+            addView(label(title, 10.5f, true).apply {
+                gravity = Gravity.CENTER
+                maxLines = 2
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
+        }
+
+    // =========================================================================
+    // 5. EDITOR DE CENÁRIO / OVERLAY (Image 4)
+    // =========================================================================
+    private fun editorHeader(): View = row().apply {
+        addView(TemplateStyle.Brand(activity, ""), LinearLayout.LayoutParams(dp(140), dp(46)))
+        addView(label("│  Editor de Cenário / Overlay", 12.5f, true).apply {
+            marginStart(dp(6))
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+
+        addView(iconAction("back", "Desfazer", radius = 8f) { toast("Desfazer") }, LinearLayout.LayoutParams(dp(36), dp(36)))
+        addView(iconAction("refresh", "Refazer", radius = 8f) { toast("Refazer") }, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(4) })
+        addView(action("Visualizar", "eye", radius = 10f) { showExpandedPreview() }, LinearLayout.LayoutParams(dp(100), dp(38)).apply { marginStart = dp(6) })
+        addView(action("Salvar", "save", selected = true, radius = 10f) { toast("Cenário salvo!") }, LinearLayout.LayoutParams(dp(86), dp(38)).apply { marginStart = dp(6) })
+    }
+
+    private fun editor(): LinearLayout = column().apply {
+        val workspace = row().apply {
+            gravity = Gravity.TOP
+            clipChildren = true
+            clipToPadding = true
+        }
+
+        // Left Vertical Tool Panel: Somente o botão de cima (cursor), Captura de Tela (screen), Browser Source (browser) e Widgets (grid)
+        val toolbar = column().apply {
+            background = TemplateStyle.Panel(density, false, radius = 0f, glow = false)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+        val tools = listOf(
+            "cursor" to "Seleção",
+            "screen" to "Captura de Tela",
+            "browser" to "Browser Source",
+            "grid" to "Widgets"
+        )
+        tools.forEach { (tool, desc) ->
+            val isCurrent = editorMode == tool
+            val btn = action("", tool, selected = isCurrent, radius = 8f) {
+                editorMode = tool
+                editorTab = "Todos"
+                render()
+            }
+            btn.contentDescription = desc
+            add(toolbar, btn, 38, top = 2)
+        }
+        workspace.addView(toolbar, LinearLayout.LayoutParams(dp(52), -1))
+
+        // Center Area: Overlay Canvas (Blank by default, receives adjustable elements)
+        val center = column().apply {
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val previewBox = FrameLayout(activity)
+        val preview = editorCanvasMockup()
+        previewBox.addView(preview, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
+        center.addView(previewBox, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        // Quick Element Adjustment Bar (appears when an element is selected)
+        val selElem = getSelectedElement()
+        if (selElem != null) {
+            val adjustBar = row().apply {
+                gravity = Gravity.CENTER_VERTICAL
+                background = TemplateStyle.Panel(density, false, radius = 6f, glow = false)
+                setPadding(dp(8), dp(3), dp(8), dp(3))
+            }
+            adjustBar.addView(
+                label("Ajustar '${selElem.title}':", 9.5f, true, TemplateStyle.cyan),
+                LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) }
+            )
+            adjustBar.addView(action("Tela Cheia", "expand", radius = 6f) {
+                adjustSelected("fullscreen")
+            }, LinearLayout.LayoutParams(-2, dp(28)).apply { marginEnd = dp(4) })
+
+            adjustBar.addView(action("Centralizar", "move", radius = 6f) {
+                adjustSelected("center")
+            }, LinearLayout.LayoutParams(-2, dp(28)).apply { marginEnd = dp(4) })
+
+            adjustBar.addView(action("＋", "", radius = 6f) {
+                adjustSelected("grow")
+            }, LinearLayout.LayoutParams(dp(30), dp(28)).apply { marginEnd = dp(4) })
+
+            adjustBar.addView(action("－", "", radius = 6f) {
+                adjustSelected("shrink")
+            }, LinearLayout.LayoutParams(dp(30), dp(28)).apply { marginEnd = dp(4) })
+
+            adjustBar.addView(action("Remover", "trash", radius = 6f) {
+                removeSelectedElement()
+            }, LinearLayout.LayoutParams(-2, dp(28)))
+
+            add(center, adjustBar, 32, top = 3)
+        }
+
+        // Bottom Canvas Adjustment Bar
+        val footer = row().apply {
+            setPadding(dp(6), dp(2), dp(6), dp(2))
+        }
+        footer.addView(label("Ajuste do canvas", 10.5f, color = TemplateStyle.muted), LinearLayout.LayoutParams(-2, -2))
+        val isVerticalCanvas = streamOrientation == "Vertical (9:16)"
+        val canvasRatioText = if (isVerticalCanvas) "1080 x 1920 (9:16) ⌄" else "1920 x 1080 (16:9) ⌄"
+        footer.addView(
+            label(canvasRatioText, 10.5f, true).apply {
+                background = TemplateStyle.Panel(density, false, radius = 6f, glow = false)
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                marginStart(dp(10))
+                isClickable = true
+                setOnClickListener {
+                    streamOrientation = if (isVerticalCanvas) "Horizontal (16:9)" else "Vertical (9:16)"
+                    render()
+                }
+            }
+        )
+
+        // Botão ao lado do Ajuste do canvas (visível quando a Captura de Tela está acionada e selecionada)
+        // Muda somente a Captura de Tela entre 16:9 e 9:16
+        if (selElem != null && selElem.type == "screen_capture") {
+            val isVertCap = selElem.aspectRatio == "9:16"
+            val capBtnLabel = if (isVertCap) "Captura: 9:16 ⇄ 16:9" else "Captura: 16:9 ⇄ 9:16"
+            val capRatioBtn = action(capBtnLabel, "screen", selected = isVertCap, radius = 6f) {
+                if (selElem.aspectRatio == "16:9") {
+                    selElem.aspectRatio = "9:16"
+                    selElem.width = 0.34f
+                    selElem.height = 0.84f
+                    selElem.x = 0.33f
+                    selElem.y = 0.08f
+                    toast("Captura de Tela alterada para 9:16 (Vertical)")
+                } else {
+                    selElem.aspectRatio = "16:9"
+                    selElem.width = 0.80f
+                    selElem.height = 0.80f
+                    selElem.x = 0.10f
+                    selElem.y = 0.10f
+                    toast("Captura de Tela alterada para 16:9 (Horizontal)")
+                }
+                render()
+            }
+            capRatioBtn.setPadding(dp(8), dp(2), dp(8), dp(2))
+            footer.addView(capRatioBtn, LinearLayout.LayoutParams(-2, dp(30)).apply {
+                marginStart = dp(8)
+            })
+        }
+
+        footer.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
+        footer.addView(iconAction("back", "Diminuir zoom", radius = 6f) {
+            zoom = maxOf(20, zoom - 10)
+            render()
+        }, LinearLayout.LayoutParams(dp(32), dp(32)))
+        footer.addView(label("$zoom%", 10.5f, true).apply {
+            gravity = Gravity.CENTER
+            width = dp(46)
+        })
+        footer.addView(iconAction("next", "Aumentar zoom", radius = 6f) {
+            zoom = minOf(200, zoom + 10)
+            render()
+        }, LinearLayout.LayoutParams(dp(32), dp(32)))
+        footer.addView(iconAction("expand", "Tela cheia", radius = 6f) {
+            showExpandedPreview()
+        }, LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginStart = dp(6) })
+
+        add(center, footer, 38, top = 2)
+        workspace.addView(center, LinearLayout.LayoutParams(0, -1, 1f))
+
+        // Right Sidebar: Elementos
+        val elements = column().apply {
+            background = TemplateStyle.Panel(density, false, radius = 0f, glow = false)
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }
+
+        val elHead = row()
+        elHead.addView(icon("layers", TemplateStyle.white), LinearLayout.LayoutParams(dp(20), dp(20)))
+        elHead.addView(label("Elementos", 14f, true).apply { marginStart(dp(6)) })
+        add(elements, elHead)
+
+        // Tabs: Todos, Cenas, Camadas
+        val tabsRow = row()
+        listOf("Todos", "Cenas", "Camadas").forEach { tab ->
+            weighted(tabsRow, action(tab, selected = editorTab == tab, radius = 8f) {
+                editorTab = tab
+                render()
+            }, 1f, 30, 1)
+        }
+        add(elements, tabsRow, 32, top = 4)
+
+        // Container FIXO na lateral direita entre os botões Todos | Cenas | Camadas e o botão Voltar
+        // O container permanece fixo e os elementos rolam somente dentro dele
+        val fixedContainer = FrameLayout(activity).apply {
+            background = TemplateStyle.Panel(density, false, radius = 0f, glow = false)
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            clipChildren = true
+            clipToPadding = true
+        }
+
+        val dynamicContent = column()
+        populateDynamicContainer(dynamicContent)
+
+        val elScroll = ScrollView(activity).apply {
+            isVerticalScrollBarEnabled = true
+            isFillViewport = false
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            clipChildren = true
+            clipToPadding = true
+            addView(dynamicContent, FrameLayout.LayoutParams(-1, -2))
+        }
+        fixedContainer.addView(elScroll, FrameLayout.LayoutParams(-1, -1))
+
+        elements.addView(fixedContainer, LinearLayout.LayoutParams(-1, 0, 1f).apply {
+            topMargin = dp(6)
+            bottomMargin = dp(6)
+        })
+
+        // Bottom Voltar button
+        add(elements, action("Voltar", "back", selected = true, radius = 10f) {
+            navigate("transmission")
+        }, 40, top = 4)
+
+        val rightWidth = (availableWidth * 0.28f).coerceIn(dp(150).toFloat(), dp(210).toFloat()).toInt()
+        workspace.addView(elements, LinearLayout.LayoutParams(rightWidth, -1))
+
+        addView(workspace, LinearLayout.LayoutParams(-1, -1))
+    }
+
+    /**
+     * Populates the scrollable list inside the fixed right sidebar container
+     * based on which tool/menu is currently selected on the left vertical toolbar.
+     */
+    private fun populateDynamicContainer(box: LinearLayout) {
+        if (editorTab == "Cenas") {
+            val head = row().apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(2), dp(2), dp(2), dp(6))
+            }
+            head.addView(icon("video", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(18), dp(18)))
+            head.addView(label("Cenas do Projeto", 11.5f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
+            add(box, head)
+
+            val sceneItem = row().apply {
+                background = TemplateStyle.Panel(density, true, radius = 6f, glow = true)
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                addView(icon("video", TemplateStyle.white), LinearLayout.LayoutParams(dp(18), dp(18)))
+                val col = column().apply { marginStart(dp(6)) }
+                col.addView(label("Cena 1 (Principal)", 10f, true))
+                col.addView(label("1920x1080 • Ao Vivo", 8.5f, false, TemplateStyle.muted))
+                addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+                addView(label("● ATIVA", 8.5f, true, TemplateStyle.green))
+            }
+            add(box, sceneItem, top = 4)
+            return
+        }
+
+        if (editorTab == "Camadas") {
+            val head = row().apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(2), dp(2), dp(2), dp(6))
+            }
+            head.addView(icon("layers", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(18), dp(18)))
+            head.addView(label("Camadas (${canvasElements.size})", 11.5f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
+            add(box, head)
+
+            if (canvasElements.isEmpty()) {
+                val emptyBox = column().apply {
+                    background = TemplateStyle.Panel(density, false, radius = 6f, glow = false)
+                    setPadding(dp(8), dp(12), dp(8), dp(12))
+                    addView(label("Nenhuma camada no cenário", 9.5f, true, TemplateStyle.subtext))
+                    addView(label("Selecione Captura de Tela, Browser Source ou Widgets à esquerda.", 8.5f, false, TemplateStyle.muted).apply {
+                        setPadding(0, dp(4), 0, 0)
+                    })
+                }
+                add(box, emptyBox, top = 4)
+            } else {
+                canvasElements.forEach { elem ->
+                    val layerRow = row().apply {
+                        gravity = Gravity.CENTER_VERTICAL
+                        background = TemplateStyle.Panel(density, elem.isSelected, radius = 6f, glow = elem.isSelected)
+                        setPadding(dp(6), dp(4), dp(6), dp(4))
+                        isClickable = true
+                        setOnClickListener {
+                            canvasElements.forEach { it.isSelected = (it.id == elem.id) }
+                            selectedElementId = elem.id
+                            render()
                         }
-                        previousX=event.x;previousY=event.y
-                        true
                     }
-                    MotionEvent.ACTION_UP,MotionEvent.ACTION_CANCEL -> {
-                        target.parent?.requestDisallowInterceptTouchEvent(false)
-                        if(event.actionMasked==MotionEvent.ACTION_UP) target.performClick()
-                        true
+                    layerRow.addView(
+                        icon(
+                            when (elem.type) {
+                                "screen_capture" -> "screen"
+                                "browser" -> "browser"
+                                "widget" -> "grid"
+                                else -> "layers"
+                            },
+                            if (elem.isSelected) TemplateStyle.white else TemplateStyle.cyan
+                        ),
+                        LinearLayout.LayoutParams(dp(16), dp(16))
+                    )
+                    layerRow.addView(
+                        label(elem.title, 9f, elem.isSelected).apply {
+                            marginStart(dp(4))
+                            maxLines = 1
+                        },
+                        LinearLayout.LayoutParams(0, -2, 1f)
+                    )
+                    layerRow.addView(iconAction("trash", "Remover", radius = 4f) {
+                        canvasElements.remove(elem)
+                        if (selectedElementId == elem.id) selectedElementId = canvasElements.lastOrNull()?.id
+                        canvasElements.lastOrNull()?.isSelected = true
+                        toast("Elemento removido.")
+                        render()
+                    }, LinearLayout.LayoutParams(dp(22), dp(22)))
+                    add(box, layerRow, 30, top = 2)
+                }
+            }
+            return
+        }
+
+        // Helper to build a sleek Image-4 style element row inside the fixed container
+        fun elementRow(title: String, subtitle: String, iconName: String, isActive: Boolean = false, onAddToEditor: () -> Unit) {
+            val item = row().apply {
+                gravity = Gravity.CENTER_VERTICAL
+                background = TemplateStyle.Panel(density, isActive, radius = 8f, glow = isActive)
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                isClickable = true
+                setOnClickListener { onAddToEditor() }
+            }
+            item.addView(
+                icon(iconName, if (isActive) TemplateStyle.white else TemplateStyle.cyan),
+                LinearLayout.LayoutParams(dp(18), dp(18))
+            )
+            val textCol = column().apply {
+                marginStart(dp(6))
+            }
+            textCol.addView(label(title, 10f, true).apply { maxLines = 1 })
+            textCol.addView(label(subtitle, 8f, false, TemplateStyle.muted).apply { maxLines = 1 })
+            item.addView(textCol, LinearLayout.LayoutParams(0, -2, 1f))
+            item.addView(
+                icon("next", if (isActive) TemplateStyle.white else TemplateStyle.muted),
+                LinearLayout.LayoutParams(dp(14), dp(14))
+            )
+            add(box, item, top = 4)
+        }
+
+        val head = row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(2), dp(2), dp(2), dp(6))
+        }
+
+        when (editorMode) {
+            "screen" -> {
+                head.addView(icon("screen", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(18), dp(18)))
+                head.addView(label("Captura de Tela", 11.5f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
+                add(box, head)
+
+                val isScreenAdded = canvasElements.any { it.title == "Captura de Tela" }
+                val isGameAdded = canvasElements.any { it.title == "Captura de Jogos" }
+                elementRow(
+                    title = "Captura de Tela",
+                    subtitle = if (isScreenAdded) "Ativo no editor (toque para focar)" else "Captura da tela do smartphone",
+                    iconName = "screen",
+                    isActive = isScreenAdded
+                ) {
+                    addScreenCapture()
+                }
+                elementRow(
+                    title = "Captura de Jogos",
+                    subtitle = if (isGameAdded) "Ativo no editor (toque para focar)" else "Captura de jogos no smartphone",
+                    iconName = "game",
+                    isActive = isGameAdded
+                ) {
+                    val existingGame = canvasElements.find { it.title == "Captura de Jogos" }
+                    if (existingGame != null) {
+                        canvasElements.forEach { it.isSelected = (it.id == existingGame.id) }
+                        selectedElementId = existingGame.id
+                        toast("Captura de Jogos selecionada!")
+                        render()
+                    } else {
+                        addGenericElement("Captura de Jogos", "screen_capture")
                     }
-                    else -> true
+                }
+            }
+            "browser" -> {
+                head.addView(icon("browser", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(18), dp(18)))
+                head.addView(label("Browser Source", 11.5f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
+                add(box, head)
+
+                val isBrowserAdded = canvasElements.any { it.type == "browser" }
+                elementRow(
+                    title = "Browser Source (URL)",
+                    subtitle = if (isBrowserAdded) "Ativo no editor (toque para adicionar)" else "Toque para adicionar ao editor",
+                    iconName = "browser",
+                    isActive = isBrowserAdded
+                ) {
+                    addGenericElement("Browser Source (URL)", "browser")
+                }
+            }
+            "grid" -> {
+                head.addView(icon("grid", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(18), dp(18)))
+                head.addView(label("Widgets", 11.5f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
+                add(box, head)
+
+                val noticeBox = column().apply {
+                    background = TemplateStyle.Panel(density, false, radius = 8f, glow = false)
+                    setPadding(dp(10), dp(14), dp(10), dp(14))
+                    addView(label("Widgets serão adicionadas mais à frente.", 9.5f, true, TemplateStyle.muted).apply {
+                        gravity = Gravity.CENTER
+                    })
+                }
+                add(box, noticeBox, top = 6)
+            }
+            else -> {
+                val sel = getSelectedElement()
+                if (sel != null) {
+                    head.addView(icon("cursor", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(18), dp(18)))
+                    head.addView(label("Elemento Selecionado", 11.5f, true, TemplateStyle.cyan).apply { marginStart(dp(6)) })
+                    add(box, head)
+
+                    val infoCard = column().apply {
+                        background = TemplateStyle.Panel(density, true, radius = 6f, glow = true)
+                        setPadding(dp(8), dp(8), dp(8), dp(8))
+                        addView(label(sel.title, 10.5f, true, TemplateStyle.white).apply { setPadding(0, 0, 0, dp(4)) })
+                        addView(label("Posição: X ${(sel.x * 100).toInt()}% • Y ${(sel.y * 100).toInt()}%", 8.5f, false, TemplateStyle.muted))
+                        addView(label("Dimensão: L ${(sel.width * 100).toInt()}% • A ${(sel.height * 100).toInt()}%", 8.5f, false, TemplateStyle.muted))
+                    }
+                    add(box, infoCard, top = 4)
+
+                    val btnRow = row()
+                    weighted(btnRow, action("Centralizar", "move", radius = 6f) {
+                        adjustSelected("center")
+                    }, 1f, 32, 2)
+                    weighted(btnRow, action("Remover", "trash", radius = 6f) {
+                        removeSelectedElement()
+                    }, 1f, 32, 2)
+                    add(box, btnRow, 32, top = 6)
                 }
             }
         }
-        frame.post { positionEditorArtwork(frame) }
+    }
+
+    private fun addGenericElement(title: String, type: String) {
+        canvasElements.forEach { it.isSelected = false }
+        val newElem = CanvasElement(
+            id = "${type}_${System.currentTimeMillis()}",
+            type = type,
+            title = title,
+            x = 0.20f,
+            y = 0.20f,
+            width = 0.60f,
+            height = 0.50f,
+            isSelected = true
+        )
+        canvasElements.add(newElem)
+        selectedElementId = newElem.id
+        toast("Elemento '$title' adicionado ao cenário!")
+        render()
+    }
+
+    /**
+     * Builds the interactive Scenario Canvas matching Image 4:
+     * Completely blank by default, displaying added elements (like Captura de Tela)
+     * as fully interactive, movable, and resizable objects with 8 adjustment handles.
+     */
+    private fun editorCanvasMockup(): View {
+        val isVertical = streamOrientation == "Vertical (9:16)"
+        val frame = SixteenByNine(activity, vertical = isVertical)
+        frame.background = TemplateStyle.Panel(density, false, radius = 0f, glow = true)
+        val container = FrameLayout(activity).apply {
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        frame.addView(container, FrameLayout.LayoutParams(-1, -1))
+
+        val hud = CyberneticOverlayView(activity, canvasElements, interactive = true) {
+            render()
+        }
+        container.addView(hud, FrameLayout.LayoutParams(-1, -1))
         return frame
     }
 
     private fun showExpandedPreview() {
-        if(expandedPreview!=null || availableWidth<=0 || availableHeight<=0)return
+        if (expandedPreview != null || availableWidth <= 0 || availableHeight <= 0) return
         popup?.dismiss()
-        val cover=FrameLayout(activity).apply {
-            setBackgroundColor(0xee010315.toInt())
-            isClickable=true
+        val isVertical = streamOrientation == "Vertical (9:16)"
+        val cover = FrameLayout(activity).apply {
+            setBackgroundColor(0xfa020410.toInt())
+            isClickable = true
         }
-        val maxWidth=min(availableWidth-dp(24),
-            ((availableHeight-dp(100)).coerceAtLeast(dp(90))*16f/9f).toInt()).coerceAtLeast(dp(120))
-        val panel=column().apply {
-            setPadding(dp(4),dp(4),dp(4),dp(4))
+        val maxWidth = min(
+            availableWidth - dp(24),
+            ((availableHeight - dp(90)).coerceAtLeast(dp(90)) * (if (isVertical) 9f / 16f else 16f / 9f)).toInt()
+        )
+        val panel = column().apply {
+            setPadding(dp(6), dp(6), dp(6), dp(6))
         }
-        val preview=SixteenByNine(activity).apply {
-            addView(art("MINIATURA"),FrameLayout.LayoutParams(-1,-1))
+        val preview = SixteenByNine(activity, vertical = isVertical).apply {
+            addView(CyberneticOverlayView(activity, canvasElements, interactive = false), FrameLayout.LayoutParams(-1, -1))
         }
-        add(panel,preview)
-        add(panel,action("Voltar","back"){ root.removeView(cover);expandedPreview=null },48,8)
-        cover.addView(panel,FrameLayout.LayoutParams(maxWidth,-2,Gravity.CENTER))
-        root.addView(cover,FrameLayout.LayoutParams(-1,-1))
-        expandedPreview=cover
+        add(panel, preview)
+        add(panel, action("Fechar Visualização", "close", selected = true, radius = 12f) {
+            root.removeView(cover)
+            expandedPreview = null
+        }, 44, top = 8)
+
+        cover.addView(panel, FrameLayout.LayoutParams(maxWidth, -2, Gravity.CENTER))
+        root.addView(cover, FrameLayout.LayoutParams(-1, -1))
+        expandedPreview = cover
     }
 
-    private class SelectionBorder(private val density:Float,private val locked:Boolean):android.graphics.drawable.Drawable() {
-        private val p=android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
-        override fun draw(c:android.graphics.Canvas){
-            val inset=10*density;val r=android.graphics.RectF(bounds).apply{inset(inset,inset)}
-            p.color=if(locked) TemplateStyle.pink else TemplateStyle.cyan
-            p.style=android.graphics.Paint.Style.STROKE;p.strokeWidth=density
-            c.drawRect(r,p);p.style=android.graphics.Paint.Style.FILL
-            for(x in listOf(r.left,r.centerX(),r.right))for(y in listOf(r.top,r.centerY(),r.bottom)){
-                if(x==r.centerX()&&y==r.centerY())continue
-                c.drawRoundRect(x-3*density,y-3*density,x+3*density,y+3*density,density,density,p)
+    // =========================================================================
+    // INTERACTIVE CANVAS VIEW (Blank workspace + Adjustable Elements)
+    // =========================================================================
+    private class CyberneticOverlayView(
+        context: Context,
+        private val elements: MutableList<CanvasElement>,
+        private val interactive: Boolean = true,
+        private val onStateChanged: (() -> Unit)? = null
+    ) : View(context) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val density = context.resources.displayMetrics.density
+
+        private var activeHandle = -1
+        private var lastTouchX = 0f
+        private var lastTouchY = 0f
+
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat()
+            val h = height.toFloat()
+            if (w <= 0f || h <= 0f) return
+
+            // 1. Clean Obsidian Canvas Background
+            p.style = Paint.Style.FILL
+            p.color = Color.rgb(8, 12, 22)
+            c.drawRect(0f, 0f, w, h, p)
+
+            val margin = 8f * density
+
+            // Subtle 16:9 safe boundary frame (containers without rounding)
+            p.style = Paint.Style.STROKE
+            p.strokeWidth = 1f * density
+            p.color = Color.argb(40, 0, 234, 255)
+            c.drawRect(margin, margin, w - margin, h - margin, p)
+
+            // 2. BLANK STATE: Keep completely clean when no elements are added yet
+            if (elements.isEmpty()) {
+                return
+            }
+
+            // 3. RENDER ADDED ELEMENTS (Captura de Tela, Textos, etc.)
+            for (el in elements) {
+                val ex = el.x * w
+                val ey = el.y * h
+                val ew = el.width * w
+                val eh = el.height * h
+                val er = ex + ew
+                val eb = ey + eh
+
+                if (el.type == "screen_capture") {
+                    // Monitor/Screen Background
+                    p.style = Paint.Style.FILL
+                    p.color = Color.rgb(10, 16, 32)
+                    c.drawRect(ex, ey, er, eb, p)
+
+                    // Desktop Grid Lines inside screen capture
+                    p.style = Paint.Style.STROKE
+                    p.strokeWidth = 0.6f * density
+                    p.color = Color.argb(30, 0, 234, 255)
+                    val cols = 6
+                    val rows = 4
+                    for (i in 1 until cols) {
+                        val gx = ex + i * (ew / cols)
+                        c.drawLine(gx, ey, gx, eb, p)
+                    }
+                    for (j in 1 until rows) {
+                        val gy = ey + j * (eh / rows)
+                        c.drawLine(ex, gy, er, gy, p)
+                    }
+
+                    // Window Title Bar
+                    val titleH = min(20f * density, eh * 0.18f)
+                    p.style = Paint.Style.FILL
+                    p.color = Color.rgb(18, 26, 52)
+                    c.drawRect(ex, ey, er, ey + titleH, p)
+
+                    // Red recording dot
+                    p.color = Color.rgb(255, 45, 85)
+                    c.drawCircle(ex + 10f * density, ey + titleH * 0.5f, 3.2f * density, p)
+
+                    // Title
+                    p.color = Color.WHITE
+                    p.textSize = min(8f * density, titleH * 0.55f)
+                    p.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    val capRes = if (el.aspectRatio == "9:16") "9:16 Vertical" else "16:9 Horizontal"
+                    c.drawText("REC | Captura ($capRes)", ex + 18f * density, ey + titleH * 0.68f, p)
+
+                    // Control dots on right
+                    p.color = Color.rgb(90, 110, 150)
+                    c.drawCircle(er - 22f * density, ey + titleH * 0.5f, 2.2f * density, p)
+                    c.drawCircle(er - 14f * density, ey + titleH * 0.5f, 2.2f * density, p)
+                    c.drawCircle(er - 6f * density, ey + titleH * 0.5f, 2.2f * density, p)
+
+                    // Inner simulated app window
+                    val winL = ex + 10f * density
+                    val winT = ey + titleH + 6f * density
+                    val winR = er - 10f * density
+                    val winB = eb - 12f * density
+                    if (winR > winL && winB > winT) {
+                        p.color = Color.rgb(14, 20, 38)
+                        c.drawRect(winL, winT, winR, winB, p)
+
+                        p.style = Paint.Style.STROKE
+                        p.strokeWidth = 0.8f * density
+                        p.color = Color.argb(60, 0, 234, 255)
+                        c.drawRect(winL, winT, winR, winB, p)
+
+                        p.style = Paint.Style.FILL
+                        val colors = intArrayOf(TemplateStyle.cyan, TemplateStyle.magenta, TemplateStyle.green, TemplateStyle.white)
+                        for (k in 0..3) {
+                            p.color = colors[k % colors.size]
+                            val ly = winT + 8f * density + k * 8f * density
+                            if (ly + 3.5f * density < winB) {
+                                c.drawRect(winL + 8f * density, ly, winL + 8f * density + (winR - winL) * (0.32f + k * 0.14f), ly + 3.5f * density, p)
+                            }
+                        }
+                    }
+
+                    // Taskbar at bottom
+                    val taskH = min(12f * density, eh * 0.10f)
+                    p.style = Paint.Style.FILL
+                    p.color = Color.rgb(8, 12, 24)
+                    c.drawRect(ex, eb - taskH, er, eb, p)
+                    p.color = TemplateStyle.cyan
+                    c.drawRect(ex + 8f * density, eb - taskH + 3f * density, ex + 13f * density, eb - 3f * density, p)
+                    p.color = TemplateStyle.magenta
+                    c.drawRect(ex + 16f * density, eb - taskH + 3f * density, ex + 21f * density, eb - 3f * density, p)
+
+                    // Mouse pointer on capture
+                    val curX = ex + ew * 0.62f
+                    val curY = ey + eh * 0.52f
+                    val cursorPath = Path().apply {
+                        moveTo(curX, curY)
+                        lineTo(curX, curY + 12f * density)
+                        lineTo(curX + 3.5f * density, curY + 8.5f * density)
+                        lineTo(curX + 7.5f * density, curY + 13f * density)
+                        lineTo(curX + 9.5f * density, curY + 11.5f * density)
+                        lineTo(curX + 5.5f * density, curY + 7f * density)
+                        lineTo(curX + 9.5f * density, curY + 7f * density)
+                        close()
+                    }
+                    p.style = Paint.Style.FILL
+                    p.color = Color.WHITE
+                    c.drawPath(cursorPath, p)
+                    p.style = Paint.Style.STROKE
+                    p.strokeWidth = 1f * density
+                    p.color = Color.BLACK
+                    c.drawPath(cursorPath, p)
+                } else {
+                    p.style = Paint.Style.FILL
+                    p.color = Color.argb(210, 12, 18, 38)
+                    c.drawRect(ex, ey, er, eb, p)
+
+                    val headerH = min(18f * density, eh * 0.25f)
+                    p.color = Color.rgb(20, 28, 56)
+                    c.drawRect(ex, ey, er, ey + headerH, p)
+
+                    p.color = if (el.type == "browser") TemplateStyle.cyan else TemplateStyle.magenta
+                    p.textSize = min(8.5f * density, headerH * 0.65f)
+                    p.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    val tag = if (el.type == "browser") "BROWSER SOURCE" else "WIDGET"
+                    c.drawText("$tag | ${el.title}", ex + 8f * density, ey + headerH * 0.72f, p)
+
+                    p.color = Color.WHITE
+                    p.textSize = min(10.5f * density, eh * 0.25f)
+                    c.drawText(el.title, ex + 10f * density, ey + eh * 0.62f, p)
+                }
+
+                // 4. SELECTION FRAME & 8 ADJUSTMENT HANDLES (Matching Image 4)
+                if (el.isSelected && interactive) {
+                    // Cyan bounding border
+                    p.style = Paint.Style.STROKE
+                    p.strokeWidth = 2f * density
+                    p.color = TemplateStyle.cyan
+                    c.drawRect(ex, ey, er, eb, p)
+
+                    // 8 Square Adjustment Handles
+                    val hs = 7.5f * density
+                    val handles = listOf(
+                        PointF(ex, ey),                     // 0: top-left
+                        PointF(ex + ew / 2f, ey),           // 1: top-mid
+                        PointF(er, ey),                     // 2: top-right
+                        PointF(er, ey + eh / 2f),           // 3: mid-right
+                        PointF(er, eb),                     // 4: bot-right
+                        PointF(ex + ew / 2f, eb),           // 5: bot-mid
+                        PointF(ex, eb),                     // 6: bot-left
+                        PointF(ex, ey + eh / 2f)            // 7: mid-left
+                    )
+                    for (pt in handles) {
+                        p.style = Paint.Style.FILL
+                        p.color = Color.WHITE
+                        c.drawRect(pt.x - hs / 2f, pt.y - hs / 2f, pt.x + hs / 2f, pt.y + hs / 2f, p)
+                        p.style = Paint.Style.STROKE
+                        p.strokeWidth = 1.5f * density
+                        p.color = TemplateStyle.cyan
+                        c.drawRect(pt.x - hs / 2f, pt.y - hs / 2f, pt.x + hs / 2f, pt.y + hs / 2f, p)
+                    }
+
+                    // Dimension / Status pill badge
+                    val badgeW = 210f * density
+                    val badgeH = 16f * density
+                    val badgeY = max(2f * density, ey - badgeH - 3f * density)
+                    p.style = Paint.Style.FILL
+                    p.color = Color.rgb(10, 16, 32)
+                    c.drawRect(ex, badgeY, ex + badgeW, badgeY + badgeH, p)
+
+                    p.style = Paint.Style.STROKE
+                    p.strokeWidth = 1f * density
+                    p.color = TemplateStyle.cyan
+                    c.drawRect(ex, badgeY, ex + badgeW, badgeY + badgeH, p)
+
+                    p.style = Paint.Style.FILL
+                    p.color = TemplateStyle.cyan
+                    p.textSize = 7f * density
+                    p.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    val dimStr = "${(el.width * 100).toInt()}% × ${(el.height * 100).toInt()}%"
+                    c.drawText("${el.title} [$dimStr] • Ajustável", ex + 6f * density, badgeY + badgeH * 0.7f, p)
+                }
             }
         }
-        override fun setAlpha(alpha:Int){p.alpha=alpha}
-        override fun setColorFilter(filter:android.graphics.ColorFilter?){p.colorFilter=filter}
-        @Deprecated("Deprecated in Android") override fun getOpacity()=android.graphics.PixelFormat.TRANSLUCENT
+
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            if (!interactive) return super.onTouchEvent(event)
+            val w = width.toFloat()
+            val h = height.toFloat()
+            if (w <= 0f || h <= 0f) return false
+
+            val sel = elements.find { it.isSelected }
+
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    lastTouchX = event.x
+                    lastTouchY = event.y
+                    activeHandle = -1
+
+                    if (sel != null) {
+                        val ex = sel.x * w
+                        val ey = sel.y * h
+                        val ew = sel.width * w
+                        val eh = sel.height * h
+                        val er = ex + ew
+                        val eb = ey + eh
+                        val hitRadius = 24f * density
+
+                        // Check 8 handles
+                        val pts = listOf(
+                            PointF(ex, ey),                     // 0: top-left
+                            PointF(ex + ew / 2f, ey),           // 1: top-mid
+                            PointF(er, ey),                     // 2: top-right
+                            PointF(er, ey + eh / 2f),           // 3: mid-right
+                            PointF(er, eb),                     // 4: bot-right
+                            PointF(ex + ew / 2f, eb),           // 5: bot-mid
+                            PointF(ex, eb),                     // 6: bot-left
+                            PointF(ex, ey + eh / 2f)            // 7: mid-left
+                        )
+                        for (idx in pts.indices) {
+                            if (hypot(event.x - pts[idx].x, event.y - pts[idx].y) <= hitRadius) {
+                                activeHandle = idx
+                                parent?.requestDisallowInterceptTouchEvent(true)
+                                return true
+                            }
+                        }
+
+                        // Check inside selected element for moving
+                        if (event.x in ex..er && event.y in ey..eb) {
+                            activeHandle = 8 // move
+                            parent?.requestDisallowInterceptTouchEvent(true)
+                            return true
+                        }
+                    }
+
+                    // Check if tapped on another element
+                    val clicked = elements.findLast { el ->
+                        val ex = el.x * w
+                        val ey = el.y * h
+                        val er = ex + el.width * w
+                        val eb = ey + el.height * h
+                        event.x in ex..er && event.y in ey..eb
+                    }
+                    if (clicked != null) {
+                        elements.forEach { it.isSelected = (it.id == clicked.id) }
+                        activeHandle = 8
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                        invalidate()
+                        onStateChanged?.invoke()
+                        return true
+                    }
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (event.x - lastTouchX) / w
+                    val dy = (event.y - lastTouchY) / h
+                    val current = elements.find { it.isSelected }
+                    if (current != null && activeHandle != -1) {
+                        when (activeHandle) {
+                            8 -> { // Move
+                                current.x = (current.x + dx).coerceIn(0f, 1f - current.width)
+                                current.y = (current.y + dy).coerceIn(0f, 1f - current.height)
+                            }
+                            4 -> { // Bot-Right
+                                current.width = (current.width + dx).coerceIn(0.15f, 1f - current.x)
+                                current.height = (current.height + dy).coerceIn(0.15f, 1f - current.y)
+                            }
+                            0 -> { // Top-Left
+                                val nw = (current.width - dx).coerceIn(0.15f, current.x + current.width)
+                                val nh = (current.height - dy).coerceIn(0.15f, current.y + current.height)
+                                current.x += current.width - nw
+                                current.y += current.height - nh
+                                current.width = nw
+                                current.height = nh
+                            }
+                            2 -> { // Top-Right
+                                val nw = (current.width + dx).coerceIn(0.15f, 1f - current.x)
+                                val nh = (current.height - dy).coerceIn(0.15f, current.y + current.height)
+                                current.y += current.height - nh
+                                current.width = nw
+                                current.height = nh
+                            }
+                            6 -> { // Bot-Left
+                                val nw = (current.width - dx).coerceIn(0.15f, current.x + current.width)
+                                val nh = (current.height + dy).coerceIn(0.15f, 1f - current.y)
+                                current.x += current.width - nw
+                                current.width = nw
+                                current.height = nh
+                            }
+                            1 -> { // Top-Mid
+                                val nh = (current.height - dy).coerceIn(0.15f, current.y + current.height)
+                                current.y += current.height - nh
+                                current.height = nh
+                            }
+                            3 -> { // Mid-Right
+                                current.width = (current.width + dx).coerceIn(0.15f, 1f - current.x)
+                            }
+                            5 -> { // Bot-Mid
+                                current.height = (current.height + dy).coerceIn(0.15f, 1f - current.y)
+                            }
+                            7 -> { // Mid-Left
+                                val nw = (current.width - dx).coerceIn(0.15f, current.x + current.width)
+                                current.x += current.width - nw
+                                current.width = nw
+                            }
+                        }
+                        lastTouchX = event.x
+                        lastTouchY = event.y
+                        invalidate()
+                    }
+                    return true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    activeHandle = -1
+                    parent?.requestDisallowInterceptTouchEvent(false)
+                    if (event.actionMasked == MotionEvent.ACTION_UP) performClick()
+                    onStateChanged?.invoke()
+                    return true
+                }
+                else -> return super.onTouchEvent(event)
+            }
+        }
+
+        override fun performClick(): Boolean {
+            super.performClick()
+            return true
+        }
+    }
+
+    // =========================================================================
+    // PERMISSIONS PROMPT MODAL (Microfone, Galeria, Sobreposição de Tela)
+    // =========================================================================
+    private fun attachPermissionsModal() {
+        val backdrop = FrameLayout(activity).apply {
+            setBackgroundColor(Color.argb(215, 4, 7, 18))
+            isClickable = true
+            isFocusable = true
+        }
+
+        val modalWidth = min(dp(380), (availableWidth - dp(24)).coerceAtLeast(dp(240)))
+        val modalCard = card(radius = 18f, prominent = true, borderTint = TemplateStyle.cyan).apply {
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+        }
+
+        // Modal Header
+        val head = row()
+        head.addView(icon("check", TemplateStyle.cyan), LinearLayout.LayoutParams(dp(24), dp(24)))
+        val headTextCol = column().apply { marginStart(dp(8)) }
+        headTextCol.addView(label("Permissões Necessárias", 16f, true, TemplateStyle.white))
+        headTextCol.addView(label("Autorize as permissões para iniciar a transmissão", 10.5f, false, TemplateStyle.muted))
+        head.addView(headTextCol, LinearLayout.LayoutParams(0, -2, 1f))
+        head.addView(iconAction("close", "Fechar", radius = 8f) {
+            showPermissionsModal = false
+            render()
+        }, LinearLayout.LayoutParams(dp(34), dp(34)))
+        add(modalCard, head)
+
+        fun permissionItem(
+            title: String,
+            subtitle: String,
+            symbol: String,
+            granted: Boolean,
+            onToggle: (Boolean) -> Unit
+        ): View = row().apply {
+            background = TemplateStyle.Panel(
+                density,
+                selected = granted,
+                radius = 12f,
+                glow = granted,
+                borderTint = if (granted) TemplateStyle.green else TemplateStyle.cyan
+            )
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            isClickable = true
+            setOnClickListener {
+                onToggle(!granted)
+                render()
+            }
+            addView(
+                icon(symbol, if (granted) TemplateStyle.green else TemplateStyle.cyan),
+                LinearLayout.LayoutParams(dp(22), dp(22))
+            )
+            val info = column().apply { marginStart(dp(10)) }
+            info.addView(label(title, 12.5f, true, TemplateStyle.white))
+            info.addView(label(subtitle, 9.5f, false, TemplateStyle.muted))
+            addView(info, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(neonToggle(granted) {
+                onToggle(it)
+                render()
+            })
+        }
+
+        // 1. Permissão de Microfone
+        add(
+            modalCard,
+            permissionItem(
+                title = "Microfone",
+                subtitle = "Capturar áudio do microfone na transmissão",
+                symbol = "mic",
+                granted = micPermGranted
+            ) { isChecked ->
+                micPermGranted = isChecked
+                if (isChecked) requestRuntimeMicAndGalleryPermissions()
+            },
+            top = 10
+        )
+
+        // 2. Permissão de Galeria
+        add(
+            modalCard,
+            permissionItem(
+                title = "Galeria",
+                subtitle = "Acessar imagens e mídias da galeria para o cenário",
+                symbol = "image",
+                granted = galleryPermGranted
+            ) { isChecked ->
+                galleryPermGranted = isChecked
+                if (isChecked) requestRuntimeMicAndGalleryPermissions()
+            },
+            top = 8
+        )
+
+        // 3. Permissão de Sobreposição de Tela (Sistema Android do Smartphone)
+        add(
+            modalCard,
+            permissionItem(
+                title = "Sobreposição de Tela",
+                subtitle = if (canDrawSystemOverlay()) "Autorizada no smartphone" else "Toque para autorizar sobreposição no smartphone",
+                symbol = "screen",
+                granted = canDrawSystemOverlay()
+            ) { _ ->
+                if (!canDrawSystemOverlay()) {
+                    requestSystemOverlayPermission()
+                } else {
+                    overlayPermGranted = true
+                }
+            },
+            top = 8
+        )
+
+        // Botões de ação do modal
+        val btnRow = row()
+        weighted(
+            btnRow,
+            action("Cancelar", "close", selected = false, radius = 12f) {
+                pendingConnectAfterPermissions = false
+                showPermissionsModal = false
+                render()
+            },
+            0.9f,
+            44,
+            3
+        )
+
+        val allGranted = micPermGranted && galleryPermGranted && canDrawSystemOverlay()
+        weighted(
+            btnRow,
+            action(
+                if (allGranted) "Conectar Agora" else "Permitir Tudo e Conectar",
+                "check",
+                selected = true,
+                radius = 12f,
+                tint = TemplateStyle.green
+            ) {
+                micPermGranted = true
+                galleryPermGranted = true
+                requestRuntimeMicAndGalleryPermissions()
+                if (!canDrawSystemOverlay()) {
+                    pendingConnectAfterPermissions = true
+                    toast("Ative a permissão 'Sobrepor a outros apps' no smartphone para continuar.")
+                    requestSystemOverlayPermission()
+                } else {
+                    overlayPermGranted = true
+                    pendingConnectAfterPermissions = false
+                    showPermissionsModal = false
+                    startConnectionCountdown()
+                }
+            },
+            1.5f,
+            44,
+            3
+        )
+        add(modalCard, btnRow, 44, top = 12)
+
+        backdrop.addView(modalCard, FrameLayout.LayoutParams(modalWidth, -2, Gravity.CENTER))
+        root.addView(backdrop, FrameLayout.LayoutParams(-1, -1))
+    }
+
+    // =========================================================================
+    // 3-SECOND COUNTDOWN OVERLAY BEFORE MINIMIZING TO SMARTPHONE SCREEN OVERLAY
+    // =========================================================================
+    private fun attachCountdownOverlay() {
+        val backdrop = FrameLayout(activity).apply {
+            setBackgroundColor(Color.argb(225, 3, 6, 16))
+            isClickable = true
+            isFocusable = true
+        }
+
+        val box = card(radius = 22f, prominent = true, borderTint = TemplateStyle.cyan).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(28), dp(24), dp(28), dp(24))
+        }
+
+        box.addView(
+            createApkIconBadge(46),
+            LinearLayout.LayoutParams(dp(46), dp(46)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                bottomMargin = dp(10)
+            }
+        )
+
+        box.addView(
+            label("Iniciando Transmissão...", 15f, true, TemplateStyle.cyan).apply {
+                gravity = Gravity.CENTER
+            },
+            LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.CENTER_HORIZONTAL }
+        )
+
+        val circleBadge = FrameLayout(activity).apply {
+            background = TemplateStyle.Panel(
+                density,
+                selected = true,
+                radius = 55f,
+                glow = true,
+                borderTint = TemplateStyle.green
+            )
+        }
+        val numText = label(countdownSeconds.toString(), 48f, true, TemplateStyle.white).apply {
+            gravity = Gravity.CENTER
+        }
+        countdownLabel = numText
+        circleBadge.addView(numText, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
+
+        box.addView(
+            circleBadge,
+            LinearLayout.LayoutParams(dp(110), dp(110)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                topMargin = dp(14)
+                bottomMargin = dp(14)
+            }
+        )
+
+        box.addView(
+            label("Minimizando APK para a Sobreposição do Smartphone...", 11f, false, TemplateStyle.muted).apply {
+                gravity = Gravity.CENTER
+            },
+            LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.CENTER_HORIZONTAL }
+        )
+
+        backdrop.addView(box, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+        root.addView(backdrop, FrameLayout.LayoutParams(-1, -1))
+    }
+
+    // =========================================================================
+    // SMARTPHONE SYSTEM OVERLAY (WindowManager TYPE_APPLICATION_OVERLAY)
+    // Exibe fora do APK (na tela do smartphone):
+    // - Ícone do APK + Temporizador (arrastável)
+    // - Ao acionar: abre painel com 2 menus: 1) Controles 2) Áudio e Volume
+    // =========================================================================
+    private fun createApkIconBadge(sizeDp: Int = 34): FrameLayout = FrameLayout(activity).apply {
+        background = TemplateStyle.Panel(
+            density,
+            selected = true,
+            radius = (sizeDp * 0.28f),
+            glow = true,
+            borderTint = TemplateStyle.cyan
+        )
+        val iconSize = dp((sizeDp * 0.62f).toInt())
+        addView(
+            icon("play", TemplateStyle.white),
+            FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER)
+        )
+    }
+
+    private fun refreshSystemOverlayWindow() {
+        removeSystemOverlayWindow()
+        showSystemOverlayWindow()
+    }
+
+    private fun showSystemOverlayWindow() {
+        if (!canDrawSystemOverlay() || !streamConnected) return
+        if (systemOverlayView != null) return
+        try {
+            val wm = activity.getSystemService(Context.WINDOW_SERVICE) as? android.view.WindowManager ?: return
+            val dm = activity.resources.displayMetrics
+            val screenW = dm.widthPixels
+            val screenH = dm.heightPixels
+
+            val windowType = if (android.os.Build.VERSION.SDK_INT >= 26) {
+                android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                @Suppress("DEPRECATION")
+                android.view.WindowManager.LayoutParams.TYPE_PHONE
+            }
+
+            if (sysOverlayX < 0 || sysOverlayY < 0) {
+                sysOverlayX = (screenW - dp(165)).coerceAtLeast(dp(12))
+                sysOverlayY = dp(84)
+            }
+
+            if (!overlayExpanded) {
+                // Estado recolhido na tela do smartphone: Ícone do APK + Temporizador
+                overlayPanelTimerLabel = null
+                val sysPill = row().apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    background = TemplateStyle.Panel(
+                        density,
+                        selected = false,
+                        radius = 24f,
+                        glow = true,
+                        borderTint = TemplateStyle.green
+                    )
+                    setPadding(dp(8), dp(6), dp(12), dp(6))
+                    elevation = dp(20).toFloat()
+                    addView(
+                        createApkIconBadge(32),
+                        LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginEnd = dp(8) }
+                    )
+                    val dot = View(activity).apply {
+                        background = GradientDrawable().apply {
+                            shape = GradientDrawable.OVAL
+                            setColor(TemplateStyle.green)
+                        }
+                    }
+                    addView(dot, LinearLayout.LayoutParams(dp(7), dp(7)).apply { marginEnd = dp(6) })
+                    val tLabel = label(formatElapsedTime(), 13f, true, TemplateStyle.green).apply {
+                        letterSpacing = 0.08f
+                    }
+                    overlayTimerLabel = tLabel
+                    addView(tLabel)
+                }
+
+                val params = android.view.WindowManager.LayoutParams(
+                    android.view.WindowManager.LayoutParams.WRAP_CONTENT,
+                    android.view.WindowManager.LayoutParams.WRAP_CONTENT,
+                    windowType,
+                    android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        android.view.WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.START
+                    x = sysOverlayX
+                    y = sysOverlayY
+                }
+
+                var downRawX = 0f
+                var downRawY = 0f
+                var startX = 0
+                var startY = 0
+                var moved = false
+
+                sysPill.setOnTouchListener { v, ev ->
+                    when (ev.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            downRawX = ev.rawX
+                            downRawY = ev.rawY
+                            startX = params.x
+                            startY = params.y
+                            moved = false
+                            true
+                        }
+                        MotionEvent.ACTION_MOVE -> {
+                            val dx = (ev.rawX - downRawX).toInt()
+                            val dy = (ev.rawY - downRawY).toInt()
+                            if (hypot(dx.toFloat(), dy.toFloat()) > dp(6)) {
+                                moved = true
+                                sysOverlayX = (startX + dx).coerceIn(0, (screenW - dp(140)).coerceAtLeast(0))
+                                sysOverlayY = (startY + dy).coerceIn(0, (screenH - dp(60)).coerceAtLeast(0))
+                                params.x = sysOverlayX
+                                params.y = sysOverlayY
+                                try {
+                                    wm.updateViewLayout(v, params)
+                                } catch (_: Throwable) {}
+                            }
+                            true
+                        }
+                        MotionEvent.ACTION_UP -> {
+                            if (!moved) {
+                                v.performClick()
+                                overlayExpanded = true
+                                refreshSystemOverlayWindow()
+                            }
+                            true
+                        }
+                        else -> false
+                    }
+                }
+
+                wm.addView(sysPill, params)
+                systemOverlayView = sysPill
+            } else {
+                // Estado expandido na tela do smartphone: Painel com 2 Menus (1: Controles | 2: Áudio e Volume)
+                overlayTimerLabel = null
+                val panelWidth = min(dp(400), (screenW - dp(20)).coerceAtLeast(dp(260)))
+
+                val overlayRoot = FrameLayout(activity).apply {
+                    setBackgroundColor(Color.argb(145, 3, 6, 16))
+                    isClickable = true
+                    setOnClickListener {
+                        overlayExpanded = false
+                        refreshSystemOverlayWindow()
+                    }
+                }
+
+                val overlayPanel = card(radius = 18f, prominent = true, borderTint = TemplateStyle.cyan).apply {
+                    setPadding(dp(14), dp(12), dp(14), dp(12))
+                    isClickable = true
+                }
+
+                // Cabeçalho com Ícone do APK + Temporizador + Botão Voltar ao APK + Fechar Painel
+                val topBar = row()
+                topBar.addView(
+                    createApkIconBadge(30).apply {
+                        isClickable = true
+                        setOnClickListener { returnToApkFromOverlay() }
+                    },
+                    LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(8) }
+                )
+                val titleCol = column()
+                titleCol.addView(label("LiveNEXUS • Sobreposição", 13f, true, TemplateStyle.white))
+                val timerRow = row()
+                val dot = View(activity).apply {
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(TemplateStyle.green)
+                    }
+                }
+                timerRow.addView(dot, LinearLayout.LayoutParams(dp(6), dp(6)).apply { marginEnd = dp(5) })
+                val panelTimer = label(formatElapsedTime(), 11.5f, true, TemplateStyle.green)
+                overlayPanelTimerLabel = panelTimer
+                timerRow.addView(panelTimer)
+                titleCol.addView(timerRow)
+                topBar.addView(titleCol, LinearLayout.LayoutParams(0, -2, 1f))
+
+                topBar.addView(
+                    action("Abrir APK", "expand", selected = false, radius = 8f) {
+                        returnToApkFromOverlay()
+                    },
+                    LinearLayout.LayoutParams(-2, dp(34)).apply { marginEnd = dp(6) }
+                )
+
+                topBar.addView(
+                    iconAction("close", "Minimizar painel", radius = 8f) {
+                        overlayExpanded = false
+                        refreshSystemOverlayWindow()
+                    },
+                    LinearLayout.LayoutParams(dp(34), dp(34))
+                )
+                add(overlayPanel, topBar)
+
+                // Abas dos 2 Menus: 1) Controles | 2) Áudio e Volume
+                val menuTabs = row()
+                weighted(
+                    menuTabs,
+                    action(
+                        "Controles",
+                        "game",
+                        selected = overlayMenuTab == "controls",
+                        radius = 10f
+                    ) {
+                        overlayMenuTab = "controls"
+                        refreshSystemOverlayWindow()
+                    },
+                    1f,
+                    40,
+                    3
+                )
+                weighted(
+                    menuTabs,
+                    action(
+                        "Áudio e Volume",
+                        "volume",
+                        selected = overlayMenuTab == "audio",
+                        radius = 10f
+                    ) {
+                        overlayMenuTab = "audio"
+                        refreshSystemOverlayWindow()
+                    },
+                    1f,
+                    40,
+                    3
+                )
+                add(overlayPanel, menuTabs, 40, top = 10)
+
+                val contentContainer = column()
+                if (overlayMenuTab == "controls") {
+                    buildOverlayControlsMenu(contentContainer)
+                } else {
+                    buildOverlayAudioVolumeMenu(contentContainer)
+                }
+
+                val contentScroll = ScrollView(activity).apply {
+                    isVerticalScrollBarEnabled = false
+                    addView(contentContainer, FrameLayout.LayoutParams(-1, -2))
+                }
+                val maxContentHeight = (screenH * 0.60f).toInt().coerceAtLeast(dp(200))
+                overlayPanel.addView(
+                    contentScroll,
+                    LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        topMargin = dp(8)
+                    }
+                )
+                contentScroll.maxHeight(maxContentHeight)
+
+                overlayRoot.addView(
+                    overlayPanel,
+                    FrameLayout.LayoutParams(panelWidth, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+                )
+
+                val params = android.view.WindowManager.LayoutParams(
+                    android.view.WindowManager.LayoutParams.MATCH_PARENT,
+                    android.view.WindowManager.LayoutParams.MATCH_PARENT,
+                    windowType,
+                    android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        android.view.WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT
+                ).apply {
+                    gravity = Gravity.CENTER
+                }
+
+                wm.addView(overlayRoot, params)
+                systemOverlayView = overlayRoot
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun removeSystemOverlayWindow() {
+        val view = systemOverlayView ?: return
+        systemOverlayView = null
+        overlayTimerLabel = null
+        overlayPanelTimerLabel = null
+        try {
+            val wm = activity.getSystemService(Context.WINDOW_SERVICE) as? android.view.WindowManager
+            wm?.removeView(view)
+        } catch (_: Throwable) {}
+    }
+
+    private fun ScrollView.maxHeight(maxPx: Int) {
+        addOnLayoutChangeListener { v, _, top, _, bottom, _, _, _, _ ->
+            if (bottom - top > maxPx) {
+                val lp = v.layoutParams
+                if (lp != null && lp.height != maxPx) {
+                    lp.height = maxPx
+                    v.layoutParams = lp
+                }
+            }
+        }
+    }
+
+    /**
+     * Menu 1 da Sobreposição de Tela (no Smartphone): Controles (Hotkeys + Player sem escrita)
+     */
+    private fun buildOverlayControlsMenu(parent: LinearLayout) {
+        val hotkeys = card(radius = 14f)
+        val hotHead = row()
+        hotHead.addView(icon("keyboard", TemplateStyle.white), LinearLayout.LayoutParams(dp(20), dp(20)))
+        val hotTitles = column().apply { marginStart(dp(6)) }
+        hotTitles.addView(label("Hotkeys", 14f, true))
+        hotTitles.addView(label("Atalhos de cenas, subcenas e ações rápidas", 9.5f, color = TemplateStyle.muted))
+        hotHead.addView(hotTitles, LinearLayout.LayoutParams(0, -2, 1f))
+        add(hotkeys, hotHead)
+
+        val buttons = mutableListOf<View>()
+        buttons.add(sceneButton("refresh", "Reload", selected = true) {
+            toast("Cena recarregada.")
+        })
+        buttons.add(sceneButton("plus", "Adicionar\ncenário", selected = false) {
+            addedSceneCount++
+            toast("Novo cenário adicionado.")
+            refreshSystemOverlayWindow()
+        })
+        for (i in 1..addedSceneCount) {
+            buttons.add(sceneButton("video", "Cena $i", selected = false) {
+                toast("Alternando para Cena $i")
+            })
+        }
+
+        val gridCols = 3
+        buttons.chunked(gridCols).forEach { group ->
+            val gridLine = row().apply { gravity = Gravity.START }
+            group.forEach { b ->
+                gridLine.addView(b, LinearLayout.LayoutParams(dp(78), dp(74)).apply {
+                    marginEnd = dp(8)
+                })
+            }
+            add(hotkeys, gridLine, 74, top = 8)
+        }
+        add(parent, hotkeys, top = 2)
+
+        // Container do Player (sem escrita nenhuma)
+        val player = card(radius = 14f)
+        val mediaBar = row()
+
+        val cover = FrameLayout(activity).apply {
+            background = TemplateStyle.Panel(density, true, radius = 10f, glow = false)
+            addView(icon("music", TemplateStyle.white), FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
+        }
+        mediaBar.addView(cover, LinearLayout.LayoutParams(dp(40), dp(40)))
+        mediaBar.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
+
+        val volLabel = label("$playerVolume%", 10f, true)
+        val volSeek = customSeekBar(playerVolume, 100) {
+            playerVolume = it
+            volLabel.text = "$it%"
+        }
+        mediaBar.addView(icon("volume", TemplateStyle.white), LinearLayout.LayoutParams(dp(16), dp(16)))
+        mediaBar.addView(volSeek, LinearLayout.LayoutParams(dp(84), dp(26)).apply {
+            marginStart = dp(4)
+            marginEnd = dp(4)
+        })
+        mediaBar.addView(volLabel, LinearLayout.LayoutParams(dp(34), -2))
+
+        val controlsGroup = row()
+        controlsGroup.addView(iconAction("prev_track", "Anterior", radius = 8f) {
+            toast("Faixa anterior.")
+        }, LinearLayout.LayoutParams(dp(34), dp(34)))
+
+        val playPause = action("", if (playerPlaying) "pause" else "play", selected = true, radius = 10f) {
+            playerPlaying = !playerPlaying
+            refreshSystemOverlayWindow()
+        }
+        controlsGroup.addView(playPause, LinearLayout.LayoutParams(dp(38), dp(38)).apply {
+            marginStart = dp(4)
+            marginEnd = dp(4)
+        })
+
+        controlsGroup.addView(iconAction("next_track", "Próxima", radius = 8f) {
+            toast("Próxima faixa.")
+        }, LinearLayout.LayoutParams(dp(34), dp(34)))
+
+        mediaBar.addView(controlsGroup)
+        add(player, mediaBar)
+        add(parent, player, top = 8)
+    }
+
+    /**
+     * Menu 2 da Sobreposição de Tela (no Smartphone): Container Áudio e Volume do menu Configurações
+     */
+    private fun buildOverlayAudioVolumeMenu(parent: LinearLayout) {
+        // Container Áudio
+        val audioCard = card(radius = 14f)
+        val audioHead = row()
+        audioHead.addView(icon("mic"), LinearLayout.LayoutParams(dp(18), dp(18)))
+        audioHead.addView(label("Áudio", 12.5f, true).apply { marginStart(dp(6)) })
+        add(audioCard, audioHead)
+
+        val micRow = row()
+        weighted(micRow, label("Microfone (Áudio Externo)", 11.5f), 1f)
+        micRow.addView(neonToggle(micEnabled) { micEnabled = it })
+        add(audioCard, micRow, 34, top = 4)
+
+        val internalRow = row()
+        weighted(internalRow, label("Áudio Interno (Som do Dispositivo)", 11.5f), 1f)
+        internalRow.addView(neonToggle(internalAudioEnabled) { internalAudioEnabled = it })
+        add(audioCard, internalRow, 34, top = 2)
+        add(parent, audioCard, top = 2)
+
+        // Container Volume
+        val volumeCard = card(radius = 14f)
+        val volumeHead = row()
+        volumeHead.addView(icon("volume"), LinearLayout.LayoutParams(dp(18), dp(18)))
+        volumeHead.addView(label("Volume", 12.5f, true).apply { marginStart(dp(6)) })
+        add(volumeCard, volumeHead)
+
+        val micVolVal = label("$micVolume%", 11f, true)
+        val micVolRow = row()
+        micVolRow.addView(label("Microfone:", 11f, color = TemplateStyle.muted), LinearLayout.LayoutParams(dp(86), -2))
+        weighted(micVolRow, customSeekBar(micVolume, 100) {
+            micVolume = it
+            micVolVal.text = "$it%"
+        }, 1f, 30)
+        micVolRow.addView(micVolVal, LinearLayout.LayoutParams(dp(40), -2))
+        add(volumeCard, micVolRow, top = 3)
+
+        val intVolVal = label("$internalVolume%", 11f, true)
+        val intVolRow = row()
+        intVolRow.addView(label("Áudio Interno:", 11f, color = TemplateStyle.muted), LinearLayout.LayoutParams(dp(86), -2))
+        weighted(intVolRow, customSeekBar(internalVolume, 100) {
+            internalVolume = it
+            intVolVal.text = "$it%"
+        }, 1f, 30)
+        intVolRow.addView(intVolVal, LinearLayout.LayoutParams(dp(40), -2))
+        add(volumeCard, intVolRow, top = 2)
+        add(parent, volumeCard, top = 8)
+    }
+
+    // =========================================================================
+    // UI HELPERS (Toggles, Sliders, Layout Spacers)
+    // =========================================================================
+    private fun neonToggle(checked: Boolean, onChange: ((Boolean) -> Unit)? = null): Switch =
+        Switch(activity).apply {
+            isChecked = checked
+            showText = false
+            thumbTintList = ColorStateList.valueOf(TemplateStyle.white)
+            trackTintList = ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(TemplateStyle.magenta, 0xff252945.toInt())
+            )
+            setOnCheckedChangeListener { _, v -> onChange?.invoke(v) }
+        }
+
+    private fun customSeekBar(value: Int, maximum: Int, onChange: (Int) -> Unit): SeekBar =
+        SeekBar(activity).apply {
+            max = maximum
+            progress = value
+            progressTintList = ColorStateList.valueOf(TemplateStyle.magenta)
+            thumbTintList = ColorStateList.valueOf(TemplateStyle.white)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                    if (fromUser) onChange(p)
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }
+
+    private fun View.marginStart(pixels: Int) {
+        val lp = layoutParams as? ViewGroup.MarginLayoutParams
+        if (lp != null) {
+            lp.marginStart = pixels
+            layoutParams = lp
+        }
     }
 }
