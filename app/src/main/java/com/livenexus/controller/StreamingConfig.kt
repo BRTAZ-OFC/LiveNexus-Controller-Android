@@ -14,7 +14,8 @@ data class CaptureLayer(
     var normW: Float = 1.0f,
     var normH: Float = 1.0f,
     var visible: Boolean = true,
-    var aspectRatio: String = "16:9"
+    var aspectRatio: String = "16:9",
+    var url: String = ""
 )
 
 object ProjectionState {

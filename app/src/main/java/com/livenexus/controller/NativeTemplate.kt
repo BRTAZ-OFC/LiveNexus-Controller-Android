@@ -373,7 +373,8 @@ internal class NativeTemplate(private val activity: Activity) {
         var width: Float = 0.80f, // 0.0 to 1.0
         var height: Float = 0.80f, // 0.0 to 1.0
         var isSelected: Boolean = true,
-        var aspectRatio: String = "16:9" // "16:9" or "9:16"
+        var aspectRatio: String = "16:9", // "16:9" or "9:16"
+        var url: String = ""
     )
 
     // Editor state (Canvas starts completely blank)
@@ -385,22 +386,23 @@ internal class NativeTemplate(private val activity: Activity) {
     private var expandedPreview: View? = null
 
     private fun syncSceneLayersToEncoder() {
+        val layers = canvasElements.map { el ->
+            CaptureLayer(
+                id = el.id,
+                type = el.type,
+                label = el.title,
+                normX = el.x,
+                normY = el.y,
+                normW = el.width,
+                normH = el.height,
+                visible = true,
+                aspectRatio = el.aspectRatio,
+                url = el.url
+            )
+        }
         StreamingConfig.activeSceneLayers.clear()
-        StreamingConfig.activeSceneLayers.addAll(
-            canvasElements.map { el ->
-                CaptureLayer(
-                    id = el.id,
-                    type = el.type,
-                    label = el.title,
-                    normX = el.x,
-                    normY = el.y,
-                    normW = el.width,
-                    normH = el.height,
-                    visible = true,
-                    aspectRatio = el.aspectRatio
-                )
-            }
-        )
+        StreamingConfig.activeSceneLayers.addAll(layers)
+        BrowserSourceManager.sync(activity.applicationContext, layers)
     }
 
     private fun getSelectedElement(): CanvasElement? =
@@ -2272,6 +2274,37 @@ internal class NativeTemplate(private val activity: Activity) {
         }
     }
 
+    private fun configureBrowserSource(element: CanvasElement) {
+        if (element.type != "browser" || activity.isFinishing || activity.isDestroyed) return
+        val field = EditText(activity).apply {
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            hint = "https://..."
+            setText(element.url)
+            setSelection(text.length)
+        }
+        val dialog = android.app.AlertDialog.Builder(activity)
+            .setTitle("Browser Source - URL")
+            .setView(field)
+            .setPositiveButton("Salvar", null)
+            .setNegativeButton("Cancelar", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val url = BrowserSourceManager.validUrl(field.text.toString())
+                if (url == null) {
+                    field.error = "Informe uma URL HTTPS válida."
+                    return@setOnClickListener
+                }
+                element.url = url
+                syncSceneLayersToEncoder()
+                render()
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
+    }
+
     private fun addGenericElement(title: String, type: String) {
         canvasElements.forEach { it.isSelected = false }
         val newElem = CanvasElement(
@@ -2316,6 +2349,9 @@ internal class NativeTemplate(private val activity: Activity) {
             },
             onGeometryChanged = {
                 syncSceneLayersToEncoder()
+            },
+            onBrowserDoubleTap = { element ->
+                configureBrowserSource(element)
             }
         )
         container.addView(hud, FrameLayout.LayoutParams(-1, -1))
@@ -2359,7 +2395,8 @@ internal class NativeTemplate(private val activity: Activity) {
         private val elements: MutableList<CanvasElement>,
         private val interactive: Boolean = true,
         private val onSelectionChanged: (() -> Unit)? = null,
-        private val onGeometryChanged: (() -> Unit)? = null
+        private val onGeometryChanged: (() -> Unit)? = null,
+        private val onBrowserDoubleTap: ((CanvasElement) -> Unit)? = null
     ) : View(context) {
         private val p = Paint(Paint.ANTI_ALIAS_FLAG)
         private val previewPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
@@ -2371,12 +2408,18 @@ internal class NativeTemplate(private val activity: Activity) {
         private var selectionChangedDuringTouch = false
         private var geometryChangedDuringTouch = false
         private var previewFrame: Bitmap? = null
+        private var touchElementId: String? = null
+        private var lastTapElementId: String? = null
+        private var lastTapTime = 0L
+        private var touchDownX = 0f
+        private var touchDownY = 0f
 
         // Reaproveita a captura do serviço ativo; jamais inicia uma segunda MediaProjection.
         private val previewRefresh = object : Runnable {
             override fun run() {
                 if (!isAttachedToWindow) return
                 val hasCapture = elements.any { it.type == "screen_capture" }
+                val hasBrowser = elements.any { it.type == "browser" && it.url.isNotBlank() }
                 val next = if (hasCapture && ScreenCaptureService.isLiveStreaming) {
                     ScreenCaptureService.getPreviewSnapshot(480)
                 } else {
@@ -2385,8 +2428,8 @@ internal class NativeTemplate(private val activity: Activity) {
                 val previous = previewFrame
                 previewFrame = next
                 if (previous !== next && previous != null && !previous.isRecycled) previous.recycle()
-                if (hasCapture) invalidate()
-                postDelayed(this, if (hasCapture) 1000L else 1500L)
+                if (hasCapture || hasBrowser) invalidate()
+                postDelayed(this, if (hasBrowser) 100L else if (hasCapture) 1000L else 1500L)
             }
         }
 
@@ -2470,6 +2513,8 @@ internal class NativeTemplate(private val activity: Activity) {
                         p.textSize = min(10f * density, eh * 0.15f).coerceAtLeast(5f * density)
                         c.drawText(detail, ex + 8f * density, ey + eh * 0.62f, p)
                     }
+                } else if (el.type == "browser" && BrowserSourceManager.draw(el.id, c, RectF(ex, ey, er, eb))) {
+                    // Exibe os quadros reais da página, sem alterar os containers do template.
                 } else {
                     p.style = Paint.Style.FILL
                     p.color = Color.argb(210, 12, 18, 38)
@@ -2555,6 +2600,9 @@ internal class NativeTemplate(private val activity: Activity) {
                 MotionEvent.ACTION_DOWN -> {
                     lastTouchX = event.x
                     lastTouchY = event.y
+                    touchDownX = event.x
+                    touchDownY = event.y
+                    touchElementId = null
                     activeHandle = -1
                     selectionChangedDuringTouch = false
                     geometryChangedDuringTouch = false
@@ -2589,6 +2637,7 @@ internal class NativeTemplate(private val activity: Activity) {
 
                         // Check inside selected element for moving
                         if (event.x in ex..er && event.y in ey..eb) {
+                            touchElementId = sel.id
                             activeHandle = 8 // move
                             parent?.requestDisallowInterceptTouchEvent(true)
                             return true
@@ -2606,6 +2655,7 @@ internal class NativeTemplate(private val activity: Activity) {
                     if (clicked != null) {
                         selectionChangedDuringTouch = sel?.id != clicked.id
                         elements.forEach { it.isSelected = (it.id == clicked.id) }
+                        touchElementId = clicked.id
                         activeHandle = 8
                         parent?.requestDisallowInterceptTouchEvent(true)
                         invalidate()
@@ -2679,6 +2729,25 @@ internal class NativeTemplate(private val activity: Activity) {
                     if (event.actionMasked == MotionEvent.ACTION_UP) performClick()
                     if (geometryChangedDuringTouch) onGeometryChanged?.invoke()
                     if (selectionChangedDuringTouch) onSelectionChanged?.invoke()
+                    val touched = touchElementId
+                    val moved = geometryChangedDuringTouch ||
+                        hypot(event.x - touchDownX, event.y - touchDownY) > 12f * density
+                    if (event.actionMasked == MotionEvent.ACTION_UP && !moved &&
+                        touched != null && touched == lastTapElementId &&
+                        event.eventTime - lastTapTime in 40L..android.view.ViewConfiguration.getDoubleTapTimeout().toLong()
+                    ) {
+                        val element = elements.find { it.id == touched && it.type == "browser" }
+                        if (element != null) onBrowserDoubleTap?.invoke(element)
+                        lastTapElementId = null
+                        lastTapTime = 0L
+                    } else if (event.actionMasked == MotionEvent.ACTION_UP && !moved) {
+                        lastTapElementId = touched
+                        lastTapTime = event.eventTime
+                    } else {
+                        lastTapElementId = null
+                        lastTapTime = 0L
+                    }
+                    touchElementId = null
                     geometryChangedDuringTouch = false
                     selectionChangedDuringTouch = false
                     return true

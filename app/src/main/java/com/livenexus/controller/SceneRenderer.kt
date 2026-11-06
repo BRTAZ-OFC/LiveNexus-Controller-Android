@@ -79,6 +79,14 @@ object SceneRenderer {
                         canvas.drawRoundRect(targetRect, 8f, 8f, labelBgPaint)
                     }
                 }
+                "browser" -> {
+                    if (!BrowserSourceManager.draw(layer.id, canvas, targetRect)) {
+                        canvas.drawRoundRect(targetRect, 10f, 10f, labelBgPaint)
+                        canvas.drawRoundRect(targetRect, 10f, 10f, borderPaint)
+                        textPaint.textSize = 24f
+                        canvas.drawText(layer.label, targetRect.left + 16f, targetRect.centerY() + 8f, textPaint)
+                    }
+                }
                 "text" -> {
                     canvas.drawRoundRect(targetRect, 10f, 10f, labelBgPaint)
                     canvas.drawRoundRect(targetRect, 10f, 10f, borderPaint)
