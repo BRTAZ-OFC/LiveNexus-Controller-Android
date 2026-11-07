@@ -442,6 +442,32 @@ internal class NativeTemplate(private val activity: Activity) {
         chooseSceneForButton(index)
     }
 
+    private fun removeSceneButtonSlot(index: Int) {
+        if (index !in sceneButtonSlots.indices) return
+        val removed = sceneButtonSlots.removeAt(index)
+        if (!SceneShortcutStore.save(activity, sceneButtonSlots)) {
+            sceneButtonSlots.add(index, removed)
+            toast("Não foi possível apagar o botão.")
+            return
+        }
+        shortcutLayoutSaved = true
+        refreshSceneShortcutButtons()
+        toast("Botão de cenário apagado.")
+    }
+
+    private fun showSceneButtonOptions(index: Int) {
+        if (index !in sceneButtonSlots.indices) return
+        showSceneSelectionDialog(
+            "Configurar botão",
+            listOf("Selecionar subcenário", "Apagar botão")
+        ) { choice ->
+            when (choice) {
+                0 -> chooseSceneForButton(index)
+                1 -> removeSceneButtonSlot(index)
+            }
+        }
+    }
+
     private fun assignSubScenario(
         slotIndex: Int,
         scene: LiveNexusControllerApi.Scenario,
@@ -1982,7 +2008,7 @@ internal class NativeTemplate(private val activity: Activity) {
         for (i in sceneButtonSlots.indices) {
             buttons.add(sceneButton(
                 "video", sceneShortcutTitle(i), selected = false,
-                longClick = { chooseSceneForButton(i) }
+                longClick = { showSceneButtonOptions(i) }
             ) {
                 selectServerScenario(i)
             })
@@ -3559,13 +3585,27 @@ internal class NativeTemplate(private val activity: Activity) {
         buttons.add(sceneButton("refresh", "Reload", selected = true) {
             reloadControllerScene()
         })
+        buttons.add(sceneButton("plus", "Mortes +", selected = false) {
+            DeathCounterCommands.send(activity, increase = true) { delivered ->
+                if (!activity.isFinishing && !activity.isDestroyed) {
+                    toast(if (delivered) "Comando + enviado ao contador de mortes." else "Falha ao enviar comando + ao LiveNEXUS.")
+                }
+            }
+        })
+        buttons.add(sceneButton("minus", "Mortes −", selected = false) {
+            DeathCounterCommands.send(activity, increase = false) { delivered ->
+                if (!activity.isFinishing && !activity.isDestroyed) {
+                    toast(if (delivered) "Comando − enviado ao contador de mortes." else "Falha ao enviar comando − ao LiveNEXUS.")
+                }
+            }
+        })
         buttons.add(sceneButton("plus", "Adicionar\ncenário", selected = false) {
             addSceneButtonSlot()
         })
         for (i in sceneButtonSlots.indices) {
             buttons.add(sceneButton(
                 "video", sceneShortcutTitle(i), selected = false,
-                longClick = { chooseSceneForButton(i) }
+                longClick = { showSceneButtonOptions(i) }
             ) {
                 selectServerScenario(i)
             })
