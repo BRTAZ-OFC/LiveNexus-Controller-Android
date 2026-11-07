@@ -2742,17 +2742,19 @@ internal class NativeTemplate(private val activity: Activity) {
                 val eb = ey + eh
 
                 if (el.type == "screen_capture") {
-                    // A imagem anterior era um aplicativo fictício; só mostramos o quadro real.
+                    // Preview acompanha a mesma correcao de margem esquerda do encoder.
+                    val captureLeft = if (
+                        ex > 0f && ex <= w * 0.06f && er >= w * 0.96f
+                    ) 0f else ex
                     p.style = Paint.Style.FILL
                     p.color = Color.rgb(10, 16, 32)
-                    c.drawRect(ex, ey, er, eb, p)
+                    c.drawRect(captureLeft, ey, er, eb, p)
 
                     val capturedFrame = previewFrame
                     if (capturedFrame != null && !capturedFrame.isRecycled) {
-                        // Mesma regra do encoder: horizontal preenche; vertical preserva proporcao.
                         val saved = c.save()
-                        c.clipRect(ex, ey, er, eb)
-                        SceneRenderer.drawCapture(c, capturedFrame, RectF(ex, ey, er, eb), previewPaint)
+                        c.clipRect(captureLeft, ey, er, eb)
+                        SceneRenderer.drawCapture(c, capturedFrame, RectF(captureLeft, ey, er, eb), previewPaint)
                         c.restoreToCount(saved)
                     } else {
                         val title = if (el.title == "Captura de Jogos") "Captura de Jogos" else "Captura de Tela"
