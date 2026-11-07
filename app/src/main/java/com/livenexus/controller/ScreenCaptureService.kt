@@ -15,6 +15,7 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.view.WindowManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -126,6 +127,72 @@ class ScreenCaptureService : Service() {
     private var imageReader: ImageReader? = null
     private var imageThread: HandlerThread? = null
     private var imageHandler: Handler? = null
+    @Volatile private var captureSize: Pair<Int, Int>? = null
+    private var captureDensityDpi = 0
+
+    // Captura no tamanho real da tela/janela, independente dos 1920x1080 do encoder.
+    private fun createCaptureReader(width: Int, height: Int, handler: Handler): ImageReader {
+        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        reader.setOnImageAvailableListener({ source ->
+            val image = try { source.acquireLatestImage() } catch (_: Exception) { null }
+                ?: return@setOnImageAvailableListener
+            try {
+                val plane = image.planes.firstOrNull() ?: return@setOnImageAvailableListener
+                val pixelStride = plane.pixelStride
+                val rowStride = plane.rowStride
+                val frameWidth = image.width
+                val frameHeight = image.height
+                if (pixelStride != 4 || rowStride < frameWidth * pixelStride) return@setOnImageAvailableListener
+                val paddedWidth = rowStride / pixelStride
+                val padded = Bitmap.createBitmap(paddedWidth, frameHeight, Bitmap.Config.ARGB_8888)
+                try {
+                    padded.copyPixelsFromBuffer(plane.buffer)
+                    val frame = if (paddedWidth == frameWidth) padded else {
+                        Bitmap.createBitmap(padded, 0, 0, frameWidth, frameHeight)
+                    }
+                    if (frame !== padded) padded.recycle()
+                    synchronized(bitmapLock) {
+                        val previous = latestScreenBitmap
+                        latestScreenBitmap = frame
+                        if (previous !== frame && previous != null && !previous.isRecycled) previous.recycle()
+                    }
+                } catch (error: Exception) {
+                    if (!padded.isRecycled) padded.recycle()
+                    throw error
+                }
+            } catch (error: Exception) {
+                Log.w(TAG, "Falha ao processar quadro da captura: ${error.message}")
+            } finally {
+                image.close()
+            }
+        }, handler)
+        return reader
+    }
+
+    private fun resizeCapturedContent(width: Int, height: Int) {
+        if (width <= 0 || height <= 0 || stopping.get()) return
+        captureSize = width to height
+        val handler = imageHandler ?: return
+        handler.post {
+            if (stopping.get()) return@post
+            val display = virtualDisplay ?: return@post
+            val previous = imageReader
+            if (previous?.width == width && previous.height == height) return@post
+            var replacement: ImageReader? = null
+            try {
+                replacement = createCaptureReader(width, height, handler)
+                display.resize(width, height, captureDensityDpi)
+                display.setSurface(replacement.surface)
+                imageReader = replacement
+                previous?.setOnImageAvailableListener(null, null)
+                previous?.close()
+                Log.i(TAG, "MediaProjection ajustada ao conteúdo: ${width}x${height}, encoder preservado")
+            } catch (error: Exception) {
+                Log.e(TAG, "Falha ao redimensionar captura", error)
+                if (imageReader !== replacement) replacement?.close()
+            }
+        }
+    }
 
     private var videoEncoder: LocalVideoEncoder? = null
     private var audioEncoder: LocalAudioEncoder? = null
@@ -158,6 +225,11 @@ class ScreenCaptureService : Service() {
             Log.i(TAG, "MediaProjection finalizada pelo sistema.")
             stopStreamingInternal("Captura de tela encerrada pelo sistema.")
             stopSelf()
+        }
+
+        override fun onCapturedContentResize(width: Int, height: Int) {
+            // Android 14+: dimensões reais da janela compartilhada após início/rotação.
+            resizeCapturedContent(width, height)
         }
     }
 
@@ -358,61 +430,32 @@ class ScreenCaptureService : Service() {
                 val imgHandler = Handler(imgThread.looper)
                 imageHandler = imgHandler
 
-                val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+                // Não usar dimensões fixas do encoder na MediaProjection:
+                // Android pode adicionar letterbox antes de entregar o bitmap.
+                val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                val bounds = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    windowManager.maximumWindowMetrics.bounds
+                } else null
+                val fallbackMetrics = resources.displayMetrics
+                val captureWidth = (bounds?.width() ?: fallbackMetrics.widthPixels).coerceAtLeast(1)
+                val captureHeight = (bounds?.height() ?: fallbackMetrics.heightPixels).coerceAtLeast(1)
+                captureDensityDpi = densityDpi
+                val reader = createCaptureReader(captureWidth, captureHeight, imgHandler)
                 imageReader = reader
-                reader.setOnImageAvailableListener({ ir ->
-                    val image = try {
-                        ir.acquireLatestImage()
-                    } catch (_: Exception) {
-                        null
-                    } ?: return@setOnImageAvailableListener
-
-                    try {
-                        val planes = image.planes
-                        if (planes.isNotEmpty()) {
-                            val buffer = planes[0].buffer
-                            val pixelStride = planes[0].pixelStride
-                            val rowStride = planes[0].rowStride
-                            val rowPadding = rowStride - pixelStride * width
-                            val bmpWidth = width + rowPadding / pixelStride
-
-                            val tempBmp = Bitmap.createBitmap(bmpWidth, height, Bitmap.Config.ARGB_8888)
-                            tempBmp.copyPixelsFromBuffer(buffer)
-                            val finalBmp = if (bmpWidth != width) {
-                                val cropped = Bitmap.createBitmap(tempBmp, 0, 0, width, height)
-                                tempBmp.recycle()
-                                cropped
-                            } else {
-                                tempBmp
-                            }
-
-                            synchronized(bitmapLock) {
-                                val old = latestScreenBitmap
-                                latestScreenBitmap = finalBmp
-                                if (old != null && old !== finalBmp && !old.isRecycled) {
-                                    old.recycle()
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Falha ao processar quadro da captura de tela: ${e.message}")
-                    } finally {
-                        try {
-                            image.close()
-                        } catch (_: Exception) {}
-                    }
-                }, imgHandler)
 
                 virtualDisplay = projection.createVirtualDisplay(
                     "LiveNexusScreenCapture",
-                    width,
-                    height,
+                    captureWidth,
+                    captureHeight,
                     densityDpi,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                     reader.surface,
                     null,
                     imgHandler
                 )
+                // Recebe o tamanho exato do Android 14+, inclusive se o callback
+                // chegou enquanto o VirtualDisplay estava sendo criado.
+                captureSize?.let { (cw, ch) -> resizeCapturedContent(cw, ch) }
                 if (stopping.get()) return@Thread
 
                 val compositor = SceneCompositor(
@@ -516,6 +559,7 @@ class ScreenCaptureService : Service() {
             imageReader?.close()
         } catch (_: Exception) {}
         imageReader = null
+        captureSize = null
 
         try {
             imageThread?.quitSafely()
