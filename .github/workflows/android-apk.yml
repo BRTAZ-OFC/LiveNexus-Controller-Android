@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -64,3 +64,17 @@ jobs:
           path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 14
+
+      - name: Disponibilizar APK assinado para download público
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="1.0.${GITHUB_RUN_NUMBER}"
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          gh release create "v$VERSION" \
+            "$APK#LiveNexus-Controller.apk" \
+            --title "LiveNEXUS Controller v$VERSION" \
+            --notes "APK Android assinado, compilado a partir do commit ${GITHUB_SHA}." \
+            --latest
