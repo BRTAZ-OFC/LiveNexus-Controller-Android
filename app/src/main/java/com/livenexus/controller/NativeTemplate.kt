@@ -2751,14 +2751,19 @@ internal class NativeTemplate(private val activity: Activity) {
                     if (capturedFrame != null && !capturedFrame.isRecycled) {
                         val imageW = capturedFrame.width.toFloat()
                         val imageH = capturedFrame.height.toFloat()
-                        val scale = min(ew / imageW, eh / imageH)
-                        val renderedW = imageW * scale
-                        val renderedH = imageH * scale
-                        val left = ex + (ew - renderedW) / 2f
-                        val top = ey + (eh - renderedH) / 2f
+                        // Previa identica ao encoder: ocupar o retangulo, sem faixas.
+                        val scale = maxOf(ew / imageW, eh / imageH)
+                        val croppedW = (ew / scale).coerceAtMost(imageW)
+                        val croppedH = (eh / scale).coerceAtMost(imageH)
+                        val cropLeft = ((imageW - croppedW) / 2f).toInt().coerceAtLeast(0)
+                        val cropTop = ((imageH - croppedH) / 2f).toInt().coerceAtLeast(0)
+                        val cropRight = (cropLeft + croppedW).toInt().coerceIn(cropLeft + 1, capturedFrame.width)
+                        val cropBottom = (cropTop + croppedH).toInt().coerceIn(cropTop + 1, capturedFrame.height)
                         val saved = c.save()
                         c.clipRect(ex, ey, er, eb)
-                        c.drawBitmap(capturedFrame, null, RectF(left, top, left + renderedW, top + renderedH), previewPaint)
+                        c.drawBitmap(capturedFrame,
+                            android.graphics.Rect(cropLeft, cropTop, cropRight, cropBottom),
+                            RectF(ex, ey, er, eb), previewPaint)
                         c.restoreToCount(saved)
                     } else {
                         val title = if (el.title == "Captura de Jogos") "Captura de Jogos" else "Captura de Tela"
