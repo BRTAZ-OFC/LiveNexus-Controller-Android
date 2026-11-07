@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
+import android.graphics.Point
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
@@ -20,8 +21,10 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.util.Log
+import android.view.Display
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.max
 
 class ScreenCaptureService : Service() {
 
@@ -126,6 +129,99 @@ class ScreenCaptureService : Service() {
     private var imageReader: ImageReader? = null
     private var imageThread: HandlerThread? = null
     private var imageHandler: Handler? = null
+    private var displayManager: DisplayManager? = null
+    private var captureDisplayListener: DisplayManager.DisplayListener? = null
+    private var captureDensityDpi = 0
+
+    private fun currentDisplaySize(): Pair<Int, Int> {
+        // A resolucao do smartphone e independente da resolucao do encoder.
+        val display = (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
+            .getDisplay(Display.DEFAULT_DISPLAY)
+        val size = Point()
+        if (display != null) {
+            @Suppress("DEPRECATION")
+            display.getRealSize(size)
+        } else {
+            val metrics = resources.displayMetrics
+            size.set(metrics.widthPixels, metrics.heightPixels)
+        }
+        // Limita custo de memoria em aparelhos QHD/4K, conservando a proporcao.
+        val longest = max(size.x, size.y).coerceAtLeast(1)
+        val scale = minOf(1.0, 2560.0 / longest)
+        val w = ((size.x * scale).toInt() / 2 * 2).coerceAtLeast(2)
+        val h = ((size.y * scale).toInt() / 2 * 2).coerceAtLeast(2)
+        return w to h
+    }
+
+    private fun createCaptureReader(width: Int, height: Int, handler: Handler): ImageReader {
+        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        reader.setOnImageAvailableListener({ source ->
+            val image = try { source.acquireLatestImage() } catch (_: Exception) { null }
+                ?: return@setOnImageAvailableListener
+            try {
+                val plane = image.planes.firstOrNull() ?: return@setOnImageAvailableListener
+                val pixelStride = plane.pixelStride
+                val rowStride = plane.rowStride
+                val frameWidth = image.width
+                val frameHeight = image.height
+                if (pixelStride != 4 || rowStride < frameWidth * pixelStride) return@setOnImageAvailableListener
+
+                val paddedWidth = rowStride / pixelStride
+                val padded = Bitmap.createBitmap(paddedWidth, frameHeight, Bitmap.Config.ARGB_8888)
+                var frame: Bitmap? = null
+                try {
+                    padded.copyPixelsFromBuffer(plane.buffer)
+                    frame = if (paddedWidth == frameWidth) padded
+                        else Bitmap.createBitmap(padded, 0, 0, frameWidth, frameHeight)
+                    synchronized(bitmapLock) {
+                        val previous = latestScreenBitmap
+                        latestScreenBitmap = frame
+                        if (previous !== frame && previous != null && !previous.isRecycled) previous.recycle()
+                    }
+                } finally {
+                    if (frame !== padded && !padded.isRecycled) padded.recycle()
+                }
+            } catch (error: Exception) {
+                Log.w(TAG, "Falha ao ler quadro da MediaProjection: ${error.message}")
+            } finally {
+                try { image.close() } catch (_: Exception) {}
+            }
+        }, handler)
+        return reader
+    }
+
+    private fun resizeCapture(width: Int, height: Int) {
+        if (width < 2 || height < 2 || stopping.get()) return
+        val handler = imageHandler ?: return
+        handler.post {
+            if (stopping.get()) return@post
+            val display = virtualDisplay ?: return@post
+            val oldReader = imageReader ?: return@post
+            if (oldReader.width == width && oldReader.height == height) return@post
+
+            var newReader: ImageReader? = null
+            try {
+                newReader = createCaptureReader(width, height, handler)
+                // Desacoplar antes de trocar a Surface evita frames obsoletos.
+                display.setSurface(null)
+                display.resize(width, height, captureDensityDpi)
+                display.setSurface(newReader.surface)
+                imageReader = newReader
+                oldReader.setOnImageAvailableListener(null, null)
+                oldReader.close()
+                Log.i(TAG, "Captura ajustada para ${width}x${height}; encoder inalterado")
+            } catch (error: Exception) {
+                Log.e(TAG, "Falha ao ajustar dimensoes da captura", error)
+                try {
+                    display.resize(oldReader.width, oldReader.height, captureDensityDpi)
+                    display.setSurface(oldReader.surface)
+                } catch (rollbackError: Exception) {
+                    Log.e(TAG, "Falha ao restaurar a Surface da captura", rollbackError)
+                }
+                try { newReader?.close() } catch (_: Exception) {}
+            }
+        }
+    }
 
     private var videoEncoder: LocalVideoEncoder? = null
     private var audioEncoder: LocalAudioEncoder? = null
@@ -158,6 +254,18 @@ class ScreenCaptureService : Service() {
             Log.i(TAG, "MediaProjection finalizada pelo sistema.")
             stopStreamingInternal("Captura de tela encerrada pelo sistema.")
             stopSelf()
+        }
+
+        override fun onCapturedContentResize(width: Int, height: Int) {
+            if (Build.VERSION.SDK_INT >= 34) {
+                // A14+: a regiao compartilhada pode ser uma janela, nao a tela toda.
+                val longest = max(width, height).coerceAtLeast(1)
+                val scale = minOf(1.0, 2560.0 / longest)
+                resizeCapture(
+                    ((width * scale).toInt() / 2 * 2).coerceAtLeast(2),
+                    ((height * scale).toInt() / 2 * 2).coerceAtLeast(2)
+                )
+            }
         }
     }
 
@@ -358,61 +466,45 @@ class ScreenCaptureService : Service() {
                 val imgHandler = Handler(imgThread.looper)
                 imageHandler = imgHandler
 
-                val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+                captureDensityDpi = resources.configuration.densityDpi
+                val (captureWidth, captureHeight) = currentDisplaySize()
+                val reader = createCaptureReader(captureWidth, captureHeight, imgHandler)
                 imageReader = reader
-                reader.setOnImageAvailableListener({ ir ->
-                    val image = try {
-                        ir.acquireLatestImage()
-                    } catch (_: Exception) {
-                        null
-                    } ?: return@setOnImageAvailableListener
-
-                    try {
-                        val planes = image.planes
-                        if (planes.isNotEmpty()) {
-                            val buffer = planes[0].buffer
-                            val pixelStride = planes[0].pixelStride
-                            val rowStride = planes[0].rowStride
-                            val rowPadding = rowStride - pixelStride * width
-                            val bmpWidth = width + rowPadding / pixelStride
-
-                            val tempBmp = Bitmap.createBitmap(bmpWidth, height, Bitmap.Config.ARGB_8888)
-                            tempBmp.copyPixelsFromBuffer(buffer)
-                            val finalBmp = if (bmpWidth != width) {
-                                val cropped = Bitmap.createBitmap(tempBmp, 0, 0, width, height)
-                                tempBmp.recycle()
-                                cropped
-                            } else {
-                                tempBmp
-                            }
-
-                            synchronized(bitmapLock) {
-                                val old = latestScreenBitmap
-                                latestScreenBitmap = finalBmp
-                                if (old != null && old !== finalBmp && !old.isRecycled) {
-                                    old.recycle()
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Falha ao processar quadro da captura de tela: ${e.message}")
-                    } finally {
-                        try {
-                            image.close()
-                        } catch (_: Exception) {}
-                    }
-                }, imgHandler)
 
                 virtualDisplay = projection.createVirtualDisplay(
                     "LiveNexusScreenCapture",
-                    width,
-                    height,
-                    densityDpi,
+                    captureWidth,
+                    captureHeight,
+                    captureDensityDpi,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                     reader.surface,
                     null,
                     imgHandler
                 )
+
+                // Android 10-13 nao fornece onCapturedContentResize.
+                // Acompanhar rotacao do display sem recriar a MediaProjection.
+                if (Build.VERSION.SDK_INT < 34) {
+                    val manager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+                    val listener = object : DisplayManager.DisplayListener {
+                        override fun onDisplayAdded(displayId: Int) {}
+                        override fun onDisplayRemoved(displayId: Int) {}
+                        override fun onDisplayChanged(displayId: Int) {
+                            if (displayId != Display.DEFAULT_DISPLAY || stopping.get()) return
+                            Handler(mainLooper).postDelayed({
+                                if (!stopping.get()) {
+                                    val (w, h) = currentDisplaySize()
+                                    resizeCapture(w, h)
+                                }
+                            }, 200L)
+                        }
+                    }
+                    displayManager = manager
+                    captureDisplayListener = listener
+                    manager.registerDisplayListener(listener, Handler(mainLooper))
+                    val (w, h) = currentDisplaySize()
+                    resizeCapture(w, h)
+                }
                 if (stopping.get()) return@Thread
 
                 val compositor = SceneCompositor(
@@ -505,6 +597,12 @@ class ScreenCaptureService : Service() {
             sceneCompositor?.close()
         } catch (_: Exception) {}
         sceneCompositor = null
+
+        captureDisplayListener?.let { listener ->
+            try { displayManager?.unregisterDisplayListener(listener) } catch (_: Exception) {}
+        }
+        captureDisplayListener = null
+        displayManager = null
 
         try {
             virtualDisplay?.release()
