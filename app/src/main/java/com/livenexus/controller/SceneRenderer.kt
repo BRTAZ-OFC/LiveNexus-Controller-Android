@@ -8,6 +8,7 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import kotlin.math.min
+import kotlin.math.max
 
 /**
  * Renders the captured screen frame and active scenario layers onto the video encoder canvas.
@@ -58,7 +59,7 @@ object SceneRenderer {
         // 2. If no layers were explicitly placed on the Scenario Editor, render full-screen capture
         if (visibleLayers.isEmpty()) {
             if (screenBitmap != null && !screenBitmap.isRecycled) {
-                drawCenterInside(canvas, screenBitmap, RectF(0f, 0f, w, h))
+                drawCapture(canvas, screenBitmap, RectF(0f, 0f, w, h), bitmapPaint)
             }
             return
         }
@@ -74,7 +75,7 @@ object SceneRenderer {
             when (layer.type) {
                 "screen_capture" -> {
                     if (screenBitmap != null && !screenBitmap.isRecycled) {
-                        drawCenterInside(canvas, screenBitmap, targetRect)
+                        drawCapture(canvas, screenBitmap, targetRect, bitmapPaint)
                     } else {
                         canvas.drawRoundRect(targetRect, 8f, 8f, labelBgPaint)
                     }
@@ -109,7 +110,29 @@ object SceneRenderer {
         }
     }
 
-    private fun drawCenterInside(canvas: Canvas, bitmap: Bitmap, target: RectF) {
+    fun drawCapture(canvas: Canvas, bitmap: Bitmap, target: RectF, paint: Paint) {
+        if (bitmap.isRecycled || target.width() <= 0f || target.height() <= 0f) return
+        val bw = bitmap.width.toFloat()
+        val bh = bitmap.height.toFloat()
+
+        // Somente captura horizontal em destino horizontal preenche via recorte.
+        // Captura vertical permanece inteira (sem zoom ou recorte forçado).
+        if (bw > bh && target.width() > target.height()) {
+            val scale = max(target.width() / bw, target.height() / bh)
+            val visibleW = target.width() / scale
+            val visibleH = target.height() / scale
+            val left = ((bw - visibleW) / 2f).toInt().coerceAtLeast(0)
+            val top = ((bh - visibleH) / 2f).toInt().coerceAtLeast(0)
+            srcRect.set(left, top,
+                (left + visibleW).toInt().coerceIn(left + 1, bitmap.width),
+                (top + visibleH).toInt().coerceIn(top + 1, bitmap.height))
+            canvas.drawBitmap(bitmap, srcRect, target, paint)
+        } else {
+            drawCenterInside(canvas, bitmap, target, paint)
+        }
+    }
+
+    private fun drawCenterInside(canvas: Canvas, bitmap: Bitmap, target: RectF, paint: Paint) {
         val bw = bitmap.width.toFloat()
         val bh = bitmap.height.toFloat()
         if (bw <= 0f || bh <= 0f) return
@@ -122,6 +145,6 @@ object SceneRenderer {
 
         srcRect.set(0, 0, bitmap.width, bitmap.height)
         dstRect.set(dx, dy, dx + drawW, dy + drawH)
-        canvas.drawBitmap(bitmap, srcRect, dstRect, bitmapPaint)
+        canvas.drawBitmap(bitmap, srcRect, dstRect, paint)
     }
 }
