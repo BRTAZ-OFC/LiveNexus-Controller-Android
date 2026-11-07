@@ -73,10 +73,16 @@ object SceneRenderer {
 
             when (layer.type) {
                 "screen_capture" -> {
+                    // Corrige apenas uma margem pequena a esquerda em capturas
+                    // quase fullscreen; nunca amplia topo, base ou lado direito.
+                    val captureLeft = if (
+                        left > 0f && left <= w * 0.06f && right >= w * 0.96f
+                    ) 0f else left
+                    val captureRect = RectF(captureLeft, top, right, bottom)
                     if (screenBitmap != null && !screenBitmap.isRecycled) {
-                        drawCapture(canvas, screenBitmap, targetRect, bitmapPaint)
+                        drawCapture(canvas, screenBitmap, captureRect, bitmapPaint)
                     } else {
-                        canvas.drawRoundRect(targetRect, 8f, 8f, labelBgPaint)
+                        canvas.drawRoundRect(captureRect, 8f, 8f, labelBgPaint)
                     }
                 }
                 "browser" -> {
