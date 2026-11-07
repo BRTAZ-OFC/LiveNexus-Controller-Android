@@ -7,7 +7,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
-import kotlin.math.min
+import kotlin.math.max
 
 /**
  * Renders the captured screen frame and active scenario layers onto the video encoder canvas.
@@ -58,7 +58,7 @@ object SceneRenderer {
         // 2. If no layers were explicitly placed on the Scenario Editor, render full-screen capture
         if (visibleLayers.isEmpty()) {
             if (screenBitmap != null && !screenBitmap.isRecycled) {
-                drawCenterInside(canvas, screenBitmap, RectF(0f, 0f, w, h))
+                drawCenterCrop(canvas, screenBitmap, RectF(0f, 0f, w, h))
             }
             return
         }
@@ -74,7 +74,7 @@ object SceneRenderer {
             when (layer.type) {
                 "screen_capture" -> {
                     if (screenBitmap != null && !screenBitmap.isRecycled) {
-                        drawCenterInside(canvas, screenBitmap, targetRect)
+                        drawCenterCrop(canvas, screenBitmap, targetRect)
                     } else {
                         canvas.drawRoundRect(targetRect, 8f, 8f, labelBgPaint)
                     }
@@ -109,19 +109,22 @@ object SceneRenderer {
         }
     }
 
-    private fun drawCenterInside(canvas: Canvas, bitmap: Bitmap, target: RectF) {
+    private fun drawCenterCrop(canvas: Canvas, bitmap: Bitmap, target: RectF) {
         val bw = bitmap.width.toFloat()
         val bh = bitmap.height.toFloat()
-        if (bw <= 0f || bh <= 0f) return
+        if (bw <= 0f || bh <= 0f || target.width() <= 0f || target.height() <= 0f) return
 
-        val scale = min(target.width() / bw, target.height() / bh)
-        val drawW = bw * scale
-        val drawH = bh * scale
-        val dx = target.left + (target.width() - drawW) / 2f
-        val dy = target.top + (target.height() - drawH) / 2f
-
-        srcRect.set(0, 0, bitmap.width, bitmap.height)
-        dstRect.set(dx, dy, dx + drawW, dy + drawH)
+        // Preenche a area sem distorcer a proporcao do jogo.
+        // Apenas as extremidades excedentes sao cortadas.
+        val scale = max(target.width() / bw, target.height() / bh)
+        val cropWidth = (target.width() / scale).coerceAtMost(bw)
+        val cropHeight = (target.height() / scale).coerceAtMost(bh)
+        val left = ((bw - cropWidth) / 2f).toInt().coerceAtLeast(0)
+        val top = ((bh - cropHeight) / 2f).toInt().coerceAtLeast(0)
+        val right = (left + cropWidth).toInt().coerceIn(left + 1, bitmap.width)
+        val bottom = (top + cropHeight).toInt().coerceIn(top + 1, bitmap.height)
+        srcRect.set(left, top, right, bottom)
+        dstRect.set(target)
         canvas.drawBitmap(bitmap, srcRect, dstRect, bitmapPaint)
     }
 }
