@@ -2749,16 +2749,10 @@ internal class NativeTemplate(private val activity: Activity) {
 
                     val capturedFrame = previewFrame
                     if (capturedFrame != null && !capturedFrame.isRecycled) {
-                        val imageW = capturedFrame.width.toFloat()
-                        val imageH = capturedFrame.height.toFloat()
-                        val scale = min(ew / imageW, eh / imageH)
-                        val renderedW = imageW * scale
-                        val renderedH = imageH * scale
-                        val left = ex + (ew - renderedW) / 2f
-                        val top = ey + (eh - renderedH) / 2f
+                        // Mesma regra do encoder: horizontal preenche; vertical preserva proporcao.
                         val saved = c.save()
                         c.clipRect(ex, ey, er, eb)
-                        c.drawBitmap(capturedFrame, null, RectF(left, top, left + renderedW, top + renderedH), previewPaint)
+                        SceneRenderer.drawCapture(c, capturedFrame, RectF(ex, ey, er, eb), previewPaint)
                         c.restoreToCount(saved)
                     } else {
                         val title = if (el.title == "Captura de Jogos") "Captura de Jogos" else "Captura de Tela"
