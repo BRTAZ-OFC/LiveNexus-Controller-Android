@@ -40,6 +40,11 @@ object SceneRenderer {
     private val srcRect = Rect()
     private val dstRect = RectF()
 
+    // Mantem o enquadramento fixo enquanto a resolucao da captura nao mudar.
+    private var cropFrameWidth = 0
+    private var cropFrameHeight = 0
+    private var lockedLeftCrop = 0
+
     fun renderScene(
         canvas: Canvas,
         width: Int,
@@ -129,12 +134,27 @@ object SceneRenderer {
             // Remove somente a faixa preta incorporada ao bitmap na esquerda,
             // comum em algumas combinacoes de MediaProjection e VirtualDisplay.
             // Nao recorta HUD quando a borda nao estiver presente.
-            val leftCrop = if (bw > bh) detectLeftBlackBar(bitmap) else 0
+            val leftCrop = if (bw > bh) stableLeftCrop(bitmap) else 0
             srcRect.set(leftCrop, 0, bitmap.width, bitmap.height)
             canvas.drawBitmap(bitmap, srcRect, target, paint)
         } else {
             drawCenterInside(canvas, bitmap, target, paint)
         }
+    }
+
+    @Synchronized
+    private fun stableLeftCrop(bitmap: Bitmap): Int {
+        if (cropFrameWidth != bitmap.width || cropFrameHeight != bitmap.height) {
+            cropFrameWidth = bitmap.width
+            cropFrameHeight = bitmap.height
+            lockedLeftCrop = 0
+        }
+        // Depois de detectar a faixa, nao recalcular quadro a quadro.
+        // Isso evita a oscilacao entre recortar e voltar ao tamanho original.
+        if (lockedLeftCrop == 0) {
+            lockedLeftCrop = detectLeftBlackBar(bitmap)
+        }
+        return lockedLeftCrop
     }
 
     private fun detectLeftBlackBar(bitmap: Bitmap): Int {
