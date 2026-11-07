@@ -126,11 +126,45 @@ object SceneRenderer {
         // proporcao original para evitar deformacao extrema.
         val sameOrientation = (bw >= bh) == (target.width() >= target.height())
         if (sameOrientation) {
-            srcRect.set(0, 0, bitmap.width, bitmap.height)
+            // Remove somente a faixa preta incorporada ao bitmap na esquerda,
+            // comum em algumas combinacoes de MediaProjection e VirtualDisplay.
+            // Nao recorta HUD quando a borda nao estiver presente.
+            val leftCrop = if (bw > bh) detectLeftBlackBar(bitmap) else 0
+            srcRect.set(leftCrop, 0, bitmap.width, bitmap.height)
             canvas.drawBitmap(bitmap, srcRect, target, paint)
         } else {
             drawCenterInside(canvas, bitmap, target, paint)
         }
+    }
+
+    private fun detectLeftBlackBar(bitmap: Bitmap): Int {
+        // Amostragem pequena por quadro, sem criar bitmaps ou buffers extras.
+        // Uma tela escura nao deve ser confundida com uma faixa preta.
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width < 300 || height < 200) return 0
+        val rows = intArrayOf(18, 30, 42, 58, 70, 82)
+        fun nearBlackColumn(x: Int): Boolean {
+            var blackSamples = 0
+            for (percent in rows) {
+                val color = bitmap.getPixel(x, height * percent / 100)
+                if (Color.red(color) < 18 && Color.green(color) < 18 && Color.blue(color) < 18) {
+                    blackSamples++
+                }
+            }
+            return blackSamples >= 5
+        }
+
+        // Corrigir somente borda real de ate 6% e com conteudo visivel a frente.
+        if (!nearBlackColumn(0) || nearBlackColumn(width * 9 / 100)) return 0
+        val step = (width / 300).coerceAtLeast(1)
+        val maxX = width * 6 / 100
+        var x = step
+        while (x <= maxX) {
+            if (!nearBlackColumn(x)) return x.coerceAtMost(maxX)
+            x += step
+        }
+        return 0
     }
 
     private fun drawCenterInside(canvas: Canvas, bitmap: Bitmap, target: RectF, paint: Paint) {
