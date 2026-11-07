@@ -1480,8 +1480,8 @@ internal class NativeTemplate(private val activity: Activity) {
         bitHead.addView(bitBadge)
         add(bitrateCard, bitHead)
 
-        val bitSeek = customSeekBar(bitrate - 2000, 8000) {
-            bitrate = (it + 2000).coerceIn(2000, 10000)
+        val bitSeek = customSeekBar(((bitrate - 2000) / 500).coerceIn(0, 16), 16) {
+            bitrate = (it * 500 + 2000).coerceIn(2000, 10000)
             bitBadge.text = "$bitrate Kbps"
             StreamingConfig.saveBitrateKbps(activity, bitrate)
             ScreenCaptureService.updateDynamicBitrate(bitrate)
