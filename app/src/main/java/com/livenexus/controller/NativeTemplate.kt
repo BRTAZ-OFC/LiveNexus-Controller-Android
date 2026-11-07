@@ -614,10 +614,10 @@ internal class NativeTemplate(private val activity: Activity) {
                 id = "screen_${System.currentTimeMillis()}",
                 type = "screen_capture",
                 title = "Captura de Tela",
-                x = 0.10f,
-                y = 0.10f,
-                width = 0.80f,
-                height = 0.80f,
+                x = 0f,
+                y = 0f,
+                width = 1f,
+                height = 1f,
                 isSelected = true
             )
             canvasElements.add(newElement)
@@ -712,6 +712,18 @@ internal class NativeTemplate(private val activity: Activity) {
         ScenarioStorage.load(activity)?.let { saved ->
             canvasElements.clear()
             canvasElements.addAll(saved.elements)
+            // Migra somente a geometria padrao antiga (80% centralizado).
+            // Nao altera posicionamentos ou tamanhos personalizados pelo usuario.
+            canvasElements.filter { it.type == "screen_capture" &&
+                it.x == 0.10f && it.y == 0.10f &&
+                it.width == 0.80f && it.height == 0.80f &&
+                it.aspectRatio == "16:9"
+            }.forEach {
+                it.x = 0f
+                it.y = 0f
+                it.width = 1f
+                it.height = 1f
+            }
             selectedElementId = saved.elements.firstOrNull { it.isSelected }?.id
             streamOrientation = saved.orientation
             StreamingConfig.saveOrientationLabel(activity, streamOrientation)
@@ -2217,10 +2229,10 @@ internal class NativeTemplate(private val activity: Activity) {
                     toast("Captura de Tela alterada para 9:16 (Vertical)")
                 } else {
                     selElem.aspectRatio = "16:9"
-                    selElem.width = 0.80f
-                    selElem.height = 0.80f
-                    selElem.x = 0.10f
-                    selElem.y = 0.10f
+                    selElem.width = 1f
+                    selElem.height = 1f
+                    selElem.x = 0f
+                    selElem.y = 0f
                     toast("Captura de Tela alterada para 16:9 (Horizontal)")
                 }
                 syncSceneLayersToEncoder()
@@ -2563,10 +2575,10 @@ internal class NativeTemplate(private val activity: Activity) {
             id = "${type}_${System.currentTimeMillis()}",
             type = type,
             title = title,
-            x = 0.20f,
-            y = 0.20f,
-            width = 0.60f,
-            height = 0.50f,
+            x = if (type == "screen_capture") 0f else 0.20f,
+            y = if (type == "screen_capture") 0f else 0.20f,
+            width = if (type == "screen_capture") 1f else 0.60f,
+            height = if (type == "screen_capture") 1f else 0.50f,
             isSelected = true
         )
         canvasElements.add(newElem)
