@@ -114,26 +114,13 @@ object SceneRenderer {
         val bw = bitmap.width.toFloat()
         val bh = bitmap.height.toFloat()
 
-        // Na horizontal, limitar o corte a 4% por lateral para preservar HUD.
-        // O ajuste residual e distribuido pela largura/altura para ocupar o canvas.
-        // A captura vertical continua com encaixe proporcional sem cortes.
-        if (bw > bh && target.width() > target.height()) {
-            val targetRatio = target.width() / target.height()
-            val sourceRatio = bw / bh
-            val maxCropFractionPerSide = 0.04f
-            if (sourceRatio > targetRatio) {
-                val idealWidth = bh * targetRatio
-                val cropPerSide = ((bw - idealWidth) / 2f)
-                    .coerceIn(0f, bw * maxCropFractionPerSide)
-                val crop = cropPerSide.toInt()
-                srcRect.set(crop, 0, bitmap.width - crop, bitmap.height)
-            } else {
-                val idealHeight = bw / targetRatio
-                val cropPerSide = ((bh - idealHeight) / 2f)
-                    .coerceIn(0f, bh * maxCropFractionPerSide)
-                val crop = cropPerSide.toInt()
-                srcRect.set(0, crop, bitmap.width, bitmap.height - crop)
-            }
+        // Preservar 100% da tela e do HUD em orientacoes coincidentes.
+        // A diferenca de proporcao e absorvida pela escala X/Y, sem recorte.
+        // Para tela vertical em cenario horizontal (ou vice-versa), manter
+        // proporcao original para evitar deformacao extrema.
+        val sameOrientation = (bw >= bh) == (target.width() >= target.height())
+        if (sameOrientation) {
+            srcRect.set(0, 0, bitmap.width, bitmap.height)
             canvas.drawBitmap(bitmap, srcRect, target, paint)
         } else {
             drawCenterInside(canvas, bitmap, target, paint)
