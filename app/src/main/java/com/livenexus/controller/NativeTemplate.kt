@@ -2050,15 +2050,21 @@ internal class NativeTemplate(private val activity: Activity) {
         mediaBar.addView(Space(activity), LinearLayout.LayoutParams(0, 1, 1f))
 
         // Volume slider
+        val volLabel = label("$playerVolume%", 8f, true)
         val volSeek = customSeekBar(playerVolume, 100) {
-            playerVolume = it
+            val difference = it - playerVolume
+            if (difference != 0) {
+                playerVolume = it
+                volLabel.text = "$it%"
+                val command = if (difference > 0) "music-volume-up" else "music-volume-down"
+                repeat(kotlin.math.abs(difference)) { sendPlayerCommand(command) }
+            }
         }
         mediaBar.addView(icon("volume", TemplateStyle.white), LinearLayout.LayoutParams(dp(18), dp(18)))
         mediaBar.addView(volSeek, LinearLayout.LayoutParams(dp(if (wide) 140 else 90), dp(28)).apply {
             marginStart = dp(4)
             marginEnd = dp(4)
         })
-        val volLabel = label("$playerVolume%", 8f, true)
         mediaBar.addView(volLabel, LinearLayout.LayoutParams(dp(36), -2))
 
         // Transport Controls: Prev, Pause/Play, Next
@@ -3636,8 +3642,13 @@ internal class NativeTemplate(private val activity: Activity) {
 
         val volLabel = label("$playerVolume%", 8f, true)
         val volSeek = customSeekBar(playerVolume, 100) {
-            playerVolume = it
-            volLabel.text = "$it%"
+            val difference = it - playerVolume
+            if (difference != 0) {
+                playerVolume = it
+                volLabel.text = "$it%"
+                val command = if (difference > 0) "music-volume-up" else "music-volume-down"
+                repeat(kotlin.math.abs(difference)) { sendPlayerCommand(command) }
+            }
         }
         mediaBar.addView(icon("volume", TemplateStyle.white), LinearLayout.LayoutParams(dp(16), dp(16)))
         mediaBar.addView(volSeek, LinearLayout.LayoutParams(dp(84), dp(26)).apply {
