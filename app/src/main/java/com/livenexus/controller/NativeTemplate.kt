@@ -88,6 +88,8 @@ internal class NativeTemplate(private val activity: Activity) {
     private var lifecycleRegistered = false
     private var activityInBackground = false
     private var systemOverlayView: View? = null
+    // Mantem somente o botao flutuante visivel em OFF se a live cair em segundo plano.
+    private var overlayStartedDuringLive = false
 
     private val serviceStateListener: () -> Unit = {
         activity.runOnUiThread {
@@ -111,8 +113,11 @@ internal class NativeTemplate(private val activity: Activity) {
                 }
             } else if (!streamConnected && wasConnected) {
                 root.removeCallbacks(timerRunnable)
-                removeSystemOverlayWindow()
+                if (!activityInBackground || !overlayStartedDuringLive || systemOverlayView == null) {
+                    removeSystemOverlayWindow()
+                }
             }
+            updateSystemOverlayStatus()
             render()
         }
     }
@@ -122,7 +127,6 @@ internal class NativeTemplate(private val activity: Activity) {
             if (streamConnected) {
                 val formatted = formatElapsedTime()
                 timerLabel?.text = formatted
-                overlayTimerLabel?.text = formatted
                 overlayPanelTimerLabel?.text = formatted
                 root.postDelayed(this, 1000L)
             }
@@ -240,6 +244,7 @@ internal class NativeTemplate(private val activity: Activity) {
         countdownSeconds = 0
         root.removeCallbacks(timerRunnable)
         root.removeCallbacks(countdownRunnable)
+        overlayStartedDuringLive = false
         removeSystemOverlayWindow()
         if (showMessage) {
             toast("Transmissão encerrada e recursos liberados.")
@@ -3298,14 +3303,27 @@ internal class NativeTemplate(private val activity: Activity) {
         )
     }
 
+    private fun updateSystemOverlayStatus() {
+        val live = ScreenCaptureService.isLiveStreaming &&
+            ScreenCaptureService.activePlatforms.isNotEmpty()
+        overlayTimerLabel?.apply {
+            text = if (live) "LIVE" else "OFF"
+            (background as? GradientDrawable)?.setColor(
+                if (live) Color.rgb(235, 31, 64) else Color.rgb(85, 90, 103)
+            )
+        }
+    }
+
     private fun refreshSystemOverlayWindow() {
         removeSystemOverlayWindow()
         showSystemOverlayWindow()
     }
 
     private fun showSystemOverlayWindow() {
-        if (!canDrawSystemOverlay() || (!streamConnected && !ScreenCaptureService.isLiveStreaming)) return
+        if (!canDrawSystemOverlay() ||
+            (!streamConnected && !ScreenCaptureService.isLiveStreaming && !overlayStartedDuringLive)) return
         if (systemOverlayView != null) return
+        if (ScreenCaptureService.isLiveStreaming) overlayStartedDuringLive = true
         try {
             val wm = activity.getSystemService(Context.WINDOW_SERVICE) as? android.view.WindowManager ?: return
             val dm = activity.resources.displayMetrics
@@ -3325,35 +3343,40 @@ internal class NativeTemplate(private val activity: Activity) {
             }
 
             if (!overlayExpanded) {
-                // Estado recolhido na tela do smartphone: Ícone do APK + Temporizador
+                // Botao flutuante compacto no tamanho da referencia PRISM: icone real do APK + LIVE/OFF.
                 overlayPanelTimerLabel = null
-                val sysPill = row().apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                    background = TemplateStyle.Panel(
-                        density,
-                        selected = false,
-                        radius = 24f,
-                        glow = true,
-                        borderTint = TemplateStyle.green
-                    )
-                    setPadding(dp(8), dp(6), dp(12), dp(6))
-                    elevation = dp(20).toFloat()
-                    addView(
-                        createApkIconBadge(32),
-                        LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginEnd = dp(8) }
-                    )
-                    val dot = View(activity).apply {
+                val sysPill = LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER
+                    setPadding(dp(3), dp(2), dp(3), dp(2))
+                    elevation = dp(12).toFloat()
+
+                    val iconCircle = FrameLayout(activity).apply {
                         background = GradientDrawable().apply {
                             shape = GradientDrawable.OVAL
-                            setColor(TemplateStyle.green)
+                            setColor(Color.rgb(19, 22, 32))
+                        }
+                        clipToOutline = true
+                        addView(ImageView(activity).apply {
+                            setImageResource(R.mipmap.ic_launcher_round)
+                            scaleType = ImageView.ScaleType.CENTER_CROP
+                        }, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
+                    }
+                    addView(iconCircle, LinearLayout.LayoutParams(dp(34), dp(34)))
+
+                    val statusLabel = label("OFF", 8.5f, true, Color.WHITE).apply {
+                        gravity = Gravity.CENTER
+                        background = GradientDrawable().apply {
+                            shape = GradientDrawable.RECTANGLE
+                            cornerRadius = dp(12).toFloat()
+                            setColor(Color.rgb(85, 90, 103))
                         }
                     }
-                    addView(dot, LinearLayout.LayoutParams(dp(7), dp(7)).apply { marginEnd = dp(6) })
-                    val tLabel = label(formatElapsedTime(), 10.5f, true, TemplateStyle.green).apply {
-                        letterSpacing = 0.08f
-                    }
-                    overlayTimerLabel = tLabel
-                    addView(tLabel)
+                    overlayTimerLabel = statusLabel
+                    addView(statusLabel, LinearLayout.LayoutParams(dp(34), dp(15)).apply {
+                        topMargin = -dp(3)
+                    })
+                    updateSystemOverlayStatus()
                 }
 
                 val params = android.view.WindowManager.LayoutParams(
@@ -3390,8 +3413,8 @@ internal class NativeTemplate(private val activity: Activity) {
                             val dy = (ev.rawY - downRawY).toInt()
                             if (hypot(dx.toFloat(), dy.toFloat()) > dp(6)) {
                                 moved = true
-                                sysOverlayX = (startX + dx).coerceIn(0, (screenW - dp(140)).coerceAtLeast(0))
-                                sysOverlayY = (startY + dy).coerceIn(0, (screenH - dp(60)).coerceAtLeast(0))
+                                sysOverlayX = (startX + dx).coerceIn(0, (screenW - v.width).coerceAtLeast(0))
+                                sysOverlayY = (startY + dy).coerceIn(0, (screenH - v.height).coerceAtLeast(0))
                                 params.x = sysOverlayX
                                 params.y = sysOverlayY
                                 try {
