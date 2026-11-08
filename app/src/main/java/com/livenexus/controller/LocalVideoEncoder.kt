@@ -55,7 +55,7 @@ class LocalVideoEncoder(
             if (includeAdvancedFlags) {
                 setInteger(
                     MediaFormat.KEY_BITRATE_MODE,
-                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
                 )
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
                 setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
