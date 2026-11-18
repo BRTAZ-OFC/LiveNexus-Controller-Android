@@ -337,7 +337,9 @@ internal object BrowserSourceManager {
             """.trimIndent()
             try {
                 browser.evaluateJavascript(script) { result ->
-                    if (closed || pendingCapture?.requestId != requestId) return@evaluateJavascript
+                    // A captura visual pode terminar antes do callback JS assíncrono.
+                    // A API autentica e valida o requestId e sua expiração.
+                    if (closed) return@evaluateJavascript
                     try {
                         val raw = JSONTokener(result).nextValue() as? String ?: return@evaluateJavascript
                         if (raw.isEmpty() || raw.length > 30_000) return@evaluateJavascript
