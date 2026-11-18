@@ -54,6 +54,8 @@ internal object BrowserSourceManager {
     private val renderingScene = ThreadLocal<Boolean>()
     // Estes dois campos são acessados apenas pela thread de composição.
     private var stagedOriginal: Bitmap? = null
+    private var stagedTop: Bitmap? = null
+    private var stagedBottom: Bitmap? = null
     private var stagedRequestId: String? = null
 
     fun armVisualComparison(context: Context, requestId: String, sourceId: String) {
@@ -76,18 +78,30 @@ internal object BrowserSourceManager {
         if (SystemClock.uptimeMillis() - ticket.queuedAt > 35_000L) {
             pendingCapture = null
             stagedOriginal?.recycle()
+            stagedTop?.recycle()
+            stagedBottom?.recycle()
             stagedOriginal = null
+            stagedTop = null
+            stagedBottom = null
             stagedRequestId = null
             return
         }
         val original = stagedOriginal ?: return
+        val top = stagedTop ?: return
+        val bottom = stagedBottom ?: return
         if (stagedRequestId != ticket.requestId) {
             original.recycle()
+            top.recycle()
+            bottom.recycle()
             stagedOriginal = null
+            stagedTop = null
+            stagedBottom = null
             stagedRequestId = null
             return
         }
         stagedOriginal = null
+        stagedTop = null
+        stagedBottom = null
         stagedRequestId = null
         pendingCapture = null
         try {
@@ -97,10 +111,12 @@ internal object BrowserSourceManager {
             val height = maxOf(1, (composed.height * scale).toInt())
             val composedCopy = Bitmap.createScaledBitmap(composed, width, height, true)
             LiveNexusControllerApi.sendVisualComparison(
-                ticket.context, ticket.requestId, ticket.sourceId, original, composedCopy
+                ticket.context, ticket.requestId, ticket.sourceId, original, composedCopy, top, bottom
             )
         } catch (error: Exception) {
             original.recycle()
+            top.recycle()
+            bottom.recycle()
             Log.w(TAG, "Falha na cópia do quadro composto para diagnóstico", error)
         }
     }
@@ -417,8 +433,24 @@ internal object BrowserSourceManager {
                     ticket.sourceId == "source_" + Integer.toHexString(id.hashCode()) &&
                     stagedOriginal == null) {
                     try {
-                        stagedOriginal = Bitmap.createScaledBitmap(bitmap, 640, 360, true)
-                        stagedRequestId = ticket.requestId
+                        // Recortes copiados do Bitmap 1920×1080, sem redimensionar pixels.
+                        // Copiar antes de qualquer escala aplicada ao relatório A/B.
+                        val originalCopy = Bitmap.createScaledBitmap(bitmap, 640, 360, true)
+                        var topCopy: Bitmap? = null
+                        var bottomCopy: Bitmap? = null
+                        try {
+                            topCopy = Bitmap.createBitmap(bitmap, 0, 0, 1920, 160)
+                            bottomCopy = Bitmap.createBitmap(bitmap, 0, 780, 960, 300)
+                            stagedOriginal = originalCopy
+                            stagedTop = topCopy
+                            stagedBottom = bottomCopy
+                            stagedRequestId = ticket.requestId
+                        } catch (error: Exception) {
+                            originalCopy.recycle()
+                            topCopy?.recycle()
+                            bottomCopy?.recycle()
+                            throw error
+                        }
                     } catch (error: Exception) {
                         Log.w(TAG, "Falha na cópia do quadro original para diagnóstico", error)
                     }

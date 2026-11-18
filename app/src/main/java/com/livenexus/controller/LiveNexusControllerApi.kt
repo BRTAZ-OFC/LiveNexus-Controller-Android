@@ -62,16 +62,18 @@ internal object LiveNexusControllerApi {
         requestId: String,
         sourceId: String,
         original: Bitmap,
-        composed: Bitmap
+        composed: Bitmap,
+        detailTop: Bitmap,
+        detailBottom: Bitmap
     ) {
         val app = context.applicationContext
         try {
             diagnosticsWorker.execute {
                 try {
-                    fun encode(image: Bitmap): String {
+                    fun encode(image: Bitmap, quality: Int, maxBytes: Int): String {
                         val stream = ByteArrayOutputStream()
-                        if (!image.compress(Bitmap.CompressFormat.JPEG, 60, stream) ||
-                            stream.size() > 230_000) throw IOException("Imagem diagnóstica muito grande")
+                        if (!image.compress(Bitmap.CompressFormat.JPEG, quality, stream) ||
+                            stream.size() > maxBytes) throw IOException("Imagem diagnóstica muito grande")
                         return Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
                     }
                     val body = JSONObject().apply {
@@ -81,8 +83,18 @@ internal object LiveNexusControllerApi {
                         put("originalHeight", original.height)
                         put("composedWidth", composed.width)
                         put("composedHeight", composed.height)
-                        put("original", encode(original))
-                        put("composed", encode(composed))
+                        put("original", encode(original, 60, 230_000))
+                        put("composed", encode(composed, 60, 230_000))
+                        put("detailTopWidth", detailTop.width)
+                        put("detailTopHeight", detailTop.height)
+                        put("detailBottomWidth", detailBottom.width)
+                        put("detailBottomHeight", detailBottom.height)
+                        put("detailTop", encode(detailTop, 85, 155_000))
+                        put("detailBottom", encode(detailBottom, 85, 155_000))
+                    }
+                    // Mantém o payload abaixo de express.json({ limit: "1mb" }) do servidor.
+                    if (body.toString().toByteArray(Charsets.UTF_8).size > 950_000) {
+                        throw IOException("Relatório visual excede o limite de envio")
                     }
                     request(sessionToken(app), "/api/laboratorio/browser-source/capture/result", "POST", body)
                 } catch (error: Exception) {
@@ -90,11 +102,15 @@ internal object LiveNexusControllerApi {
                 } finally {
                     original.recycle()
                     composed.recycle()
+                    detailTop.recycle()
+                    detailBottom.recycle()
                 }
             }
         } catch (error: Exception) {
             original.recycle()
             composed.recycle()
+            detailTop.recycle()
+            detailBottom.recycle()
             logError("agendar comparação visual", error)
         }
     }
