@@ -19,6 +19,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.os.IBinder
 import android.util.Log
 import android.view.Display
@@ -154,6 +155,10 @@ class ScreenCaptureService : Service() {
                     }
                     val report = JSONObject().apply {
                         put("sessionId", encoderSessionId)
+                        put("sampleElapsedMs", SystemClock.elapsedRealtime())
+                        put("manufacturer", Build.MANUFACTURER)
+                        put("model", Build.MODEL)
+                        put("hardware", Build.HARDWARE)
                         put("codec", video.selectedCodecName)
                         put("backend", scene.activeBackend)
                         put("width", currentWidth)
