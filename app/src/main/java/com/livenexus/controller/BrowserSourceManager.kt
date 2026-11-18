@@ -282,50 +282,48 @@ internal object BrowserSourceManager {
                 (function () {
                   try {
                     var vw = window.innerWidth || 0, vh = window.innerHeight || 0;
-                    var list = document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,span,small,strong,b,em,label,time,output,marquee');
+                    var list = document.querySelectorAll('[data-ln-diagnostic-type][data-ln-diagnostic-instance]');
                     var rows = [];
-                    for (var i = 0; i < list.length && i < 4000; i++) {
-                      var el = list[i];
-                      if (!el || !el.getBoundingClientRect) continue;
-                      var r = el.getBoundingClientRect();
-                      if (r.width <= 0 || r.height <= 0 || r.right <= 0 || r.left >= vw ||
-                          r.bottom <= 0 || r.top >= vh) continue;
-                      var region = r.top < 200 ? 'top' : (r.bottom > vh - 340 ? 'bottom' : '');
-                      if (!region) continue;
-                      var hasDirectText = Array.prototype.some.call(el.childNodes, function (n) {
-                        return n.nodeType === 3 && !!(n.textContent || '').trim();
-                      });
-                      if (!hasDirectText) continue;
-                      var s = window.getComputedStyle(el);
-                      if (!s || s.display === 'none' || s.visibility === 'hidden') continue;
-                      var n = function (v) {
-                        return Math.round((Number(v) || 0) * 100) / 100;
-                      };
-                      var t = function (v) {
-                        return String(v || '').substring(0, 140);
-                      };
-                      var row = {
-                        index: i, region: region, tag: el.tagName,
+                    var n = function (v) { return Math.round((Number(v) || 0) * 100) / 100; };
+                    var t = function (v) { return String(v || '').substring(0, 140); };
+                    for (var i = 0; i < list.length && rows.length < 40; i++) {
+                      var el = list[i], kind = el.getAttribute('data-ln-diagnostic-type');
+                      if (kind !== 'widget' && kind !== 'text' && kind !== 'shape') continue;
+                      var r = el.getBoundingClientRect(), s = window.getComputedStyle(el);
+                      if (!s || r.width <= 0 || r.height <= 0 || s.visibility === 'hidden' || s.display === 'none' ||
+                          Number(s.opacity) === 0 || r.right <= 0 || r.left >= vw || r.bottom <= 0 || r.top >= vh) continue;
+                      var ownW = el.offsetWidth || el.clientWidth, ownH = el.offsetHeight || el.clientHeight;
+                      var scaleX = ownW ? r.width / ownW : 1, scaleY = ownH ? r.height / ownH : 1;
+                      var ancestor = el.parentElement, ancestorTransform = 'none', clipping = false;
+                      while (ancestor && ancestor !== document.documentElement) {
+                        var style = window.getComputedStyle(ancestor);
+                        if (ancestorTransform === 'none' && style.transform !== 'none') {
+                          ancestorTransform = t(style.transform);
+                        }
+                        var ovx = style.overflowX, ovy = style.overflowY;
+                        if (ovx === 'hidden' || ovx === 'clip' || ovx === 'scroll' || ovx === 'auto' ||
+                            ovy === 'hidden' || ovy === 'clip' || ovy === 'scroll' || ovy === 'auto') {
+                          var box = ancestor.getBoundingClientRect();
+                          if (r.left < box.left - 1 || r.right > box.right + 1 ||
+                              r.top < box.top - 1 || r.bottom > box.bottom + 1) clipping = true;
+                        }
+                        ancestor = ancestor.parentElement;
+                      }
+                      rows.push({
+                        index: i, region: r.top < 200 ? 'top' : (r.bottom > vh - 340 ? 'bottom' : 'middle'),
+                        tag: el.tagName, kind: kind,
+                        instance: t(el.getAttribute('data-ln-diagnostic-instance')).substring(0, 80),
                         x: n(r.left), y: n(r.top), width: n(r.width), height: n(r.height),
                         clientWidth: n(el.clientWidth), clientHeight: n(el.clientHeight),
                         scrollWidth: n(el.scrollWidth), scrollHeight: n(el.scrollHeight),
+                        scaleX: n(scaleX), scaleY: n(scaleY),
+                        ancestorTransform: ancestorTransform, clipping: clipping,
                         fontFamily: t(s.fontFamily), fontSize: t(s.fontSize),
                         fontWeight: t(s.fontWeight), lineHeight: t(s.lineHeight),
                         overflowX: t(s.overflowX), overflowY: t(s.overflowY),
                         transform: t(s.transform)
-                      };
-                      row.exceeds = row.scrollWidth > row.clientWidth + 2 ||
-                          row.scrollHeight > row.clientHeight + 2 ? 1 : 0;
-                      rows.push(row);
+                      });
                     }
-                    // Prioriza ocorrências de transbordamento e mantém amostras do topo/base.
-                    rows.sort(function (a, b) {
-                      return b.exceeds - a.exceeds || a.index - b.index;
-                    });
-                    rows = rows.slice(0, 80).map(function (row) {
-                      delete row.exceeds;
-                      return row;
-                    });
                     return JSON.stringify({
                       fontStatus: document.fonts ? document.fonts.status : 'unavailable',
                       viewportWidth: vw, viewportHeight: vh, elements: rows
