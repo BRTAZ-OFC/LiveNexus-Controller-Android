@@ -43,6 +43,12 @@ class LocalVideoEncoder(
         private set
     val encodedFrames = AtomicLong(0)
     val encodedBytes = AtomicLong(0)
+    @Volatile var configurationMode: String = "unknown"
+        private set
+    @Volatile var outputBitrateKbps: Int = 0
+        private set
+    @Volatile var outputBitrateMode: String = "unknown"
+        private set
 
     private var spsFound: ByteArray? = null
     private var ppsFound: ByteArray? = null
@@ -85,9 +91,13 @@ class LocalVideoEncoder(
 
         var created = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         try {
+            configurationMode = "advanced-vbr"
+            outputBitrateKbps = 0
+            outputBitrateMode = "unknown"
             try {
                 created.configure(buildFormat(includeAdvancedFlags = true), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             } catch (configErr: Exception) {
+                configurationMode = "basic-fallback"
                 Log.w(TAG, "Fallback para formato H.264 básico: ${configErr.message}")
                 try { created.release() } catch (_: Exception) {}
                 created = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
@@ -116,6 +126,20 @@ class LocalVideoEncoder(
                         when (val index = activeCodec.dequeueOutputBuffer(info, 10000L)) {
                             MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                                 val outFmt = activeCodec.outputFormat
+                                outputBitrateKbps = try {
+                                    if (outFmt.containsKey(MediaFormat.KEY_BIT_RATE))
+                                        outFmt.getInteger(MediaFormat.KEY_BIT_RATE) / 1000
+                                    else 0
+                                } catch (_: Exception) { 0 }
+                                outputBitrateMode = try {
+                                    if (!outFmt.containsKey(MediaFormat.KEY_BITRATE_MODE)) "unknown"
+                                    else when (outFmt.getInteger(MediaFormat.KEY_BITRATE_MODE)) {
+                                        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR -> "vbr"
+                                        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR -> "cbr"
+                                        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ -> "cq"
+                                        else -> "unknown"
+                                    }
+                                } catch (_: Exception) { "unknown" }
                                 onFormat(outFmt)
                                 extractSpsPpsFromFormat(outFmt)
                             }
