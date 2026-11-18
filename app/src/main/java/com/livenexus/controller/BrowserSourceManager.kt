@@ -25,6 +25,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
 
 /**
@@ -94,6 +95,54 @@ internal object BrowserSourceManager {
         private var presentation: Presentation? = null
         private var webView: WebView? = null
 
+        // Diagnóstico: contadores de captura, sem ler conteúdo visual ou URLs.
+        private var callbacksReceived = 0L
+        private var framesAccepted = 0L
+        private var framesThrottled = 0L
+        private var framesInvalid = 0L
+        private var frameErrors = 0L
+        private var totalConversionMs = 0L
+        private var maxConversionMs = 0L
+        private var lastDiagnosticsAt = SystemClock.uptimeMillis()
+        private val framesDrawn = AtomicLong(0L)
+
+        private fun logCaptureMetrics() {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastDiagnosticsAt < 10_000L) return
+            val elapsed = now - lastDiagnosticsAt
+            val avgMs = if (framesAccepted > 0L) totalConversionMs / framesAccepted else 0L
+            Log.i(TAG, "Browser Source frames: callbacks=$callbacksReceived accepted=$framesAccepted " +
+                "throttled=$framesThrottled invalid=$framesInvalid errors=$frameErrors " +
+                "draws=${framesDrawn.get()} avgCopyMs=$avgMs maxCopyMs=$maxConversionMs " +
+                "windowMs=$elapsed size=${SOURCE_WIDTH}x$SOURCE_HEIGHT")
+            callbacksReceived = 0L
+            framesAccepted = 0L
+            framesThrottled = 0L
+            framesInvalid = 0L
+            frameErrors = 0L
+            totalConversionMs = 0L
+            maxConversionMs = 0L
+            framesDrawn.set(0L)
+            lastDiagnosticsAt = now
+        }
+
+        private fun logWebViewMetrics(browser: WebView, stage: String) {
+            if (closed) return
+            val metrics = browser.resources.displayMetrics
+            val packageVersion = WebView.getCurrentWebViewPackage()?.versionName ?: "indisponivel"
+            Log.i(TAG, "Browser Source WebView: stage=$stage package=$packageVersion " +
+                "view=${browser.width}x${browser.height} density=${metrics.density} " +
+                "densityDpi=${metrics.densityDpi} display=${metrics.widthPixels}x${metrics.heightPixels}")
+            browser.evaluateJavascript(
+                "(function(){var v=window.visualViewport;" +
+                    "return JSON.stringify({width:window.innerWidth,height:window.innerHeight," +
+                    "dpr:window.devicePixelRatio,visualWidth:v?v.width:null," +
+                    "visualHeight:v?v.height:null,visualScale:v?v.scale:null});})()"
+            ) { result ->
+                if (!closed) Log.i(TAG, "Browser Source CSS viewport: stage=$stage metrics=$result")
+            }
+        }
+
         fun start(context: Context) {
             check(Looper.myLooper() == Looper.getMainLooper())
             val reader = ImageReader.newInstance(
@@ -103,16 +152,32 @@ internal object BrowserSourceManager {
             val thread = HandlerThread("BrowserFrames-${id.hashCode()}").apply { start() }
             imageThread = thread
             reader.setOnImageAvailableListener({ ir ->
-                val image = try { ir.acquireLatestImage() } catch (_: Exception) { null }
-                    ?: return@setOnImageAvailableListener
+                callbacksReceived++
+                val image = try { ir.acquireLatestImage() } catch (e: Exception) {
+                    frameErrors++
+                    null
+                } ?: run {
+                    logCaptureMetrics()
+                    return@setOnImageAvailableListener
+                }
                 try {
                     if (closed) return@setOnImageAvailableListener
                     val now = SystemClock.uptimeMillis()
-                    if (now - lastFrameAt < FRAME_INTERVAL_MS) return@setOnImageAvailableListener
-                    val plane = image.planes.firstOrNull() ?: return@setOnImageAvailableListener
+                    if (now - lastFrameAt < FRAME_INTERVAL_MS) {
+                        framesThrottled++
+                        return@setOnImageAvailableListener
+                    }
+                    val plane = image.planes.firstOrNull() ?: run {
+                        framesInvalid++
+                        return@setOnImageAvailableListener
+                    }
                     val stride = plane.pixelStride
                     val rowStride = plane.rowStride
-                    if (stride != 4 || rowStride < SOURCE_WIDTH * stride) return@setOnImageAvailableListener
+                    if (stride != 4 || rowStride < SOURCE_WIDTH * stride) {
+                        framesInvalid++
+                        return@setOnImageAvailableListener
+                    }
+                    val copyStartedAt = SystemClock.uptimeMillis()
                     val paddedWidth = rowStride / stride
                     val padded = Bitmap.createBitmap(paddedWidth, SOURCE_HEIGHT, Bitmap.Config.ARGB_8888)
                     var frame: Bitmap? = null
@@ -134,15 +199,23 @@ internal object BrowserSourceManager {
                             }
                         }
                         lastFrameAt = now
+                        if (transferred) {
+                            framesAccepted++
+                            val copyMs = SystemClock.uptimeMillis() - copyStartedAt
+                            totalConversionMs += copyMs
+                            maxConversionMs = maxOf(maxConversionMs, copyMs)
+                        }
                     } finally {
                         if (!transferred && frame != null && !frame.isRecycled) frame.recycle()
                         if (frame !== padded && !padded.isRecycled) padded.recycle()
                         if (frame == null && !padded.isRecycled) padded.recycle()
                     }
                 } catch (e: Exception) {
+                    frameErrors++
                     if (!closed) Log.w(TAG, "Falha ao obter quadro Browser Source '$id'", e)
                 } finally {
                     try { image.close() } catch (_: Exception) {}
+                    if (!closed) logCaptureMetrics()
                 }
             }, Handler(thread.looper))
 
@@ -180,6 +253,19 @@ internal object BrowserSourceManager {
                             view: WebView, request: WebResourceRequest
                         ): Boolean = validUrl(request.url.toString()) == null
 
+                        override fun onPageFinished(view: WebView, url: String?) {
+                            super.onPageFinished(view, url)
+                            logWebViewMetrics(view, "page-finished")
+                            view.postVisualStateCallback(SystemClock.uptimeMillis(), object : WebView.VisualStateCallback() {
+                                override fun onComplete(requestId: Long) {
+                                    if (!closed) logWebViewMetrics(view, "visual-state-ready")
+                                }
+                            })
+                            view.postDelayed({
+                                if (!closed) logWebViewMetrics(view, "after-3s")
+                            }, 3000L)
+                        }
+
                         override fun onRenderProcessGone(
                             view: WebView, detail: android.webkit.RenderProcessGoneDetail
                         ): Boolean {
@@ -215,6 +301,7 @@ internal object BrowserSourceManager {
                 val left = target.left + (target.width() - w) / 2f
                 val top = target.top + (target.height() - h) / 2f
                 canvas.drawBitmap(bitmap, null, RectF(left, top, left + w, top + h), paint)
+                framesDrawn.incrementAndGet()
                 return true
             }
         }
