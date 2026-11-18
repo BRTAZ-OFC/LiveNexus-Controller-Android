@@ -37,6 +37,12 @@ class StreamPublisher(
     val sentFrames = AtomicLong(0)
     val sendWaitTotalNs = AtomicLong(0)
     val sendWaitMaxNs = AtomicLong(0)
+    val rtmpVideoBytesTotal: Long
+        get() = clients.sumOf { it.second.videoBytesWritten.get() }
+    val rtmpVideoBytesPrimary: Long
+        get() = clients.firstOrNull()?.second?.videoBytesWritten?.get() ?: 0L
+    val rtmpDestinationCount: Int
+        get() = clients.size
 
     @Volatile private var streamMediaStartMs: Long = -1L
     @Volatile private var baseVideoTimestampUs: Long = -1L

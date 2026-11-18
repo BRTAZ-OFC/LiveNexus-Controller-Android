@@ -150,6 +150,9 @@ class ScreenCaptureService : Service() {
                         put("lateFrames", scene.lateFrames.get())
                         put("submittedFrames", stream.submittedFrames.get())
                         put("sentFrames", stream.sentFrames.get())
+                        put("rtmpVideoBytesTotal", stream.rtmpVideoBytesTotal)
+                        put("rtmpVideoBytesPrimary", stream.rtmpVideoBytesPrimary)
+                        put("rtmpDestinationCount", stream.rtmpDestinationCount)
                         put("sendWaitTotalNs", stream.sendWaitTotalNs.get())
                         put("sendWaitMaxNs", stream.sendWaitMaxNs.get())
                     }

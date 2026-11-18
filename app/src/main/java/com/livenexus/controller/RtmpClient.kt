@@ -14,6 +14,7 @@ import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Random
+import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
@@ -115,6 +116,7 @@ class RtmpClient(
     @Volatile
     private var cachedAsc: ByteArray? = null
 
+    val videoBytesWritten = AtomicLong(0)
     private var videoFramesSentCount: Long = 0L
     private var audioFramesSentCount: Long = 0L
 
@@ -1057,32 +1059,39 @@ class RtmpClient(
 
         try {
             synchronized(writeLock) {
+                var bytesWritten = fmt0Header.size.toLong()
                 out.write(fmt0Header)
                 if (hasExtendedTimestamp) {
                     val ext = ByteArray(4)
                     ByteBuffer.wrap(ext).order(ByteOrder.BIG_ENDIAN).putInt(timestampMs.toInt())
                     out.write(ext)
+                    bytesWritten += ext.size
                 }
 
                 var offset = 0
                 val chunkSize = OUT_CHUNK_SIZE
                 val firstChunk = minOf(chunkSize, length)
                 out.write(payload, 0, firstChunk)
+                bytesWritten += firstChunk
                 offset += firstChunk
 
                 val fmt3Header = byteArrayOf((0xC0 or (csid and 0x3F)).toByte())
                 while (offset < length) {
                     out.write(fmt3Header)
+                    bytesWritten += fmt3Header.size
                     if (hasExtendedTimestamp) {
                         val ext = ByteArray(4)
                         ByteBuffer.wrap(ext).order(ByteOrder.BIG_ENDIAN).putInt(timestampMs.toInt())
                         out.write(ext)
+                        bytesWritten += ext.size
                     }
                     val chunk = minOf(chunkSize, length - offset)
                     out.write(payload, offset, chunk)
+                    bytesWritten += chunk
                     offset += chunk
                 }
                 out.flush()
+                if (type == TYPE_VIDEO) videoBytesWritten.addAndGet(bytesWritten)
             }
         } catch (e: Exception) {
             if (isPublishing) {
