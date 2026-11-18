@@ -511,13 +511,19 @@ class ScreenCaptureService : Service() {
                     outputSurface = encoderInputSurface,
                     width = width,
                     height = height,
-                    fps = fps
+                    fps = fps,
+                    onDiagnosticFrame = { frame -> BrowserSourceManager.completeSceneFrame(frame) }
                 )
                 sceneCompositor = compositor
                 compositor.start { canvas, cWidth, cHeight ->
-                    val layersSnapshot = StreamingConfig.activeSceneLayers.toList()
-                    synchronized(bitmapLock) {
-                        SceneRenderer.renderScene(canvas, cWidth, cHeight, layersSnapshot, latestScreenBitmap)
+                    BrowserSourceManager.beginSceneFrame()
+                    try {
+                        val layersSnapshot = StreamingConfig.activeSceneLayers.toList()
+                        synchronized(bitmapLock) {
+                            SceneRenderer.renderScene(canvas, cWidth, cHeight, layersSnapshot, latestScreenBitmap)
+                        }
+                    } finally {
+                        BrowserSourceManager.endSceneFrame()
                     }
                 }
                 if (stopping.get()) return@Thread

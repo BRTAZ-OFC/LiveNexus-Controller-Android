@@ -1,6 +1,8 @@
 package com.livenexus.controller
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.util.Base64
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -37,7 +39,12 @@ internal object LiveNexusControllerApi {
         try {
             diagnosticsWorker.execute {
                 try {
-                    request(sessionToken(app), "/api/laboratorio/browser-source/reports", "POST", report)
+                    val response = request(sessionToken(app), "/api/laboratorio/browser-source/reports", "POST", report)
+                    response.optJSONObject("captureRequest")?.let { capture ->
+                        BrowserSourceManager.armVisualComparison(
+                            app, capture.optString("id"), capture.optString("sourceId")
+                        )
+                    }
                 } catch (error: Exception) {
                     logError("enviar diagnostico Browser Source", error)
                 } finally {
@@ -47,6 +54,48 @@ internal object LiveNexusControllerApi {
         } catch (error: Exception) {
             diagnosticsSending.set(false)
             logError("agendar diagnostico Browser Source", error)
+        }
+    }
+
+    fun sendVisualComparison(
+        context: Context,
+        requestId: String,
+        sourceId: String,
+        original: Bitmap,
+        composed: Bitmap
+    ) {
+        val app = context.applicationContext
+        try {
+            diagnosticsWorker.execute {
+                try {
+                    fun encode(image: Bitmap): String {
+                        val stream = ByteArrayOutputStream()
+                        if (!image.compress(Bitmap.CompressFormat.JPEG, 60, stream) ||
+                            stream.size() > 230_000) throw IOException("Imagem diagnóstica muito grande")
+                        return Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+                    }
+                    val body = JSONObject().apply {
+                        put("id", requestId)
+                        put("sourceId", sourceId)
+                        put("originalWidth", original.width)
+                        put("originalHeight", original.height)
+                        put("composedWidth", composed.width)
+                        put("composedHeight", composed.height)
+                        put("original", encode(original))
+                        put("composed", encode(composed))
+                    }
+                    request(sessionToken(app), "/api/laboratorio/browser-source/capture/result", "POST", body)
+                } catch (error: Exception) {
+                    logError("enviar comparação visual", error)
+                } finally {
+                    original.recycle()
+                    composed.recycle()
+                }
+            }
+        } catch (error: Exception) {
+            original.recycle()
+            composed.recycle()
+            logError("agendar comparação visual", error)
         }
     }
 

@@ -44,6 +44,67 @@ internal object BrowserSourceManager {
     private val sources = ConcurrentHashMap<String, BrowserSource>()
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
 
+    private data class CaptureTicket(
+        val requestId: String,
+        val sourceId: String,
+        val context: Context,
+        val queuedAt: Long
+    )
+    @Volatile private var pendingCapture: CaptureTicket? = null
+    private val renderingScene = ThreadLocal<Boolean>()
+    // Estes dois campos são acessados apenas pela thread de composição.
+    private var stagedOriginal: Bitmap? = null
+    private var stagedRequestId: String? = null
+
+    fun armVisualComparison(context: Context, requestId: String, sourceId: String) {
+        if (!requestId.matches(Regex("[a-f0-9-]{36}")) ||
+            !sourceId.matches(Regex("source_[a-f0-9]{1,16}")) ||
+            sources.values.none { "source_" + Integer.toHexString(it.id.hashCode()) == sourceId }) return
+        pendingCapture = CaptureTicket(requestId, sourceId, context.applicationContext, SystemClock.uptimeMillis())
+    }
+
+    fun beginSceneFrame() {
+        if (pendingCapture != null) renderingScene.set(true)
+    }
+
+    fun endSceneFrame() {
+        renderingScene.remove()
+    }
+
+    fun completeSceneFrame(composed: Bitmap) {
+        val ticket = pendingCapture ?: return
+        if (SystemClock.uptimeMillis() - ticket.queuedAt > 35_000L) {
+            pendingCapture = null
+            stagedOriginal?.recycle()
+            stagedOriginal = null
+            stagedRequestId = null
+            return
+        }
+        val original = stagedOriginal ?: return
+        if (stagedRequestId != ticket.requestId) {
+            original.recycle()
+            stagedOriginal = null
+            stagedRequestId = null
+            return
+        }
+        stagedOriginal = null
+        stagedRequestId = null
+        pendingCapture = null
+        try {
+            val largest = maxOf(composed.width, composed.height)
+            val scale = min(640f / largest, 1f)
+            val width = maxOf(1, (composed.width * scale).toInt())
+            val height = maxOf(1, (composed.height * scale).toInt())
+            val composedCopy = Bitmap.createScaledBitmap(composed, width, height, true)
+            LiveNexusControllerApi.sendVisualComparison(
+                ticket.context, ticket.requestId, ticket.sourceId, original, composedCopy
+            )
+        } catch (error: Exception) {
+            original.recycle()
+            Log.w(TAG, "Falha na cópia do quadro composto para diagnóstico", error)
+        }
+    }
+
     fun validUrl(input: String): String? {
         val url = input.trim()
         if (url.length > 2048) return null
@@ -349,6 +410,19 @@ internal object BrowserSourceManager {
                 val left = target.left + (target.width() - w) / 2f
                 val top = target.top + (target.height() - h) / 2f
                 canvas.drawBitmap(bitmap, null, RectF(left, top, left + w, top + h), paint)
+                // Obtém o mesmo Bitmap que acabou de ser desenhado no compositor,
+                // nunca o quadro do editor, e somente após solicitação explícita.
+                val ticket = pendingCapture
+                if (renderingScene.get() == true && ticket != null &&
+                    ticket.sourceId == "source_" + Integer.toHexString(id.hashCode()) &&
+                    stagedOriginal == null) {
+                    try {
+                        stagedOriginal = Bitmap.createScaledBitmap(bitmap, 640, 360, true)
+                        stagedRequestId = ticket.requestId
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Falha na cópia do quadro original para diagnóstico", error)
+                    }
+                }
                 framesDrawn.incrementAndGet()
                 return true
             }

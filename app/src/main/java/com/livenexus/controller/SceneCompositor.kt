@@ -25,7 +25,8 @@ class SceneCompositor(
     val width: Int,
     val height: Int,
     val fps: Int,
-    private val onFrameRendered: ((Bitmap) -> Unit)? = null
+    private val onFrameRendered: ((Bitmap) -> Unit)? = null,
+    private val onDiagnosticFrame: ((Bitmap) -> Unit)? = null
 ) : AutoCloseable {
 
     companion object {
@@ -82,6 +83,14 @@ class SceneCompositor(
                 while (isRunning) {
                     // Renderiza o cenário no Canvas
                     renderAction(compositedCanvas, width, height)
+                    // A imagem já contém todas as camadas deste mesmo ciclo de desenho.
+                    if (onDiagnosticFrame != null) {
+                        try {
+                            onDiagnosticFrame.invoke(compositedBitmap)
+                        } catch (error: Exception) {
+                            Log.w(TAG, "Falha ao obter quadro diagnóstico do compositor", error)
+                        }
+                    }
 
                     // Notifica prévia local se solicitado (a cada meio segundo)
                     if (onFrameRendered != null && frameIndex % (safeFps / 2).coerceAtLeast(1) == 0L) {
