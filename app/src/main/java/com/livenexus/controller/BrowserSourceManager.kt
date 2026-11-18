@@ -497,6 +497,7 @@ internal object BrowserSourceManager {
                     browser.settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
+                        textZoom = 100
                         allowFileAccess = false
                         allowContentAccess = false
                         javaScriptCanOpenWindowsAutomatically = false
