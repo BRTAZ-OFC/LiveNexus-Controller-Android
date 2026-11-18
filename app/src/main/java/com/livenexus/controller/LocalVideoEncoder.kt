@@ -65,7 +65,7 @@ class LocalVideoEncoder(
             if (includeAdvancedFlags) {
                 setInteger(
                     MediaFormat.KEY_BITRATE_MODE,
-                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
                 )
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
                 setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
@@ -89,7 +89,7 @@ class LocalVideoEncoder(
 
         var created = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         try {
-            configurationMode = "advanced-vbr"
+            configurationMode = "advanced-cbr"
             outputBitrateKbps = 0
             outputBitrateMode = "unknown"
             try {
