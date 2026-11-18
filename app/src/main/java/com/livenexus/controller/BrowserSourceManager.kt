@@ -286,7 +286,7 @@ internal object BrowserSourceManager {
                     var rows = [];
                     var n = function (v) { return Math.round((Number(v) || 0) * 100) / 100; };
                     var t = function (v) { return String(v || '').substring(0, 140); };
-                    for (var i = 0; i < list.length && rows.length < 40; i++) {
+                    for (var i = 0; i < list.length && rows.length < 15; i++) {
                       var el = list[i], kind = el.getAttribute('data-ln-diagnostic-type');
                       if (kind !== 'widget' && kind !== 'text' && kind !== 'shape') continue;
                       var r = el.getBoundingClientRect(), s = window.getComputedStyle(el);
@@ -309,9 +309,56 @@ internal object BrowserSourceManager {
                         }
                         ancestor = ancestor.parentElement;
                       }
+                      // Apenas o conteúdo geométrico do widget; nenhum texto ou imagem é lido.
+                      var internals = [];
+                      var layout = 'original', fontScalePercent = 100;
+                      if (kind === 'widget') {
+                        var shell = el.querySelector('[data-ln-widget-shell="true"]');
+                        var inner = shell ? shell.querySelector('[data-ln-widget-inner="true"]') : null;
+                        var first = inner ? inner.firstElementChild : null;
+                        var textEl = first ? first.querySelector('span,p,label,small,strong,time,output') : null;
+                        if (shell) {
+                          layout = shell.getAttribute('data-ln-widget-layout') || 'original';
+                          fontScalePercent = parseFloat(shell.getAttribute('data-ln-widget-font-scale') || '100');
+                          if (!isFinite(fontScalePercent)) fontScalePercent = 100;
+                        }
+                        var layers = [
+                          ['shell', shell], ['inner', inner],
+                          ['content', first], ['text', textEl]
+                        ];
+                        for (var k = 0; k < layers.length; k++) {
+                          var node = layers[k][1];
+                          if (!node) continue;
+                          var nr = node.getBoundingClientRect(), ns = window.getComputedStyle(node);
+                          var nw = node.offsetWidth || node.clientWidth, nh = node.offsetHeight || node.clientHeight;
+                          var clipped = false, holder = node.parentElement;
+                          while (holder && holder !== el.parentElement) {
+                            var hs = window.getComputedStyle(holder);
+                            if (['hidden','clip','auto','scroll'].indexOf(hs.overflowX) !== -1 ||
+                                ['hidden','clip','auto','scroll'].indexOf(hs.overflowY) !== -1) {
+                              var hr = holder.getBoundingClientRect();
+                              if (nr.left < hr.left - 1 || nr.right > hr.right + 1 ||
+                                  nr.top < hr.top - 1 || nr.bottom > hr.bottom + 1) clipped = true;
+                            }
+                            holder = holder.parentElement;
+                          }
+                          internals.push({
+                            role: layers[k][0],
+                            x: n(nr.left), y: n(nr.top), width: n(nr.width), height: n(nr.height),
+                            clientWidth: n(node.clientWidth), clientHeight: n(node.clientHeight),
+                            scrollWidth: n(node.scrollWidth), scrollHeight: n(node.scrollHeight),
+                            scaleX: n(nw ? nr.width / nw : 1), scaleY: n(nh ? nr.height / nh : 1),
+                            clipping: clipped,
+                            fontFamily: t(ns.fontFamily), fontSize: t(ns.fontSize), lineHeight: t(ns.lineHeight),
+                            overflowX: t(ns.overflowX), overflowY: t(ns.overflowY),
+                            transform: t(ns.transform)
+                          });
+                        }
+                      }
                       rows.push({
                         index: i, region: r.top < 200 ? 'top' : (r.bottom > vh - 340 ? 'bottom' : 'middle'),
                         tag: el.tagName, kind: kind,
+                        ...(kind === 'widget' ? { layout: layout, fontScalePercent: n(fontScalePercent), internals: internals } : {}),
                         instance: t(el.getAttribute('data-ln-diagnostic-instance')).substring(0, 80),
                         x: n(r.left), y: n(r.top), width: n(r.width), height: n(r.height),
                         clientWidth: n(el.clientWidth), clientHeight: n(el.clientHeight),
