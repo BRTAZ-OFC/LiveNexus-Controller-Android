@@ -60,9 +60,15 @@ internal object BrowserSourceManager {
 
     fun armVisualComparison(context: Context, requestId: String, sourceId: String) {
         if (!requestId.matches(Regex("[a-f0-9-]{36}")) ||
-            !sourceId.matches(Regex("source_[a-f0-9]{1,16}")) ||
-            sources.values.none { "source_" + Integer.toHexString(it.id.hashCode()) == sourceId }) return
+            !sourceId.matches(Regex("source_[a-f0-9]{1,16}"))) return
+        val source = sources.values.firstOrNull {
+            "source_" + Integer.toHexString(it.id.hashCode()) == sourceId
+        } ?: return
         pendingCapture = CaptureTicket(requestId, sourceId, context.applicationContext, SystemClock.uptimeMillis())
+        // evaluateJavascript deve executar na thread principal da WebView.
+        main.post {
+            source.collectDomGeometry(context.applicationContext, requestId, sourceId)
+        }
     }
 
     fun beginSceneFrame() {
@@ -264,6 +270,85 @@ internal object BrowserSourceManager {
                     // Não interferir na renderização quando as métricas JS estiverem indisponíveis.
                 }
                 Log.i(TAG, "Browser Source CSS viewport: stage=$stage metrics=$result")
+            }
+        }
+
+
+        fun collectDomGeometry(context: Context, requestId: String, sourceId: String) {
+            if (closed) return
+            val browser = webView ?: return
+            // Apenas metadados geométricos e estilos: sem texto, conteúdo HTML, IDs ou URLs.
+            val script = """
+                (function () {
+                  try {
+                    var vw = window.innerWidth || 0, vh = window.innerHeight || 0;
+                    var list = document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,span,small,strong,b,em,label,time,output,marquee');
+                    var rows = [];
+                    for (var i = 0; i < list.length && i < 4000; i++) {
+                      var el = list[i];
+                      if (!el || !el.getBoundingClientRect) continue;
+                      var r = el.getBoundingClientRect();
+                      if (r.width <= 0 || r.height <= 0 || r.right <= 0 || r.left >= vw ||
+                          r.bottom <= 0 || r.top >= vh) continue;
+                      var region = r.top < 200 ? 'top' : (r.bottom > vh - 340 ? 'bottom' : '');
+                      if (!region) continue;
+                      var hasDirectText = Array.prototype.some.call(el.childNodes, function (n) {
+                        return n.nodeType === 3 && !!(n.textContent || '').trim();
+                      });
+                      if (!hasDirectText) continue;
+                      var s = window.getComputedStyle(el);
+                      if (!s || s.display === 'none' || s.visibility === 'hidden') continue;
+                      var n = function (v) {
+                        return Math.round((Number(v) || 0) * 100) / 100;
+                      };
+                      var t = function (v) {
+                        return String(v || '').substring(0, 140);
+                      };
+                      var row = {
+                        index: i, region: region, tag: el.tagName,
+                        x: n(r.left), y: n(r.top), width: n(r.width), height: n(r.height),
+                        clientWidth: n(el.clientWidth), clientHeight: n(el.clientHeight),
+                        scrollWidth: n(el.scrollWidth), scrollHeight: n(el.scrollHeight),
+                        fontFamily: t(s.fontFamily), fontSize: t(s.fontSize),
+                        fontWeight: t(s.fontWeight), lineHeight: t(s.lineHeight),
+                        overflowX: t(s.overflowX), overflowY: t(s.overflowY),
+                        transform: t(s.transform)
+                      };
+                      row.exceeds = row.scrollWidth > row.clientWidth + 2 ||
+                          row.scrollHeight > row.clientHeight + 2 ? 1 : 0;
+                      rows.push(row);
+                    }
+                    // Prioriza ocorrências de transbordamento e mantém amostras do topo/base.
+                    rows.sort(function (a, b) {
+                      return b.exceeds - a.exceeds || a.index - b.index;
+                    });
+                    rows = rows.slice(0, 80).map(function (row) {
+                      delete row.exceeds;
+                      return row;
+                    });
+                    return JSON.stringify({
+                      fontStatus: document.fonts ? document.fonts.status : 'unavailable',
+                      viewportWidth: vw, viewportHeight: vh, elements: rows
+                    });
+                  } catch (e) {
+                    return '';
+                  }
+                })()
+            """.trimIndent()
+            try {
+                browser.evaluateJavascript(script) { result ->
+                    if (closed || pendingCapture?.requestId != requestId) return@evaluateJavascript
+                    try {
+                        val raw = JSONTokener(result).nextValue() as? String ?: return@evaluateJavascript
+                        if (raw.isEmpty() || raw.length > 30_000) return@evaluateJavascript
+                        val dom = JSONObject(raw)
+                        LiveNexusControllerApi.sendDomGeometry(context, requestId, sourceId, dom)
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Falha na leitura de geometria HTML para diagnóstico", error)
+                    }
+                }
+            } catch (error: Exception) {
+                Log.w(TAG, "WebView indisponível para diagnóstico geométrico", error)
             }
         }
 

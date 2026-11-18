@@ -115,6 +115,29 @@ internal object LiveNexusControllerApi {
         }
     }
 
+    fun sendDomGeometry(context: Context, requestId: String, sourceId: String, dom: JSONObject) {
+        val app = context.applicationContext
+        try {
+            diagnosticsWorker.execute {
+                try {
+                    val body = JSONObject().apply {
+                        put("id", requestId)
+                        put("sourceId", sourceId)
+                        put("dom", dom)
+                    }
+                    if (body.toString().toByteArray(Charsets.UTF_8).size > 35_000) {
+                        throw IOException("Geometria diagnóstica muito grande")
+                    }
+                    request(sessionToken(app), "/api/laboratorio/browser-source/capture/dom", "POST", body)
+                } catch (error: Exception) {
+                    logError("enviar geometria HTML", error)
+                }
+            }
+        } catch (error: Exception) {
+            logError("agendar geometria HTML", error)
+        }
+    }
+
     private val allowedCommands = setOf(
         "death-increment", "death-decrement", "death-reset", "rtc-reload",
         "music-toggle", "music-next", "music-previous",
