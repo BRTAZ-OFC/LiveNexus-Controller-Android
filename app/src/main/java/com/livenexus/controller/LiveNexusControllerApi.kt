@@ -32,6 +32,28 @@ internal object LiveNexusControllerApi {
         Thread(job, "LiveNEXUSDiagnosticIO").apply { isDaemon = true }
     }
 
+    private val encoderDiagnosticsSending = AtomicBoolean(false)
+
+    // Relatório numérico do encoder em canal autenticado; sem URLs ou credenciais.
+    fun sendEncoderDiagnostics(context: Context, report: JSONObject) {
+        if (!encoderDiagnosticsSending.compareAndSet(false, true)) return
+        val app = context.applicationContext
+        try {
+            diagnosticsWorker.execute {
+                try {
+                    request(sessionToken(app), "/api/laboratorio/encoder/reports", "POST", report)
+                } catch (error: Exception) {
+                    logError("enviar métricas do encoder", error)
+                } finally {
+                    encoderDiagnosticsSending.set(false)
+                }
+            }
+        } catch (error: Exception) {
+            encoderDiagnosticsSending.set(false)
+            logError("agendar métricas do encoder", error)
+        }
+    }
+
     // Canal de observabilidade isolado da fila de comandos do Controller.
     fun sendBrowserDiagnostics(context: Context, report: JSONObject) {
         if (!diagnosticsSending.compareAndSet(false, true)) return

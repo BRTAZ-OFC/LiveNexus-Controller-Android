@@ -9,6 +9,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Encoder H.264 local por hardware via MediaCodec.
@@ -37,6 +38,11 @@ class LocalVideoEncoder(
     @Volatile private var running = false
     @Volatile var lastError: String? = null
         private set
+
+    @Volatile var selectedCodecName: String = "Não identificado"
+        private set
+    val encodedFrames = AtomicLong(0)
+    val encodedBytes = AtomicLong(0)
 
     private var spsFound: ByteArray? = null
     private var ppsFound: ByteArray? = null
@@ -90,6 +96,9 @@ class LocalVideoEncoder(
 
             val createdSurface = created.createInputSurface()
             created.start()
+            selectedCodecName = created.name
+            encodedFrames.set(0)
+            encodedBytes.set(0)
             codec = created
             input = createdSurface
             running = true
@@ -145,6 +154,8 @@ class LocalVideoEncoder(
                                                 set(0, bytes.size, info.presentationTimeUs, sampleFlags)
                                             }
                                             emittedFrames++
+                                            encodedFrames.incrementAndGet()
+                                            encodedBytes.addAndGet(bytes.size.toLong())
                                             if (emittedFrames == 1L) {
                                                 Log.i(TAG, "Primeiro frame H.264 gerado (${bytes.size} bytes, keyframe=${(sampleFlags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0})")
                                             }

@@ -2,6 +2,7 @@ package com.livenexus.controller
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import java.util.concurrent.atomic.AtomicLong
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.EGLContext
@@ -48,6 +49,13 @@ class SceneCompositor(
     private var textureId = 0
     private var vertexBuffer: FloatBuffer? = null
 
+    val composedFrames = AtomicLong(0)
+    val renderTotalNs = AtomicLong(0)
+    val transferTotalNs = AtomicLong(0)
+    val lateFrames = AtomicLong(0)
+    @Volatile var activeBackend: String = "unknown"
+        private set
+
     private val compositedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     private val compositedCanvas = Canvas(compositedBitmap)
 
@@ -67,11 +75,13 @@ class SceneCompositor(
                     initEGL()
                     initGL()
                     useEgl = true
+                    activeBackend = "egl"
                 } catch (eglErr: Throwable) {
                     Log.w(TAG, "EGL indisponível para o Surface; usando Canvas direto no Surface.", eglErr)
                     releaseGL()
                     releaseEGL()
                     useEgl = false
+                    activeBackend = "canvas"
                 }
 
                 val safeFps = fps.coerceIn(15, 60)
@@ -81,8 +91,11 @@ class SceneCompositor(
                 var frameIndex = 0L
 
                 while (isRunning) {
-                    // Renderiza o cenário no Canvas
+                    // Mede apenas o custo da composição; não altera os quadros.
+                    val frameStartedNs = System.nanoTime()
                     renderAction(compositedCanvas, width, height)
+                    val renderFinishedNs = System.nanoTime()
+                    renderTotalNs.addAndGet(renderFinishedNs - frameStartedNs)
                     // A imagem já contém todas as camadas deste mesmo ciclo de desenho.
                     if (onDiagnosticFrame != null) {
                         try {
@@ -142,6 +155,8 @@ class SceneCompositor(
                         }
                     }
 
+                    transferTotalNs.addAndGet(System.nanoTime() - renderFinishedNs)
+                    composedFrames.incrementAndGet()
                     frameIndex++
                     nextFrameTargetNs += frameIntervalNs
                     val nowNs = System.nanoTime()
@@ -153,6 +168,7 @@ class SceneCompositor(
                             break
                         }
                     } else if (sleepNs < -frameIntervalNs * 2) {
+                        lateFrames.incrementAndGet()
                         // Evita rajada de frames caso a CPU atrase momentaneamente
                         nextFrameTargetNs = nowNs
                     }

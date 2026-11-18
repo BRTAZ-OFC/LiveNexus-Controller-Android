@@ -24,6 +24,8 @@ import android.util.Log
 import android.view.Display
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.UUID
+import org.json.JSONObject
 import kotlin.math.max
 
 class ScreenCaptureService : Service() {
@@ -122,6 +124,56 @@ class ScreenCaptureService : Service() {
             currentBitrateKbps = clamped
             activeInstance?.videoEncoder?.updateBitrate(clamped * 1000)
         }
+    }
+
+    private val encoderLabHandler = Handler(mainLooper)
+    private var encoderLabTask: Runnable? = null
+    private var encoderSessionId = ""
+
+    private fun startEncoderLab() {
+        stopEncoderLab()
+        encoderSessionId = UUID.randomUUID().toString()
+        val task = object : Runnable {
+            override fun run() {
+                if (!isLiveStreaming || stopping.get()) return
+                val video = videoEncoder
+                val scene = sceneCompositor
+                val stream = streamPublisher
+                if (video != null && scene != null && stream != null) {
+                    val metrics = JSONObject().apply {
+                        put("encodedFrames", video.encodedFrames.get())
+                        put("encodedBytes", video.encodedBytes.get())
+                        put("composedFrames", scene.composedFrames.get())
+                        put("renderTotalNs", scene.renderTotalNs.get())
+                        put("transferTotalNs", scene.transferTotalNs.get())
+                        put("lateFrames", scene.lateFrames.get())
+                        put("submittedFrames", stream.submittedFrames.get())
+                        put("sentFrames", stream.sentFrames.get())
+                        put("sendWaitTotalNs", stream.sendWaitTotalNs.get())
+                        put("sendWaitMaxNs", stream.sendWaitMaxNs.get())
+                    }
+                    val report = JSONObject().apply {
+                        put("sessionId", encoderSessionId)
+                        put("codec", video.selectedCodecName)
+                        put("backend", scene.activeBackend)
+                        put("width", currentWidth)
+                        put("height", currentHeight)
+                        put("fpsTarget", currentFps)
+                        put("bitrateTargetKbps", currentBitrateKbps)
+                        put("metrics", metrics)
+                    }
+                    LiveNexusControllerApi.sendEncoderDiagnostics(applicationContext, report)
+                }
+                encoderLabHandler.postDelayed(this, 3000L)
+            }
+        }
+        encoderLabTask = task
+        encoderLabHandler.postDelayed(task, 3000L)
+    }
+
+    private fun stopEncoderLab() {
+        encoderLabTask?.let { encoderLabHandler.removeCallbacks(it) }
+        encoderLabTask = null
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -563,6 +615,7 @@ class ScreenCaptureService : Service() {
                 streamStartTimeMs = System.currentTimeMillis()
                 isConnecting = false
                 isLiveStreaming = true
+                encoderLabHandler.post { if (isLiveStreaming && !stopping.get()) startEncoderLab() }
                 updateNotification("Transmitindo ao vivo (${width}x${height} @ ${fps}fps • ${bitrateKbps}kbps)")
                 notifyListeners()
                 Log.i(TAG, "Pipeline nativo H.264 + AAC + RTMP iniciado com sucesso: ${width}x${height} @ ${fps}fps, ${bitrateKbps}kbps")
@@ -589,6 +642,7 @@ class ScreenCaptureService : Service() {
 
     private fun stopStreamingInternal(errorReason: String?) {
         if (!stopping.compareAndSet(false, true)) return
+        encoderLabHandler.post { stopEncoderLab() }
 
         isConnecting = false
         isLiveStreaming = false

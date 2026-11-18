@@ -6,6 +6,7 @@ import android.util.Log
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Gerenciador de distribuição de pacotes de transmissão ao vivo.
@@ -32,6 +33,10 @@ class StreamPublisher(
     private val clients = CopyOnWriteArrayList<Pair<StreamTarget, RtmpClient>>()
     private val threadPool = Executors.newCachedThreadPool()
     private val sendExecutor = Executors.newSingleThreadExecutor()
+    val submittedFrames = AtomicLong(0)
+    val sentFrames = AtomicLong(0)
+    val sendWaitTotalNs = AtomicLong(0)
+    val sendWaitMaxNs = AtomicLong(0)
 
     @Volatile private var streamMediaStartMs: Long = -1L
     @Volatile private var baseVideoTimestampUs: Long = -1L
@@ -166,7 +171,13 @@ class StreamPublisher(
         val sps = cachedSps
         val pps = cachedPps
 
+        submittedFrames.incrementAndGet()
+        val queuedAtNs = System.nanoTime()
         sendExecutor.execute {
+            val waitNs = (System.nanoTime() - queuedAtNs).coerceAtLeast(0L)
+            sendWaitTotalNs.addAndGet(waitNs)
+            sendWaitMaxNs.updateAndGet { maxOf(it, waitNs) }
+            var sentToAny = false
             for ((target, client) in clients) {
                 if (!client.isPublishing) continue
                 try {
@@ -174,10 +185,12 @@ class StreamPublisher(
                         client.sendVideoHeader(sps, pps, timestampMs)
                     }
                     client.sendVideoSample(naluBytes, isKeyFrame, timestampMs)
+                    sentToAny = true
                 } catch (e: Exception) {
                     Log.w(TAG, "Erro no envio de vídeo para ${target.platformName}", e)
                 }
             }
+            if (sentToAny) sentFrames.incrementAndGet()
             active = clients.any { it.second.isPublishing }
         }
     }
