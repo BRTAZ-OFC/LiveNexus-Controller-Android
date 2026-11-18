@@ -126,7 +126,7 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private val encoderLabHandler = Handler(mainLooper)
+    private val encoderLabHandler by lazy { Handler(mainLooper) }
     private var encoderLabTask: Runnable? = null
     private var encoderSessionId = ""
 
