@@ -11,6 +11,7 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Cliente das rotas existentes de comandos e cenários do LiveNEXUS.
@@ -24,6 +25,31 @@ internal object LiveNexusControllerApi {
     private val worker = Executors.newSingleThreadExecutor { job ->
         Thread(job, "LiveNEXUSControllerIO").apply { isDaemon = true }
     }
+    private val diagnosticsSending = AtomicBoolean(false)
+    private val diagnosticsWorker = Executors.newSingleThreadExecutor { job ->
+        Thread(job, "LiveNEXUSDiagnosticIO").apply { isDaemon = true }
+    }
+
+    // Canal de observabilidade isolado da fila de comandos do Controller.
+    fun sendBrowserDiagnostics(context: Context, report: JSONObject) {
+        if (!diagnosticsSending.compareAndSet(false, true)) return
+        val app = context.applicationContext
+        try {
+            diagnosticsWorker.execute {
+                try {
+                    request(sessionToken(app), "/api/laboratorio/browser-source/reports", "POST", report)
+                } catch (error: Exception) {
+                    logError("enviar diagnostico Browser Source", error)
+                } finally {
+                    diagnosticsSending.set(false)
+                }
+            }
+        } catch (error: Exception) {
+            diagnosticsSending.set(false)
+            logError("agendar diagnostico Browser Source", error)
+        }
+    }
+
     private val allowedCommands = setOf(
         "death-increment", "death-decrement", "death-reset", "rtc-reload",
         "music-toggle", "music-next", "music-previous",

@@ -24,6 +24,8 @@ import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import org.json.JSONObject
+import org.json.JSONTokener
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
@@ -94,6 +96,8 @@ internal object BrowserSourceManager {
         private var virtualDisplay: VirtualDisplay? = null
         private var presentation: Presentation? = null
         private var webView: WebView? = null
+        private var diagnosticContext: Context? = null
+        @Volatile private var webViewMetrics: JSONObject? = null
 
         // Diagnóstico: contadores de captura, sem ler conteúdo visual ou URLs.
         private var callbacksReceived = 0L
@@ -111,6 +115,24 @@ internal object BrowserSourceManager {
             if (now - lastDiagnosticsAt < 10_000L) return
             val elapsed = now - lastDiagnosticsAt
             val avgMs = if (framesAccepted > 0L) totalConversionMs / framesAccepted else 0L
+            val report = JSONObject().apply {
+                put("sourceId", "source_" + Integer.toHexString(id.hashCode()))
+                put("counters", JSONObject().apply {
+                    put("callbacks", callbacksReceived)
+                    put("accepted", framesAccepted)
+                    put("throttled", framesThrottled)
+                    put("invalid", framesInvalid)
+                    put("errors", frameErrors)
+                    put("draws", framesDrawn.get())
+                    put("avgCopyMs", avgMs)
+                    put("maxCopyMs", maxConversionMs)
+                    put("windowMs", elapsed)
+                    put("width", SOURCE_WIDTH)
+                    put("height", SOURCE_HEIGHT)
+                })
+                webViewMetrics?.let { put("webView", it) }
+            }
+            diagnosticContext?.let { LiveNexusControllerApi.sendBrowserDiagnostics(it, report) }
             Log.i(TAG, "Browser Source frames: callbacks=$callbacksReceived accepted=$framesAccepted " +
                 "throttled=$framesThrottled invalid=$framesInvalid errors=$frameErrors " +
                 "draws=${framesDrawn.get()} avgCopyMs=$avgMs maxCopyMs=$maxConversionMs " +
@@ -130,6 +152,15 @@ internal object BrowserSourceManager {
             if (closed) return
             val metrics = browser.resources.displayMetrics
             val packageVersion = WebView.getCurrentWebViewPackage()?.versionName ?: "indisponivel"
+            webViewMetrics = JSONObject().apply {
+                put("version", packageVersion)
+                put("width", browser.width)
+                put("height", browser.height)
+                put("density", metrics.density.toDouble())
+                put("densityDpi", metrics.densityDpi)
+                put("displayWidth", metrics.widthPixels)
+                put("displayHeight", metrics.heightPixels)
+            }
             Log.i(TAG, "Browser Source WebView: stage=$stage package=$packageVersion " +
                 "view=${browser.width}x${browser.height} density=${metrics.density} " +
                 "densityDpi=${metrics.densityDpi} display=${metrics.widthPixels}x${metrics.heightPixels}")
@@ -139,12 +170,29 @@ internal object BrowserSourceManager {
                     "dpr:window.devicePixelRatio,visualWidth:v?v.width:null," +
                     "visualHeight:v?v.height:null,visualScale:v?v.scale:null});})()"
             ) { result ->
-                if (!closed) Log.i(TAG, "Browser Source CSS viewport: stage=$stage metrics=$result")
+                if (closed) return@evaluateJavascript
+                try {
+                    val raw = JSONTokener(result).nextValue() as? String ?: return@evaluateJavascript
+                    val viewport = JSONObject(raw)
+                    val next = JSONObject(webViewMetrics?.toString() ?: "{}")
+                    for ((key, target) in listOf(
+                        "width" to "viewportWidth", "height" to "viewportHeight",
+                        "dpr" to "dpr", "visualWidth" to "visualWidth",
+                        "visualHeight" to "visualHeight", "visualScale" to "visualScale"
+                    )) {
+                        if (!viewport.isNull(key)) next.put(target, viewport.optDouble(key))
+                    }
+                    webViewMetrics = next
+                } catch (_: Exception) {
+                    // Não interferir na renderização quando as métricas JS estiverem indisponíveis.
+                }
+                Log.i(TAG, "Browser Source CSS viewport: stage=$stage metrics=$result")
             }
         }
 
         fun start(context: Context) {
             check(Looper.myLooper() == Looper.getMainLooper())
+            diagnosticContext = context.applicationContext
             val reader = ImageReader.newInstance(
                 SOURCE_WIDTH, SOURCE_HEIGHT, PixelFormat.RGBA_8888, 3
             )
@@ -314,6 +362,8 @@ internal object BrowserSourceManager {
             try { webView?.stopLoading() } catch (_: Exception) {}
             try { webView?.destroy() } catch (_: Exception) {}
             webView = null
+            diagnosticContext = null
+            webViewMetrics = null
             try { virtualDisplay?.release() } catch (_: Exception) {}
             virtualDisplay = null
             try { imageReader?.setOnImageAvailableListener(null, null) } catch (_: Exception) {}
