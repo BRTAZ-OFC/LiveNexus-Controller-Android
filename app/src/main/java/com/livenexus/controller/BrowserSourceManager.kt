@@ -34,9 +34,9 @@ import kotlin.math.min
  */
 internal object BrowserSourceManager {
     private const val TAG = "LiveNEXUSBrowserSource"
-    private const val SOURCE_WIDTH = 960
-    private const val SOURCE_HEIGHT = 540
-    private const val FRAME_INTERVAL_MS = 66L
+    private const val SOURCE_WIDTH = 1920
+    private const val SOURCE_HEIGHT = 1080
+    private const val FRAME_INTERVAL_MS = 33L
     private val main = Handler(Looper.getMainLooper())
     private val sources = ConcurrentHashMap<String, BrowserSource>()
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
