@@ -554,7 +554,14 @@ class ScreenCaptureService : Service() {
                     width = width,
                     height = height,
                     fps = fps,
-                    videoBitrateKbps = bitrateKbps
+                    videoBitrateKbps = bitrateKbps,
+                    requestKeyFrame = {
+                        callbackHandler.post {
+                            if (!stopping.get() && mediaProjection === projection) {
+                                videoEncoder?.requestKeyFrame()
+                            }
+                        }
+                    }
                 )
                 streamPublisher = publisher
 

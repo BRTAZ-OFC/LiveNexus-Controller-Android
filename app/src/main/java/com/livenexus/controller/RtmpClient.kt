@@ -9,6 +9,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.URI
 import java.nio.ByteBuffer
@@ -73,9 +74,11 @@ class RtmpClient(
     }
 
     private var socket: Socket? = null
+    private var tlsSocket: SSLSocket? = null
     private var inStream: InputStream? = null
     private var outStream: OutputStream? = null
     private var readerThread: Thread? = null
+    @Volatile private var closed = false
 
     @Volatile
     var isConnected: Boolean = false
@@ -127,6 +130,7 @@ class RtmpClient(
      * Possui fallback automático RTMP <-> RTMPS para YouTube e Twitch caso a porta 1935 esteja bloqueada.
      */
     fun connect() {
+        ensureOpen()
         val cleanKey = sanitizeStreamKey(streamKey)
         if (cleanKey.isBlank()) {
             throw IllegalArgumentException("Chave de transmissão (Stream Key) não configurada ou inválida.")
@@ -140,10 +144,11 @@ class RtmpClient(
                 connectSingleEndpoint(candidateUrl, cleanKey)
                 return
             } catch (e: Throwable) {
+                closeQuietly()
+                ensureOpen()
                 Log.w(TAG, "Tentativa falhou em $candidateUrl: ${e.message}")
                 lastConnectError = e
                 lastError = e.message
-                closeQuietly()
                 // Se o servidor recusou explicitamente a Stream Key, não precisa testar outro endpoint
                 val msg = e.message ?: ""
                 if (msg.contains("Chave de transmissão") || msg.contains("Stream Key") || msg.contains("recusada")) {
@@ -155,6 +160,23 @@ class RtmpClient(
         throw IllegalStateException(
             lastConnectError?.message ?: "Não foi possível conectar ao servidor RTMP ($rtmpUrl)."
         )
+    }
+
+    private fun ensureOpen() {
+        if (closed) throw SocketException("Conexão RTMP encerrada.")
+    }
+
+    @Synchronized
+    private fun trackSocket(transport: Socket) {
+        if (closed) {
+            try { transport.close() } catch (_: Exception) {}
+            ensureOpen()
+        }
+        if (transport is SSLSocket) {
+            tlsSocket = transport
+        } else {
+            socket = transport
+        }
     }
 
     private fun sanitizeStreamKey(rawKey: String): String {
@@ -254,34 +276,36 @@ class RtmpClient(
         val app = parsed.app
         val isTls = parsed.isTls
 
-        val rawSocket = if (isTls) {
-            val plain = Socket()
-            plain.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+        val plain = Socket()
+        trackSocket(plain)
+        plain.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+        val transport = if (isTls) {
             plain.soTimeout = HANDSHAKE_TIMEOUT_MS
             plain.tcpNoDelay = true
             val sslFactory = SSLSocketFactory.getDefault() as SSLSocketFactory
             val sslSocket = sslFactory.createSocket(plain, host, port, true) as SSLSocket
+            trackSocket(sslSocket)
             sslSocket.useClientMode = true
             sslSocket.startHandshake()
             sslSocket
         } else {
-            val plainSocket = Socket()
-            plainSocket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-            plainSocket
+            plain
         }
 
-        rawSocket.soTimeout = HANDSHAKE_TIMEOUT_MS
-        rawSocket.tcpNoDelay = true
-        rawSocket.keepAlive = true
+        transport.soTimeout = HANDSHAKE_TIMEOUT_MS
+        transport.tcpNoDelay = true
+        transport.keepAlive = true
         try {
-            rawSocket.sendBufferSize = 524288
+            transport.sendBufferSize = 524288
         } catch (_: Exception) {}
-        socket = rawSocket
 
-        val bis = BufferedInputStream(rawSocket.getInputStream(), 65536)
-        val bos = BufferedOutputStream(rawSocket.getOutputStream(), 131072)
-        inStream = bis
-        outStream = bos
+        val bis = BufferedInputStream(transport.getInputStream(), 65536)
+        val bos = BufferedOutputStream(transport.getOutputStream(), 131072)
+        synchronized(this) {
+            ensureOpen()
+            inStream = bis
+            outStream = bos
+        }
 
         doHandshake(bis, bos)
         Log.i(TAG, "Handshake concluído com sucesso em $host:$port")
@@ -306,16 +330,20 @@ class RtmpClient(
         Log.i(TAG, "Stream criado com ID: $streamId")
 
         // O modo de publicação RTMP deve ser sempre "live" (mesmo em endpoints backup=1)
+        ensureOpen()
         sendPublish(bos, streamId, cleanKey, "live")
 
         // Aguarda confirmação real do servidor (NetStream.Publish.Start)
-        verifyPublishStatus(bis, bos, rawSocket)
+        verifyPublishStatus(bis, bos, transport)
 
         sendMetadata(bos, streamId)
 
-        isConnected = true
-        isPublishing = true
-        startBackgroundReader(bis, bos, rawSocket)
+        synchronized(this) {
+            ensureOpen()
+            isConnected = true
+            isPublishing = true
+            startBackgroundReader(bis, bos, transport)
+        }
         Log.i(TAG, "Transmissão RTMP publicada e ativa em $host:$port/$app (streamId=$streamId)!")
     }
 
@@ -1374,6 +1402,7 @@ class RtmpClient(
         }
     }
 
+    @Synchronized
     private fun closeQuietly() {
         isPublishing = false
         isConnected = false
@@ -1385,21 +1414,25 @@ class RtmpClient(
         cachedAsc = null
         try { readerThread?.interrupt() } catch (_: Exception) {}
         readerThread = null
-        // A thread RTMP lê com soTimeout=0. Fechar o socket PRIMEIRO desbloqueia a
-        // leitura e qualquer escrita pendente; fechar o InputStream antes pode bloquear.
+        // O socket TCP existe desde o início da conexão. Fechá-lo primeiro
+        // interrompe o handshake TLS e também leituras ou escritas pendentes.
         val currentSocket = socket
+        val currentTls = tlsSocket
         val currentInput = inStream
         val currentOutput = outStream
         socket = null
+        tlsSocket = null
         inStream = null
         outStream = null
         try { currentSocket?.close() } catch (_: Exception) {}
+        try { currentTls?.close() } catch (_: Exception) {}
         try { currentOutput?.close() } catch (_: Exception) {}
         try { currentInput?.close() } catch (_: Exception) {}
     }
 
     @Synchronized
     override fun close() {
+        closed = true
         closeQuietly()
         Log.i(TAG, "Conexão RTMP encerrada.")
     }

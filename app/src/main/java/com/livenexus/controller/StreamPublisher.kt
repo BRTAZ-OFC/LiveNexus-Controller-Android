@@ -6,6 +6,8 @@ import android.util.Log
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -14,14 +16,23 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class StreamPublisher(
     private val targets: List<StreamTarget>,
-    private val width: Int,
-    private val height: Int,
+    width: Int,
+    height: Int,
     private val fps: Int,
-    private val videoBitrateKbps: Int
+    private val videoBitrateKbps: Int,
+    private val requestKeyFrame: () -> Unit = {}
 ) : AutoCloseable {
 
     companion object {
         private const val TAG = "LiveNexusPublisher"
+        private const val MAX_QUEUE_AGE_NS = 500_000_000L
+        private const val MAX_QUEUED_PACKETS = 128
+        private const val MAX_QUEUED_BYTES = 4 * 1024 * 1024
+        private const val WRITE_TIMEOUT_NS = 1_500_000_000L
+        private const val MONITOR_INTERVAL_MS = 100L
+        private const val RECONNECT_DELAY_MS = 2_000L
+        private const val MAX_RECONNECT_DELAY_MS = 16_000L
+        private const val KEY_FRAME_REQUEST_INTERVAL_MS = 2_000L
     }
 
     data class StreamTarget(
@@ -30,244 +41,414 @@ class StreamPublisher(
         val streamKey: String
     )
 
-    private val clients = CopyOnWriteArrayList<Pair<StreamTarget, RtmpClient>>()
+    private data class VideoHeader(val sps: ByteArray, val pps: ByteArray)
+
+    private sealed class Sample(val data: ByteArray, val timestampMs: Long) {
+        val queuedAtNs = System.nanoTime()
+
+        class Video(data: ByteArray, timestampMs: Long, val keyFrame: Boolean, val header: VideoHeader?) :
+            Sample(data, timestampMs) {
+            val counted = AtomicBoolean(false)
+        }
+
+        class Audio(data: ByteArray, timestampMs: Long, val header: ByteArray?) : Sample(data, timestampMs)
+    }
+
+    private class Connection(val client: RtmpClient) {
+        @Volatile var writeStartedNs: Long? = null
+        var videoHeader: VideoHeader? = null
+        var audioHeader: ByteArray? = null
+        var baseTimestampMs: Long? = null
+    }
+
+    private val destinations = CopyOnWriteArrayList(targets.map { Destination(it) })
     private val threadPool = Executors.newCachedThreadPool()
-    private val sendExecutor = Executors.newSingleThreadExecutor()
+    private val monitor = Executors.newSingleThreadScheduledExecutor()
+    private val lastKeyFrameRequestMs = AtomicLong(-KEY_FRAME_REQUEST_INTERVAL_MS)
     val submittedFrames = AtomicLong(0)
     val sentFrames = AtomicLong(0)
     val sendWaitTotalNs = AtomicLong(0)
     val sendWaitMaxNs = AtomicLong(0)
     val rtmpVideoBytesTotal: Long
-        get() = clients.sumOf { it.second.videoBytesWritten.get() }
+        get() = destinations.sumOf { it.videoBytesWritten }
     val rtmpVideoBytesPrimary: Long
-        get() = clients.firstOrNull()?.second?.videoBytesWritten?.get() ?: 0L
+        get() = destinations.firstOrNull { it.started }?.videoBytesWritten ?: 0L
     val rtmpDestinationCount: Int
-        get() = clients.size
+        get() = destinations.count { it.started }
 
-    @Volatile private var streamMediaStartMs: Long = -1L
-    @Volatile private var baseVideoTimestampUs: Long = -1L
-    @Volatile private var baseVideoOffsetMs: Long = 0L
-    @Volatile private var lastVideoTimestampMs: Long = 0L
+    private val mediaClockLock = Any()
+    private var streamMediaStartMs = -1L
+    private var baseVideoTimestampUs = -1L
+    private var baseVideoOffsetMs = 0L
+    private var lastVideoTimestampMs = 0L
+    private var baseAudioTimestampUs = -1L
+    private var baseAudioOffsetMs = 0L
+    private var lastAudioTimestampMs = 0L
 
-    @Volatile private var baseAudioTimestampUs: Long = -1L
-    @Volatile private var baseAudioOffsetMs: Long = 0L
-    @Volatile private var lastAudioTimestampMs: Long = 0L
-
+    @Volatile private var dimensions = width to height
     @Volatile private var active = false
     @Volatile private var closed = false
-
-    @Volatile private var cachedSps: ByteArray? = null
-    @Volatile private var cachedPps: ByteArray? = null
+    @Volatile private var cachedVideoHeader: VideoHeader? = null
     @Volatile private var cachedAsc: ByteArray? = null
 
     val connectedPlatforms: List<String>
-        get() = clients.filter { it.second.isPublishing }.map { it.first.platformName }
+        get() = destinations.filter { it.isPublishing }.map { it.target.platformName }
 
     val hasActivePublishing: Boolean
-        get() = clients.any { it.second.isPublishing }
+        get() = destinations.any { it.isPublishing }
 
     /**
      * Inicia a conexão com todas as plataformas configuradas em paralelo.
      * Retorna a lista de erros por plataforma caso alguma falhe.
      */
     fun start(): Map<String, String> {
-        val errors = mutableMapOf<String, String>()
-        val connectionTasks = mutableListOf<Pair<StreamTarget, Future<*>>>()
-
-        for (target in targets) {
-            val client = RtmpClient(
-                rtmpUrl = target.rtmpUrl,
-                streamKey = target.streamKey,
-                width = width,
-                height = height,
-                fps = fps,
-                videoBitrateKbps = videoBitrateKbps
-            )
-            val future = threadPool.submit {
-                try {
-                    client.connect()
-                    synchronized(clients) {
-                        if (closed) {
-                            // O usuário encerrou enquanto o handshake ainda estava acontecendo.
-                            client.close()
-                        } else {
-                            clients.add(Pair(target, client))
-                            Log.i(TAG, "Conexão estabelecida com ${target.platformName}")
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Falha ao conectar com ${target.platformName}", e)
-                    client.close()
-                    synchronized(errors) {
-                        errors[target.platformName] = e.message ?: "Erro de conexão RTMP"
-                    }
-                }
+        val connectionTasks: List<Pair<Destination, Future<*>>> = synchronized(this) {
+            if (closed) return emptyMap()
+            destinations.map { destination ->
+                val task = threadPool.submit(Runnable { destination.connect() })
+                destination to task
             }
-            connectionTasks.add(Pair(target, future))
         }
 
-        // Aguarda conclusões
-        for ((target, future) in connectionTasks) {
+        val errors = mutableMapOf<String, String>()
+        for ((destination, future) in connectionTasks) {
             try {
                 future.get()
-            } catch (e: Exception) {
-                errors[target.platformName] = e.cause?.message ?: (e.message ?: "Falha ao conectar")
+            } catch (error: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return errors
+            } catch (error: Exception) {
+                val platform = destination.target.platformName
+                errors[platform] = error.cause?.message ?: error.message ?: "Falha ao conectar"
+                Log.w(TAG, "Falha ao conectar com $platform", error.cause ?: error)
             }
         }
 
-        streamMediaStartMs = -1L
-        active = !closed && clients.any { it.second.isPublishing }
+        synchronized(this) {
+            if (closed) return errors
+            active = hasActivePublishing
+            if (active) {
+                destinations.filter { it.started }.forEach { destination ->
+                    threadPool.execute { destination.sendUntilClosed() }
+                }
+                monitor.scheduleWithFixedDelay(
+                    { destinations.forEach { it.abortBlockedWrite() } },
+                    MONITOR_INTERVAL_MS,
+                    MONITOR_INTERVAL_MS,
+                    TimeUnit.MILLISECONDS
+                )
+            }
+        }
         return errors
     }
 
     /**
-     * Atualiza as dimensões de vídeo anunciadas nos clientes RTMP ativos (ex: ao trocar entre 16:9 e 9:16).
+     * Atualiza as dimensões de vídeo anunciadas nos clientes RTMP ativos (ex: 16:9 para 9:16).
      */
     fun updateVideoDimensions(newWidth: Int, newHeight: Int) {
-        baseVideoTimestampUs = -1L
-        baseVideoOffsetMs = lastVideoTimestampMs
-        sendExecutor.execute {
-            for ((_, client) in clients) {
-                try {
-                    client.updateDimensions(newWidth, newHeight)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Falha ao atualizar dimensões no cliente RTMP", e)
-                }
-            }
+        if (newWidth <= 0 || newHeight <= 0) return
+        synchronized(mediaClockLock) {
+            baseVideoTimestampUs = -1L
+            baseVideoOffsetMs = lastVideoTimestampMs
+            dimensions = newWidth to newHeight
         }
     }
 
-    /**
-     * Envia o cabeçalho AVC (SPS e PPS) para todos os clientes ativos.
-     */
     fun onVideoHeader(sps: ByteArray, pps: ByteArray) {
-        cachedSps = sps
-        cachedPps = pps
-        val ts = lastVideoTimestampMs.coerceAtLeast(0L)
-        sendExecutor.execute {
-            for ((target, client) in clients) {
-                try {
-                    client.sendVideoHeader(sps, pps, ts)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Erro ao enviar cabeçalho de vídeo para ${target.platformName}", e)
-                }
-            }
-        }
+        cachedVideoHeader = VideoHeader(sps, pps)
     }
 
-    /**
-     * Envia um frame de vídeo codificado para todos os clientes ativos.
-     */
     fun onVideoSample(naluBytes: ByteArray, info: MediaCodec.BufferInfo) {
         if (!active) return
-
-        val nowMs = SystemClock.elapsedRealtime()
-        if (streamMediaStartMs < 0L) {
-            streamMediaStartMs = nowMs
-        }
-        if (baseVideoTimestampUs < 0L) {
-            baseVideoTimestampUs = info.presentationTimeUs
-            baseVideoOffsetMs = maxOf(lastVideoTimestampMs, (nowMs - streamMediaStartMs).coerceAtLeast(0L))
-        }
-        val rawMs = baseVideoOffsetMs + ((info.presentationTimeUs - baseVideoTimestampUs) / 1000L).coerceAtLeast(0L)
-        val timestampMs = maxOf(rawMs, lastVideoTimestampMs)
-        lastVideoTimestampMs = timestampMs
-
-        val isKeyFrame = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
-        val sps = cachedSps
-        val pps = cachedPps
-
-        submittedFrames.incrementAndGet()
-        val queuedAtNs = System.nanoTime()
-        sendExecutor.execute {
-            val waitNs = (System.nanoTime() - queuedAtNs).coerceAtLeast(0L)
-            sendWaitTotalNs.addAndGet(waitNs)
-            sendWaitMaxNs.updateAndGet { maxOf(it, waitNs) }
-            var sentToAny = false
-            for ((target, client) in clients) {
-                if (!client.isPublishing) continue
-                try {
-                    if (!client.hasVideoHeaderSent && sps != null && pps != null) {
-                        client.sendVideoHeader(sps, pps, timestampMs)
-                    }
-                    client.sendVideoSample(naluBytes, isKeyFrame, timestampMs)
-                    sentToAny = true
-                } catch (e: Exception) {
-                    Log.w(TAG, "Erro no envio de vídeo para ${target.platformName}", e)
-                }
+        val timestampMs = synchronized(mediaClockLock) {
+            val elapsedMs = elapsedMediaTimeMs()
+            if (baseVideoTimestampUs < 0L) {
+                baseVideoTimestampUs = info.presentationTimeUs
+                baseVideoOffsetMs = maxOf(lastVideoTimestampMs, elapsedMs)
             }
-            if (sentToAny) sentFrames.incrementAndGet()
-            active = clients.any { it.second.isPublishing }
+            val rawMs = baseVideoOffsetMs + ((info.presentationTimeUs - baseVideoTimestampUs) / 1000L).coerceAtLeast(0L)
+            lastVideoTimestampMs = maxOf(rawMs, lastVideoTimestampMs)
+            lastVideoTimestampMs
         }
+
+        val keyFrame = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+        val sample = Sample.Video(naluBytes, timestampMs, keyFrame, cachedVideoHeader)
+        submittedFrames.incrementAndGet()
+        var needsKeyFrame = false
+        for (destination in destinations) {
+            if (destination.offer(sample)) needsKeyFrame = true
+        }
+        if (needsKeyFrame) requestRecoveryKeyFrame()
     }
 
-    /**
-     * Envia o cabeçalho de áudio AAC (AudioSpecificConfig) para todos os clientes ativos.
-     */
     fun onAudioHeader(asc: ByteArray) {
         cachedAsc = asc
-        sendExecutor.execute {
-            for ((target, client) in clients) {
-                try {
-                    client.sendAudioHeader(asc)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Erro ao enviar cabeçalho de áudio para ${target.platformName}", e)
-                }
+    }
+
+    fun onAudioSample(aacBytes: ByteArray, info: MediaCodec.BufferInfo) {
+        if (!active) return
+        val timestampMs = synchronized(mediaClockLock) {
+            val elapsedMs = elapsedMediaTimeMs()
+            if (baseAudioTimestampUs < 0L) {
+                baseAudioTimestampUs = info.presentationTimeUs
+                baseAudioOffsetMs = maxOf(lastAudioTimestampMs, elapsedMs)
             }
+            val rawMs = baseAudioOffsetMs + ((info.presentationTimeUs - baseAudioTimestampUs) / 1000L).coerceAtLeast(0L)
+            lastAudioTimestampMs = maxOf(rawMs, lastAudioTimestampMs)
+            lastAudioTimestampMs
+        }
+
+        val sample = Sample.Audio(aacBytes, timestampMs, cachedAsc)
+        var needsKeyFrame = false
+        for (destination in destinations) {
+            if (destination.offer(sample)) needsKeyFrame = true
+        }
+        if (needsKeyFrame) requestRecoveryKeyFrame()
+    }
+
+    private fun elapsedMediaTimeMs(): Long {
+        val nowMs = SystemClock.elapsedRealtime()
+        if (streamMediaStartMs < 0) streamMediaStartMs = nowMs
+        return nowMs - streamMediaStartMs
+    }
+
+    private fun requestRecoveryKeyFrame() {
+        if (closed) return
+        val lastRequest = lastKeyFrameRequestMs.get()
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastRequest >= KEY_FRAME_REQUEST_INTERVAL_MS &&
+            lastKeyFrameRequestMs.compareAndSet(lastRequest, now)) {
+            requestKeyFrame()
         }
     }
 
-    /**
-     * Envia uma amostra de áudio codificada para todos os clientes ativos.
-     */
-    fun onAudioSample(aacBytes: ByteArray, info: MediaCodec.BufferInfo) {
-        if (!active) return
+    private inner class Destination(val target: StreamTarget) {
+        private val queueLock = Object()
+        private val queue = ArrayDeque<Sample>()
+        private var queuedBytes = 0
+        private var waitingForKeyFrame = true
+        private var audioFromTimestampMs = 0L
+        private var accepting = false
+        private var closedVideoBytes = 0L
 
-        val nowMs = SystemClock.elapsedRealtime()
-        if (streamMediaStartMs < 0L) {
-            streamMediaStartMs = nowMs
-        }
-        if (baseAudioTimestampUs < 0L) {
-            baseAudioTimestampUs = info.presentationTimeUs
-            baseAudioOffsetMs = maxOf(lastAudioTimestampMs, (nowMs - streamMediaStartMs).coerceAtLeast(0L))
-        }
-        val rawMs = baseAudioOffsetMs + ((info.presentationTimeUs - baseAudioTimestampUs) / 1000L).coerceAtLeast(0L)
-        val timestampMs = maxOf(rawMs, lastAudioTimestampMs)
-        lastAudioTimestampMs = timestampMs
+        @Volatile private var connection: Connection? = null
+        @Volatile var started = false
+            private set
 
-        val asc = cachedAsc
+        val isPublishing: Boolean
+            get() = connection?.client?.isPublishing == true
 
-        sendExecutor.execute {
-            for ((target, client) in clients) {
-                if (!client.isPublishing) continue
-                try {
-                    if (!client.hasAudioHeaderSent && asc != null) {
-                        client.sendAudioHeader(asc)
+        val videoBytesWritten: Long
+            get() = synchronized(queueLock) {
+                closedVideoBytes + (connection?.client?.videoBytesWritten?.get() ?: 0L)
+            }
+
+        fun connect() {
+            val (currentWidth, currentHeight) = dimensions
+            val next = Connection(RtmpClient(
+                rtmpUrl = target.rtmpUrl,
+                streamKey = target.streamKey,
+                width = currentWidth,
+                height = currentHeight,
+                fps = fps,
+                videoBitrateKbps = videoBitrateKbps
+            ))
+            synchronized(queueLock) {
+                if (closed) return
+                connection = next
+            }
+            try {
+                next.client.connect()
+                synchronized(queueLock) {
+                    if (!closed) {
+                        accepting = true
+                        started = true
+                        Log.i(TAG, "Conexão estabelecida com ${target.platformName}")
+                        return
                     }
-                    client.sendAudioSample(aacBytes, timestampMs)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Erro no envio de áudio para ${target.platformName}", e)
+                }
+            } catch (error: Exception) {
+                disconnect(next)
+                throw error
+            }
+            disconnect(next)
+        }
+
+        // Retorna true quando falta um quadro-chave para recuperar este destino.
+        fun offer(sample: Sample): Boolean = synchronized(queueLock) {
+            if (closed || !accepting) return false
+            val oldest = queue.firstOrNull()
+            val queueFull = queue.size >= MAX_QUEUED_PACKETS || sample.data.size > MAX_QUEUED_BYTES - queuedBytes
+            val queueExpired = oldest != null && sample.queuedAtNs - oldest.queuedAtNs >= MAX_QUEUE_AGE_NS
+            if (queueFull || queueExpired) {
+                resetQueue()
+            }
+
+            if (sample.data.size > MAX_QUEUED_BYTES) return true
+            if (waitingForKeyFrame) {
+                if (sample !is Sample.Video) return queueFull || queueExpired
+                if (!sample.keyFrame) return true
+                waitingForKeyFrame = false
+                audioFromTimestampMs = sample.timestampMs
+            }
+
+            if (sample is Sample.Audio && sample.timestampMs < audioFromTimestampMs) return false
+            queue.addLast(sample)
+            queuedBytes += sample.data.size
+            queueLock.notify()
+            false
+        }
+
+        private fun resetQueue() {
+            queue.clear()
+            queuedBytes = 0
+            waitingForKeyFrame = true
+        }
+
+        fun sendUntilClosed() {
+            var retryDelayMs = RECONNECT_DELAY_MS
+            try {
+                while (!closed) {
+                    val current = connection
+                    if (current != null) {
+                        try {
+                            send(current)
+                        } catch (error: InterruptedException) {
+                            throw error
+                        } catch (error: Exception) {
+                            if (!closed) Log.w(TAG, "Envio RTMP interrompido em ${target.platformName}", error)
+                        } finally {
+                            disconnect(current)
+                        }
+                    }
+                    if (closed) break
+
+                    Thread.sleep(retryDelayMs)
+                    if (closed) break
+                    try {
+                        connect()
+                        requestRecoveryKeyFrame()
+                    } catch (error: Exception) {
+                        if (!closed) Log.w(TAG, "Falha ao reconectar com ${target.platformName}", error)
+                    }
+                    // Uma conexão que abre e trava imediatamente também entra no recuo.
+                    retryDelayMs = (retryDelayMs * 2).coerceAtMost(MAX_RECONNECT_DELAY_MS)
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+
+        private fun send(current: Connection) {
+            val client = current.client
+            while (!closed && client.isPublishing) {
+                var expired = false
+                val sample = synchronized(queueLock) {
+                    if (queue.isEmpty() && !closed && accepting && client.isPublishing) {
+                        queueLock.wait(MONITOR_INTERVAL_MS)
+                    }
+                    if (closed || !accepting || !client.isPublishing) return
+                    val next = queue.removeFirstOrNull() ?: return@synchronized null
+                    queuedBytes -= next.data.size
+                    if (System.nanoTime() - next.queuedAtNs >= MAX_QUEUE_AGE_NS) {
+                        resetQueue()
+                        expired = true
+                        return@synchronized null
+                    }
+                    current.writeStartedNs = System.nanoTime()
+                    next
+                }
+                if (expired) requestRecoveryKeyFrame()
+                if (sample == null) continue
+
+                try {
+                    val startedAtNs = System.nanoTime()
+                    val (currentWidth, currentHeight) = dimensions
+                    client.updateDimensions(currentWidth, currentHeight)
+                    sendSample(current, sample, startedAtNs)
+                } finally {
+                    current.writeStartedNs = null
                 }
             }
-            active = clients.any { it.second.isPublishing }
+        }
+
+        private fun sendSample(current: Connection, sample: Sample, startedAtNs: Long) {
+            val client = current.client
+            val base = current.baseTimestampMs ?: sample.timestampMs.also { current.baseTimestampMs = it }
+            val timestampMs = (sample.timestampMs - base).coerceAtLeast(0L)
+            when (sample) {
+                is Sample.Video -> {
+                    val header = sample.header
+                    if (header != null && current.videoHeader !== header) {
+                        client.sendVideoHeader(header.sps, header.pps, timestampMs)
+                        current.videoHeader = header
+                    }
+                    val bytesBefore = client.videoBytesWritten.get()
+                    client.sendVideoSample(sample.data, sample.keyFrame, timestampMs)
+                    // O LAB conta cada quadro uma vez, mesmo quando vários destinos o recebem.
+                    if (client.videoBytesWritten.get() > bytesBefore && sample.counted.compareAndSet(false, true)) {
+                        val waitNs = (startedAtNs - sample.queuedAtNs).coerceAtLeast(0L)
+                        sendWaitTotalNs.addAndGet(waitNs)
+                        sendWaitMaxNs.updateAndGet { maxOf(it, waitNs) }
+                        sentFrames.incrementAndGet()
+                    }
+                }
+
+                is Sample.Audio -> {
+                    val header = sample.header
+                    if (header != null && current.audioHeader !== header) {
+                        client.sendAudioHeader(header)
+                        current.audioHeader = header
+                    }
+                    client.sendAudioSample(sample.data, timestampMs)
+                }
+            }
+        }
+
+        fun abortBlockedWrite() {
+            val blocked = synchronized(queueLock) {
+                val current = connection ?: return
+                val startedAt = current.writeStartedNs ?: return
+                if (!accepting || System.nanoTime() - startedAt < WRITE_TIMEOUT_NS) return
+                accepting = false
+                resetQueue()
+                current.client
+            }
+            Log.w(TAG, "Escrita RTMP excedeu o limite em ${target.platformName}; reconectando")
+            blocked.close()
+        }
+
+        private fun disconnect(current: Connection) {
+            current.client.close()
+            synchronized(queueLock) {
+                if (connection === current) {
+                    accepting = false
+                    resetQueue()
+                    closedVideoBytes += current.client.videoBytesWritten.get()
+                    connection = null
+                }
+            }
+        }
+
+        fun close() {
+            val client = synchronized(queueLock) {
+                accepting = false
+                resetQueue()
+                queueLock.notifyAll()
+                connection?.client
+            }
+            client?.close()
         }
     }
 
     @Synchronized
     override fun close() {
+        if (closed) return
         closed = true
         active = false
-        // Fechar o transporte primeiro interrompe escritas bloqueadas e impede o envio de
-        // quadros remanescentes enquanto o executor termina.
-        synchronized(clients) {
-            for ((_, client) in clients) {
-                try {
-                    client.close()
-                } catch (_: Exception) {}
-            }
-            clients.clear()
-        }
-        sendExecutor.shutdownNow()
+        monitor.shutdownNow()
+        destinations.forEach { it.close() }
+        destinations.clear()
         threadPool.shutdownNow()
         Log.i(TAG, "StreamPublisher finalizado.")
     }
