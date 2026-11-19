@@ -5,7 +5,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -17,14 +16,11 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
-import android.provider.MediaStore
 import android.os.IBinder
-import android.os.Environment
 import android.util.Log
 import android.view.Display
 import java.util.concurrent.CopyOnWriteArraySet
@@ -345,37 +341,6 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun saveCompositorDiagnosticFrame(snapshot: Bitmap) {
-        var savedUri: Uri? = null
-        val resolver = contentResolver
-        try {
-            val filename = "livenexus-compositor-" + System.currentTimeMillis() + ".png"
-            val values = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, filename)
-                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/LiveNexus")
-                put(MediaStore.Images.Media.IS_PENDING, 1)
-            }
-            savedUri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                ?: throw IllegalStateException("Não foi possível criar o PNG no MediaStore")
-            val imageUri = savedUri
-            resolver.openOutputStream(imageUri)?.use { output ->
-                if (!snapshot.compress(Bitmap.CompressFormat.PNG, 100, output)) {
-                    throw IllegalStateException("Falha ao codificar o quadro diagnóstico em PNG")
-                }
-            } ?: throw IllegalStateException("Não foi possível abrir o arquivo PNG")
-            resolver.update(imageUri, ContentValues().apply {
-                put(MediaStore.Images.Media.IS_PENDING, 0)
-            }, null, null)
-            Log.i(TAG, "Quadro diagnóstico salvo em Pictures/LiveNexus/$filename (${snapshot.width}x${snapshot.height})")
-        } catch (error: Exception) {
-            savedUri?.let { try { resolver.delete(it, null, null) } catch (_: Exception) {} }
-            Log.w(TAG, "Não foi possível salvar o quadro diagnóstico do compositor", error)
-        } finally {
-            snapshot.recycle()
-        }
-    }
-
     private val stopping = AtomicBoolean(false)
     private val starting = AtomicBoolean(false)
 
@@ -644,27 +609,11 @@ class ScreenCaptureService : Service() {
                 }
                 if (stopping.get()) return@Thread
 
-                val diagnosticStartMs = SystemClock.elapsedRealtime()
-                var diagnosticFrameCaptured = false
                 val compositor = SceneCompositor(
                     outputSurface = encoderInputSurface,
                     width = width,
                     height = height,
                     fps = fps,
-                    onFrameRendered = { frame ->
-                        if (!diagnosticFrameCaptured &&
-                            SystemClock.elapsedRealtime() - diagnosticStartMs >= 60_000L) {
-                            diagnosticFrameCaptured = true
-                            try {
-                                val snapshot = frame.copy(Bitmap.Config.ARGB_8888, false)
-                                Thread({
-                                    saveCompositorDiagnosticFrame(snapshot)
-                                }, "LiveNexusDiagnosticPng").start()
-                            } catch (error: Exception) {
-                                Log.w(TAG, "Falha ao copiar quadro diagnóstico do compositor", error)
-                            }
-                        }
-                    },
                     onDiagnosticFrame = { frame -> BrowserSourceManager.completeSceneFrame(frame) }
                 )
                 sceneCompositor = compositor

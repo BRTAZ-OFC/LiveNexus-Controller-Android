@@ -26,7 +26,6 @@ class SceneCompositor(
     val width: Int,
     val height: Int,
     val fps: Int,
-    private val onFrameRendered: ((Bitmap) -> Unit)? = null,
     private val onDiagnosticFrame: ((Bitmap) -> Unit)? = null
 ) : AutoCloseable {
 
@@ -103,13 +102,6 @@ class SceneCompositor(
                         } catch (error: Exception) {
                             Log.w(TAG, "Falha ao obter quadro diagnóstico do compositor", error)
                         }
-                    }
-
-                    // Notifica prévia local se solicitado (a cada meio segundo)
-                    if (onFrameRendered != null && frameIndex % (safeFps / 2).coerceAtLeast(1) == 0L) {
-                        try {
-                            onFrameRendered.invoke(compositedBitmap)
-                        } catch (_: Exception) {}
                     }
 
                     if (useEgl) {
