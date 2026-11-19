@@ -228,6 +228,8 @@ class ScreenCaptureService : Service() {
 
     private fun createCaptureReader(width: Int, height: Int, handler: Handler): ImageReader {
         val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        var spareFrame: Bitmap? = null
+        var paddedFrame: Bitmap? = null
         reader.setOnImageAvailableListener({ source ->
             val image = try { source.acquireLatestImage() } catch (_: Exception) { null }
                 ?: return@setOnImageAvailableListener
@@ -240,19 +242,43 @@ class ScreenCaptureService : Service() {
                 if (pixelStride != 4 || rowStride < frameWidth * pixelStride) return@setOnImageAvailableListener
 
                 val paddedWidth = rowStride / pixelStride
-                val padded = Bitmap.createBitmap(paddedWidth, frameHeight, Bitmap.Config.ARGB_8888)
-                var frame: Bitmap? = null
-                try {
-                    padded.copyPixelsFromBuffer(plane.buffer)
-                    frame = if (paddedWidth == frameWidth) padded
-                        else Bitmap.createBitmap(padded, 0, 0, frameWidth, frameHeight)
-                    synchronized(bitmapLock) {
-                        val previous = latestScreenBitmap
-                        latestScreenBitmap = frame
-                        if (previous !== frame && previous != null && !previous.isRecycled) previous.recycle()
+                var frame = spareFrame
+                if (frame == null || frame.isRecycled || frame.width != frameWidth || frame.height != frameHeight) {
+                    if (frame != null && !frame.isRecycled) frame.recycle()
+                    frame = Bitmap.createBitmap(frameWidth, frameHeight, Bitmap.Config.ARGB_8888)
+                }
+                spareFrame = null
+
+                if (paddedWidth == frameWidth) {
+                    frame.copyPixelsFromBuffer(plane.buffer)
+                } else {
+                    var padded = paddedFrame
+                    if (padded == null || padded.isRecycled || padded.width != paddedWidth || padded.height != frameHeight) {
+                        if (padded != null && !padded.isRecycled) padded.recycle()
+                        padded = Bitmap.createBitmap(paddedWidth, frameHeight, Bitmap.Config.ARGB_8888)
+                        paddedFrame = padded
                     }
-                } finally {
-                    if (frame !== padded && !padded.isRecycled) padded.recycle()
+                    padded.copyPixelsFromBuffer(plane.buffer)
+                    val canvas = android.graphics.Canvas(frame)
+                    canvas.drawBitmap(
+                        padded,
+                        android.graphics.Rect(0, 0, frameWidth, frameHeight),
+                        android.graphics.Rect(0, 0, frameWidth, frameHeight),
+                        null
+                    )
+                }
+
+                synchronized(bitmapLock) {
+                    val previous = latestScreenBitmap
+                    latestScreenBitmap = frame
+                    if (previous !== frame) {
+                        if (previous != null && !previous.isRecycled &&
+                            previous.width == frameWidth && previous.height == frameHeight) {
+                            spareFrame = previous
+                        } else if (previous != null && !previous.isRecycled) {
+                            previous.recycle()
+                        }
+                    }
                 }
             } catch (error: Exception) {
                 Log.w(TAG, "Falha ao ler quadro da MediaProjection: ${error.message}")
