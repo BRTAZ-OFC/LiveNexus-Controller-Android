@@ -50,6 +50,19 @@ class LocalVideoEncoder(
     @Volatile var outputBitrateMode: String = "unknown"
         private set
 
+    @Volatile var codecSupportsCbr: String = "unknown"
+        private set
+    @Volatile var codecSupportsVbr: String = "unknown"
+        private set
+    @Volatile var codecSupportsSizeRate: String = "unknown"
+        private set
+    @Volatile var codecAvcProfiles: String = ""
+        private set
+    @Volatile var outputProfile: Int = 0
+        private set
+    @Volatile var outputLevel: Int = 0
+        private set
+
     private var spsFound: ByteArray? = null
     private var ppsFound: ByteArray? = null
 
@@ -92,6 +105,12 @@ class LocalVideoEncoder(
             configurationMode = "advanced-cbr"
             outputBitrateKbps = 0
             outputBitrateMode = "unknown"
+            codecSupportsCbr = "unknown"
+            codecSupportsVbr = "unknown"
+            codecSupportsSizeRate = "unknown"
+            codecAvcProfiles = ""
+            outputProfile = 0
+            outputLevel = 0
             try {
                 created.configure(buildFormat(includeAdvancedFlags = true), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             } catch (configErr: Exception) {
@@ -100,6 +119,22 @@ class LocalVideoEncoder(
                 try { created.release() } catch (_: Exception) {}
                 created = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
                 created.configure(buildFormat(includeAdvancedFlags = false), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            }
+
+            // Consultas somente diagnósticas: não podem impedir a transmissão.
+            try {
+                val capabilities = created.codecInfo.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                val encoderCapabilities = capabilities.encoderCapabilities
+                codecSupportsCbr = if (encoderCapabilities.isBitrateModeSupported(
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)) "yes" else "no"
+                codecSupportsVbr = if (encoderCapabilities.isBitrateModeSupported(
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)) "yes" else "no"
+                codecSupportsSizeRate = if (capabilities.videoCapabilities
+                    .areSizeAndRateSupported(width, height, fps.toDouble())) "yes" else "no"
+                codecAvcProfiles = capabilities.profileLevels
+                    .map { it.profile }.distinct().joinToString(",").take(200)
+            } catch (diagnosticError: Exception) {
+                Log.w(TAG, "Capacidades H.264 indisponíveis para diagnóstico", diagnosticError)
             }
 
             val createdSurface = created.createInputSurface()
@@ -138,6 +173,14 @@ class LocalVideoEncoder(
                                         else -> "unknown"
                                     }
                                 } catch (_: Exception) { "unknown" }
+                                outputProfile = try {
+                                    if (outFmt.containsKey(MediaFormat.KEY_PROFILE))
+                                        outFmt.getInteger(MediaFormat.KEY_PROFILE) else 0
+                                } catch (_: Exception) { 0 }
+                                outputLevel = try {
+                                    if (outFmt.containsKey(MediaFormat.KEY_LEVEL))
+                                        outFmt.getInteger(MediaFormat.KEY_LEVEL) else 0
+                                } catch (_: Exception) { 0 }
                                 onFormat(outFmt)
                                 extractSpsPpsFromFormat(outFmt)
                             }
