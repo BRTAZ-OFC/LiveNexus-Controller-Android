@@ -614,7 +614,7 @@ class ScreenCaptureService : Service() {
                     fps = fps,
                     onFrameRendered = { frame ->
                         if (!diagnosticFrameCaptured &&
-                            SystemClock.elapsedRealtime() - diagnosticStartMs >= 5_000L) {
+                            SystemClock.elapsedRealtime() - diagnosticStartMs >= 60_000L) {
                             diagnosticFrameCaptured = true
                             try {
                                 val snapshot = frame.copy(Bitmap.Config.ARGB_8888, false)
