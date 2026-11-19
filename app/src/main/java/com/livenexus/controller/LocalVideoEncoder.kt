@@ -70,11 +70,13 @@ class LocalVideoEncoder(
         get() = input ?: throw IllegalStateException("Encoder não iniciado.")
 
     private fun buildFormat(includeAdvancedFlags: Boolean): MediaFormat {
+        val repeatUs = (1_000_000L / fps.coerceAtLeast(1)).coerceAtLeast(16_666L)
         return MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrateKbps * 1000)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL_SECONDS)
+            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, repeatUs)
             if (includeAdvancedFlags) {
                 setInteger(
                     MediaFormat.KEY_BITRATE_MODE,
