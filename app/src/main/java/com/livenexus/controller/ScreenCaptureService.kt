@@ -497,7 +497,8 @@ class ScreenCaptureService : Service() {
                 // 2. Read user encoder settings from SharedPreferences
                 val prefs = getSharedPreferences(StreamingConfig.CAPTURE_PREFS, Context.MODE_PRIVATE)
                 val baseResolution = prefs.getInt("resolution", 1920)
-                val fps = if (prefs.getInt("fps", 60) <= 30) 30 else 60
+                val configuredFps = prefs.getInt("fps", 60)
+                val fps = if (configuredFps == 45) 45 else if (configuredFps <= 30) 30 else 60
                 val bitrateKbps = prefs.getInt("bitrate", 6000).coerceIn(2000, 10000)
                 val aspectRatio = prefs.getString("aspect_ratio", "16:9") ?: "16:9"
 

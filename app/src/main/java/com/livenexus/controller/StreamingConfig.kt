@@ -77,11 +77,11 @@ object StreamingConfig {
 
     fun loadFpsLabel(context: Context): String {
         val fps = getCapturePrefs(context).getInt("fps", 60)
-        return if (fps <= 30) "30 FPS" else "60 FPS"
+        return if (fps == 45) "45 FPS" else if (fps <= 30) "30 FPS" else "60 FPS"
     }
 
     fun saveFpsLabel(context: Context, label: String) {
-        val fps = if (label.startsWith("30")) 30 else 60
+        val fps = if (label.startsWith("45")) 45 else if (label.startsWith("30")) 30 else 60
         getCapturePrefs(context).edit().putInt("fps", fps).apply()
     }
 

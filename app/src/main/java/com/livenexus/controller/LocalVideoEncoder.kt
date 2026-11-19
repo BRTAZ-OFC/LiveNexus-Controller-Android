@@ -97,7 +97,7 @@ class LocalVideoEncoder(
         require(width > 0 && height > 0 && width % 2 == 0 && height % 2 == 0) {
             "Dimensões H.264 devem ser positivas e pares."
         }
-        require(fps == 30 || fps == 60) { "FPS deve ser 30 ou 60." }
+        require(fps == 30 || fps == 45 || fps == 60) { "FPS deve ser 30, 45 ou 60." }
         require(bitrateKbps in 1000..15000) {
             "Bitrate deve estar entre 1000 e 15000 Kbps."
         }

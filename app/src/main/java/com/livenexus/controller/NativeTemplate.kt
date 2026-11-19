@@ -1445,14 +1445,14 @@ internal class NativeTemplate(private val activity: Activity) {
         }
         add(resCard, resChoices, top = 6)
 
-        // FPS Card (30 / 60)
+        // FPS Card (30 / 45 / 60)
         val fpsCard = card(radius = 14f)
         val fpsHead = row()
         fpsHead.addView(icon("layers"), LinearLayout.LayoutParams(dp(18), dp(18)))
         fpsHead.addView(label("FPS (Taxa de Quadros)", 10f, true).apply { marginStart(dp(6)) })
         add(fpsCard, fpsHead)
         val fpsChoices = row()
-        listOf("30 FPS", "60 FPS").forEach { opt ->
+        listOf("30 FPS", "45 FPS", "60 FPS").forEach { opt ->
             weighted(fpsChoices, action(opt, selected = opt == fps, radius = 12f) {
                 fps = opt
                 StreamingConfig.saveFpsLabel(activity, opt)
